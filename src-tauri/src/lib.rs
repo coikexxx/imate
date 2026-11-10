@@ -1,3 +1,5 @@
+mod chat;
+mod prompts;
 mod runner;
 mod cli_registry;
 mod commands;
