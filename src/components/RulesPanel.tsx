@@ -2,17 +2,20 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { isValidRuleFilename } from "../lib/wizard";
-import type { RuleDoc } from "../types";
+import type { Agent, CliInfo, DraftInput, DraftMember, Project, RuleDoc } from "../types";
+import { AssistantDraftDialog } from "./AssistantDraftDialog";
 import { Button, inputClass } from "./ui";
 
 /** 项目页的规章面板。直接读写项目文件夹里的 .imates/rules/。 */
-export function RulesPanel({ projectId }: { projectId: string }) {
+export function RulesPanel({ projectId, project, agents, clis }: { projectId: string; project: Project; agents: Agent[]; clis: CliInfo[] }) {
   const [rules, setRules] = useState<RuleDoc[]>([]);
   const [templates, setTemplates] = useState<RuleDoc[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [newName, setNewName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [draftOpen, setDraftOpen] = useState(false);
+  const [assistantDraftPending, setAssistantDraftPending] = useState(false);
 
   /** 重新读取规章列表，并选中指定的那份（找不到就选第一份）。 */
   const reload = useCallback(
@@ -33,6 +36,12 @@ export function RulesPanel({ projectId }: { projectId: string }) {
 
   const saved = rules.find((rule) => rule.filename === selected);
   const dirty = saved !== undefined && saved.content !== draft;
+  const assistantReady = clis.some((cli) => cli.installed && cli.supported && ["claude", "codex"].includes(cli.id));
+  const context = (extra: Pick<DraftInput, "memberName" | "role" | "targetFilename">): Omit<DraftInput, "draftId" | "currentText" | "feedback"> => ({
+    ...extra, folderPath: project.folderPath, projectName: project.name, description: project.description,
+    rules: rules.map((rule) => rule.filename === selected ? { ...rule, content: draft } : rule),
+    members: agents.map((agent): DraftMember => ({ name: agent.name, role: agent.role, persona: agent.persona })),
+  });
   const unusedTemplates = templates.filter((t) => !rules.some((r) => r.filename === t.filename));
 
   /** 执行一个会改动文件的操作，失败时把原因显示出来。 */
@@ -48,6 +57,7 @@ export function RulesPanel({ projectId }: { projectId: string }) {
   function choose(rule: RuleDoc) {
     setSelected(rule.filename);
     setDraft(rule.content);
+    setAssistantDraftPending(false);
   }
 
   function save() {
@@ -113,6 +123,8 @@ export function RulesPanel({ projectId }: { projectId: string }) {
 
       {selected !== null && (
         <>
+          <Button disabled={!assistantReady || !saved} title={!assistantReady ? "没有已安装且已接入的 Claude Code 或 Codex" : "只重写当前选中规章"}
+            onClick={() => setDraftOpen(true)}>AI 重写当前规章</Button>
           <textarea
             className={`${inputClass} min-h-40 flex-1 font-mono`}
             aria-label="规章正文"
@@ -123,8 +135,8 @@ export function RulesPanel({ projectId }: { projectId: string }) {
             <Button variant="danger" onClick={remove}>
               删除
             </Button>
-            <Button variant="primary" disabled={!dirty} onClick={save}>
-              保存
+            <Button variant="primary" disabled={!dirty} onClick={() => { save(); setAssistantDraftPending(false); }}>
+              {assistantDraftPending ? "确认并保存草稿" : "保存"}
             </Button>
           </div>
         </>
@@ -164,6 +176,16 @@ export function RulesPanel({ projectId }: { projectId: string }) {
           </Button>
         </div>
       </div>
+      {draftOpen && saved && selected && <AssistantDraftDialog kind="rules" context={context({ memberName: null, role: null, targetFilename: saved.filename })}
+        initialDraft={[{ filename: saved.filename, content: draft }]} acceptLabel="确认并应用到编辑器"
+        onGenerate={api.draftRules}
+        onRewrite={(feedback, draftId, currentText) => api.draftRules({ ...context({ memberName: null, role: null, targetFilename: saved.filename }), draftId, currentText, feedback })}
+        onAccept={(value) => {
+          if (!Array.isArray(value) || value.length !== 1 || value[0].filename !== saved.filename) {
+            throw new Error("只允许应用当前选中的同名规章，请保留一份文件并使用原文件名");
+          }
+          setSelected(saved.filename); setDraft(value[0].content); setAssistantDraftPending(true);
+        }} onCancel={() => setDraftOpen(false)} />}
     </div>
   );
 }

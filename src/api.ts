@@ -6,6 +6,9 @@ import type {
   ProjectRuntime,
   SendMessageResponse,
   ProjectEventMap,
+  DraftInput,
+  DraftResponse,
+  AssistantDelta,
   AgentInput,
   CliInfo,
   NewProjectInput,
@@ -18,6 +21,11 @@ import type {
 
 // 后端失败时 invoke 会 reject，值是一句中文说明；调用方用 String(e) 展示即可。
 export const api = {
+  draftRules: (input: DraftInput) => invoke<DraftResponse>("draft_rules", { input }),
+  draftPersona: (input: DraftInput) => invoke<DraftResponse>("draft_persona", { input }),
+  cancelDraft: (draftId: string) => invoke<void>("cancel_draft", { draftId }),
+  listenAssistantEvent: (receive: (payload: AssistantDelta) => void) =>
+    listen<AssistantDelta>("assistant:delta", (event) => receive(event.payload)),
   listClis: () => invoke<CliInfo[]>("list_clis"),
   listMessages: (projectId: string, beforeId: number | null = null, limit = 50) =>
     invoke<Message[]>("list_messages", { projectId, beforeId, limit }),

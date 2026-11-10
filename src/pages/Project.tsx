@@ -16,6 +16,7 @@ import {
   type CliInfo,
   type PersonaTemplate,
   type ProjectDetail,
+  type RuleDoc,
 } from "../types";
 
 const EMPTY_AGENT_STATUSES: Record<string, import("../types").AgentStatus> = {};
@@ -36,6 +37,7 @@ export default function Project() {
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [clis, setClis] = useState<CliInfo[]>([]);
   const [templates, setTemplates] = useState<PersonaTemplate[]>([]);
+  const [projectRules, setProjectRules] = useState<RuleDoc[]>([]);
   const [editing, setEditing] = useState<Editing>(null);
   const [tab, setTab] = useState<"files" | "rules">("rules");
   const [error, setError] = useState<string | null>(null);
@@ -105,6 +107,11 @@ export default function Project() {
   }
 
   const editingAgent = editing?.kind === "edit" ? editing.agent : null;
+  const assistantReady = clis.some((cli) => cli.installed && cli.supported && ["claude", "codex"].includes(cli.id));
+  async function openAgentForm(target: Editing) {
+    try { setProjectRules(await api.listRules(id)); setEditing(target); }
+    catch (failure) { setError(String(failure)); }
+  }
 
   return (
     <div className="flex h-full flex-col">
@@ -135,8 +142,8 @@ export default function Project() {
           clis={clis}
           statuses={agentStatuses}
           onMention={(agent) => setMention(agent.name)}
-          onAdd={() => setEditing({ kind: "new" })}
-          onEdit={(agent) => setEditing({ kind: "edit", agent })}
+          onAdd={() => void openAgentForm({ kind: "new" })}
+          onEdit={(agent) => void openAgentForm({ kind: "edit", agent })}
         />
 
         <section className="grid min-h-0 grid-rows-[2fr_3fr] gap-3 p-3">
@@ -162,7 +169,7 @@ export default function Project() {
           <div className="min-h-0 flex-1 overflow-y-auto">
             {tab === "rules" ? (
               // 文件夹重新选定后路径会变，用 key 让规章面板重新读取，不必来回切页签
-              <RulesPanel key={`${detail.folderExists}:${project.folderPath}`} projectId={id} />
+              <RulesPanel key={`${detail.folderExists}:${project.folderPath}`} projectId={id} project={project} agents={agents} clis={clis} />
             ) : (
               <div className="h-full p-3">
                 <Pending title="文件树" stage="M4" />
@@ -187,6 +194,11 @@ export default function Project() {
             submitLabel={editingAgent ? "保存" : "添加"}
             onSubmit={saveAgent}
             onCancel={() => setEditing(null)}
+            draftContext={detail.folderExists && assistantReady ? {
+              folderPath: project.folderPath, projectName: project.name, description: project.description,
+              rules: projectRules, members: agents.map((agent) => ({ name: agent.name, role: agent.role, persona: agent.persona })),
+            } : undefined}
+            assistantUnavailableReason={!detail.folderExists ? "项目文件夹不存在，无法起草" : !assistantReady ? "没有已安装且已接入的 Claude Code 或 Codex" : undefined}
           />
           {editingAgent && !editingAgent.isLeader && (
             <div className="mt-4 border-t border-slate-800 pt-4">

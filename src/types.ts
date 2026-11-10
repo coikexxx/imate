@@ -108,3 +108,27 @@ export interface ProjectEventMap {
   "agent:status": AgentStatusEvent;
   "run:finished": RunFinished;
 }
+
+export interface DraftMember { name: string; role: string; persona: string }
+export interface DraftInput {
+  draftId: string;
+  folderPath: string;
+  projectName: string;
+  description: string;
+  rules: RuleDoc[];
+  members: DraftMember[];
+  memberName: string | null;
+  role: string | null;
+  currentText: string | null;
+  targetFilename: string | null;
+  feedback: string | null;
+}
+export interface DraftResponse {
+  draftId: string;
+  runId: string;
+  draft: RuleDoc[] | string | null;
+  rawText: string;
+  sessionId: string | null;
+  error: string | null;
+}
+export interface AssistantDelta { draftId: string; runId: string; seq: number; text: string }

@@ -1,9 +1,11 @@
 import { useState } from "react";
+import { api } from "../api";
 import { composePersona, emptyPersona, parsePersona } from "../lib/persona";
 import { normalizeName } from "../lib/mentions";
 import { validateAgent } from "../lib/wizard";
-import type { AgentInput, CliInfo, PersonaTemplate } from "../types";
+import type { AgentInput, CliInfo, DraftInput, PersonaTemplate } from "../types";
 import { PersonaEditor } from "./PersonaEditor";
+import { AssistantDraftDialog } from "./AssistantDraftDialog";
 import { Button, Field, inputClass } from "./ui";
 
 interface Props {
@@ -19,6 +21,8 @@ interface Props {
   /** 抛出的错误会显示在表单里 */
   onSubmit: (input: AgentInput) => void | Promise<void>;
   onCancel: () => void;
+  draftContext?: Omit<DraftInput, "draftId" | "currentText" | "feedback" | "memberName" | "role" | "targetFilename">;
+  assistantUnavailableReason?: string;
 }
 
 export function AgentForm({
@@ -30,6 +34,8 @@ export function AgentForm({
   submitLabel,
   onSubmit,
   onCancel,
+  draftContext,
+  assistantUnavailableReason,
 }: Props) {
   const [name, setName] = useState(initial?.name ?? "");
   const [role, setRole] = useState(initial?.role ?? "");
@@ -39,6 +45,7 @@ export function AgentForm({
   const [persona, setPersona] = useState(initial?.persona ?? composePersona(emptyPersona()));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [draftOpen, setDraftOpen] = useState(false);
 
   const template = templates.find((t) => t.role === role.trim());
 
@@ -137,9 +144,12 @@ export function AgentForm({
       <div className="space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-sm font-medium">人设</span>
-          <Button disabled={!template} onClick={() => template && setPersona(template.persona)}>
-            套用「{role.trim() || "预设角色"}」模板
-          </Button>
+          <div className="flex gap-2">
+            <Button disabled={!draftContext} title={assistantUnavailableReason} onClick={() => setDraftOpen(true)}>让助理起草</Button>
+            <Button disabled={!template} onClick={() => template && setPersona(template.persona)}>
+              套用「{role.trim() || "预设角色"}」模板
+            </Button>
+          </div>
         </div>
         <PersonaEditor value={persona} onChange={setPersona} />
         <p className="text-xs text-slate-500">
@@ -148,6 +158,7 @@ export function AgentForm({
       </div>
 
       {error && <p className="text-sm text-red-400">{error}</p>}
+      {!draftContext && <p className="text-xs text-slate-500">{assistantUnavailableReason ?? "选择项目文件夹并检测到已接入的 CLI 后可起草"}</p>}
 
       <div className="flex justify-end gap-2">
         <Button onClick={onCancel}>取消</Button>
@@ -155,6 +166,11 @@ export function AgentForm({
           {submitLabel}
         </Button>
       </div>
+      {draftOpen && draftContext && <AssistantDraftDialog kind="persona" context={{ ...draftContext, memberName: name.trim() || null,
+        role: role.trim() || null, targetFilename: null }} initialDraft={persona} onGenerate={api.draftPersona}
+        onRewrite={(feedback, draftId, currentText) => api.draftPersona({ ...draftContext, memberName: name.trim() || null,
+          role: role.trim() || null, targetFilename: null, draftId, currentText, feedback })}
+        onAccept={(draft) => { if (typeof draft === "string") setPersona(draft); }} onCancel={() => setDraftOpen(false)} />}
     </div>
   );
 }

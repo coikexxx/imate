@@ -3,8 +3,9 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { api } from "../api";
 import { MAX_AGENTS, validateBasics, validateRules, validateTeam } from "../lib/wizard";
-import type { AgentInput, CliInfo, PersonaTemplate, RuleDoc } from "../types";
+import type { AgentInput, CliInfo, DraftInput, DraftMember, PersonaTemplate, RuleDoc } from "../types";
 import { AgentForm } from "./AgentForm";
+import { AssistantDraftDialog } from "./AssistantDraftDialog";
 import { RulesEditor } from "./RulesEditor";
 import { Button, Field, inputClass } from "./ui";
 
@@ -25,6 +26,13 @@ export default function ProjectWizard() {
   const [clis, setClis] = useState<CliInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [rulesDraftOpen, setRulesDraftOpen] = useState(false);
+  const assistantReady = clis.some((cli) => cli.installed && cli.supported && ["claude", "codex"].includes(cli.id));
+  const assistantReason = assistantReady ? undefined : "没有已安装且已接入的 Claude Code 或 Codex";
+  const draftContext = (extra: Pick<DraftInput, "memberName" | "role" | "targetFilename">): Omit<DraftInput, "draftId" | "currentText" | "feedback"> => ({
+    ...extra, folderPath, projectName: name.trim(), description: description.trim(), rules,
+    members: agents.map((agent): DraftMember => ({ name: agent.name, role: agent.role, persona: agent.persona })),
+  });
 
   useEffect(() => {
     api.listRuleTemplates().then((templates) => {
@@ -158,6 +166,11 @@ export default function ProjectWizard() {
             <p className="text-sm text-slate-400">
               规章是全体成员都要遵守的规范，会保存到项目文件夹的 .imates/rules/ 里。至少保留一份。
             </p>
+            <div className="flex items-center gap-2">
+              <Button disabled={!assistantReady || !folderPath.trim() || !name.trim()} title={!folderPath.trim() ? "先选择项目文件夹" : !name.trim() ? "先填写项目名称" : assistantReason}
+                onClick={() => setRulesDraftOpen(true)}>让助理起草规章</Button>
+              {!assistantReady && <span className="text-xs text-slate-500">{assistantReason}</span>}
+            </div>
             <RulesEditor rules={rules} templates={ruleTemplates} onChange={setRules} />
           </div>
         )}
@@ -198,6 +211,8 @@ export default function ProjectWizard() {
                   submitLabel="添加"
                   onSubmit={addAgent}
                   onCancel={() => setAdding(false)}
+                  draftContext={folderPath.trim() && name.trim() && assistantReady ? draftContext({ memberName: null, role: null, targetFilename: null }) : undefined}
+                  assistantUnavailableReason={assistantReason}
                 />
               </div>
             ) : (
@@ -210,6 +225,11 @@ export default function ProjectWizard() {
       </section>
 
       {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
+
+      {rulesDraftOpen && <AssistantDraftDialog kind="rules" context={draftContext({ memberName: null, role: null, targetFilename: null })}
+        initialDraft={rules} onGenerate={api.draftRules}
+        onRewrite={(feedback, draftId, currentText) => api.draftRules({ ...draftContext({ memberName: null, role: null, targetFilename: null }), draftId, currentText, feedback })}
+        onAccept={(draft) => { if (Array.isArray(draft)) setRules(draft); }} onCancel={() => setRulesDraftOpen(false)} />}
 
       <footer className="mt-6 flex justify-between">
         <Button disabled={step === 0} onClick={goBack}>
