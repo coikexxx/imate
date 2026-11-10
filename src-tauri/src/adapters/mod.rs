@@ -1,3 +1,4 @@
+pub mod codex;
 pub mod claude;
 use std::ffi::OsString;
 use std::path::PathBuf;
