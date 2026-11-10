@@ -74,6 +74,9 @@ fn normalize(input: &NewAgent) -> AppResult<(&str, &str, Option<&str>)> {
     if !cli_registry::is_known(&input.cli) {
         return Err(AppError::Invalid(format!("不支持的 CLI：{}", input.cli)));
     }
+    if !cli_registry::is_supported(&input.cli) {
+        return Err(AppError::Invalid(format!("CLI {} 尚未接入，计划在 M5 实现", input.cli)));
+    }
     persona::validate(&input.persona)?;
     let model = input
         .model
@@ -115,7 +118,7 @@ pub fn create(conn: &Connection, project_id: &str, input: &NewAgent) -> AppResul
             "每个项目最多 {MAX_AGENTS} 个成员"
         )));
     }
-    if existing.iter().any(|a| a.name == name) {
+    if existing.iter().any(|a| a.name.trim().to_lowercase() == name.to_lowercase()) {
         return Err(AppError::Invalid(format!("成员名「{name}」已存在")));
     }
 
@@ -163,7 +166,7 @@ pub fn update(conn: &Connection, id: &str, input: &NewAgent) -> AppResult<Agent>
     let (name, role, model) = normalize(input)?;
     let old = get(conn, id)?;
     let siblings = list(conn, &old.project_id)?;
-    if siblings.iter().any(|a| a.id != id && a.name == name) {
+    if siblings.iter().any(|a| a.id != id && a.name.trim().to_lowercase() == name.to_lowercase()) {
         return Err(AppError::Invalid(format!("成员名「{name}」已存在")));
     }
     if old.is_leader && !input.is_leader {
@@ -383,6 +386,32 @@ mod tests {
         bad_persona.persona = "## 定位\n\n只有一段".to_string();
         assert!(matches!(
             create(&conn, &pid, &bad_persona),
+            Err(AppError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_case_insensitive_duplicate_and_unimplemented_cli() {
+        let (conn, pid) = setup();
+        create(&conn, &pid, &input("Dev", true)).unwrap();
+        assert!(matches!(
+            create(&conn, &pid, &input(" dev ", false)),
+            Err(AppError::Invalid(_))
+        ));
+
+        let mut unsupported = input("测试", false);
+        unsupported.cli = "grok".into();
+        let error = normalize(&unsupported).unwrap_err().to_string();
+        assert!(error.contains("M5"), "{error}");
+    }
+
+    #[test]
+    fn update_rejects_case_insensitive_duplicate() {
+        let (conn, pid) = setup();
+        create(&conn, &pid, &input("Dev", true)).unwrap();
+        let second = create(&conn, &pid, &input("QA", false)).unwrap();
+        assert!(matches!(
+            update(&conn, &second.id, &input("dev", false)),
             Err(AppError::Invalid(_))
         ));
     }

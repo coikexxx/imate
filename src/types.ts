@@ -4,6 +4,7 @@ export interface CliInfo {
   id: string;
   label: string;
   installed: boolean;
+  supported: boolean;
   path: string | null;
   version: string | null;
 }

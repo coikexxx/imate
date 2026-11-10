@@ -1,6 +1,7 @@
 mod cli_registry;
 mod commands;
 mod error;
+mod adapters;
 mod persona;
 mod project_setup;
 mod rules;
