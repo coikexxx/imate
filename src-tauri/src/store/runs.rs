@@ -89,6 +89,13 @@ pub fn finish(
 /// 将当前仍运行的记录原子标记为 interrupted，并返回本次被中断的快照。
 pub fn interrupt_running(conn: &Connection) -> AppResult<Vec<Run>> {
     let tx = conn.unchecked_transaction()?;
+    let interrupted = interrupt_running_in_transaction(&tx)?;
+    tx.commit()?;
+    Ok(interrupted)
+}
+
+/// 与运行所有权恢复共用调用方事务，防止 interrupted 和清理标记分离。
+pub fn interrupt_running_in_transaction(tx: &Connection) -> AppResult<Vec<Run>> {
     let project_ids = {
         let mut statement = tx.prepare(
             "SELECT DISTINCT p.id FROM runs r \
@@ -145,7 +152,6 @@ pub fn interrupt_running(conn: &Connection) -> AppResult<Vec<Run>> {
             }
         }
     }
-    tx.commit()?;
     Ok(runs)
 }
 

@@ -11,13 +11,12 @@ mod rules;
 mod store;
 mod templates;
 
-use std::sync::Mutex;
 
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let application = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -25,12 +24,15 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let conn = store::open(&data_dir.join("imates.db"))?;
-            app.manage(commands::AppState {
-                db: Mutex::new(conn),
-            });
+            app.manage(commands::AppState::new(conn, data_dir)?);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::list_messages,
+            commands::send_message,
+            commands::stop_project,
+            commands::get_project_runtime,
+            commands::confirm_runtime_cleanup,
             commands::list_clis,
             commands::list_projects,
             commands::create_project,
@@ -46,6 +48,26 @@ pub fn run() {
             commands::list_rule_templates,
             commands::list_persona_templates,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("无法构建 imates 应用");
+    let exiting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    application.run(move |app, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            use std::sync::atomic::Ordering;
+            if !exiting.swap(true, Ordering::SeqCst) {
+                api.prevent_exit();
+                let handle = app.clone();
+                if let Ok(mut runtime) = handle.state::<commands::AppState>().runtime_lock() { runtime.cancel_all(); }
+                tauri::async_runtime::spawn(async move {
+                    let start = tokio::time::Instant::now();
+                    loop {
+                        let empty = handle.state::<commands::AppState>().runtime_lock().map(|r| r.is_empty()).unwrap_or(false);
+                        if empty || start.elapsed() >= std::time::Duration::from_secs(8) { break; }
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                    handle.exit(0);
+                });
+            }
+        }
+    });
 }
