@@ -150,26 +150,21 @@ pub trait CliAdapter: Send + Sync {
 
 ### 各 CLI 的调用方式
 
-下表来自各 CLI 的 `--help`，标"实测"的项在 M0 阶段逐个验证并回填本表。
+下表里 claude、codex、grok、dsh 经 M0 实测确认。pi 未安装，顺延到 M5。细节见 [CLI 实测记录](CLI实测记录.md)。
 
 | CLI | 无头调用 | 流式输出 | 续接 | 讨论模式（只读） | 执行模式（自动） | 本机状态 |
 |---|---|---|---|---|---|---|
-| claude | `claude -p` | `--output-format stream-json --verbose` | `--resume <id>` | `--permission-mode plan` | `--permission-mode bypassPermissions`（实测） | 已装 2.1.319 |
-| codex | `codex exec --skip-git-repo-check`（实测） | `--json`（实测） | `codex exec resume <id>` | `-c sandbox_mode="read-only"`（实测） | `-c sandbox_mode="workspace-write" -c approval_policy="never"`（实测） | 已装 0.167.0 |
-| grok | `grok -p --cwd <dir>` | `--output-format streaming-json` | `-r <id>` | `--permission-mode plan` | `--permission-mode bypassPermissions`（实测） | 已装 1.0.77 |
-| dsh | `dsh headless "<任务>"` | 实测 | 实测（帮助里有 `--resume <session>`） | 实测 | 实测 | 已装 0.2.2-rc.1，仅 `.cmd` 垫片 |
+| claude | `claude -p`，提示词经 stdin | `--output-format stream-json --verbose`，本次没有 token 增量 | `--resume <session_id>`，ID 不变 | `--permission-mode plan`（拦住工作目录里的写，但会写自己的计划目录） | `--permission-mode bypassPermissions`（能写到工作目录外） | 已装 2.1.319 |
+| codex | `codex exec --json -C <dir> -`，提示词经 stdin | `--json`，整段 `agent_message`，没有 token 增量 | `codex exec resume <thread_id> --json -`（不能加 `-s`） | `-s read-only` | `-s workspace-write`（能写到工作目录外） | 已装 0.167.0 |
+| grok | `grok --prompt-file <文件> --cwd <dir>` | `--output-format streaming-messages-json`，整段消息。要逐字增量改用 `streaming-json` | `-r <session_id>`，ID 不变 | `--permission-mode plan`（拦住工作目录里的写，但会写自己的会话目录） | `--permission-mode bypassPermissions`（能写到工作目录外） | 已装 1.0.77 |
+| dsh | `dsh headless -`，提示词经 stdin；先 `cd` 到工作目录。Git Bash 用 `cmd //c` | `--json`，整段 `text`，另有 `thinking`。用量在 `step_end.usage`（camelCase） | `--session-id <id>`，ID 不变，`turn` 递增 | `--permission-mode read-only --approval-policy never`（沙箱拒绝写入） | `--permission-mode workspace-write --approval-policy never`（能写到工作目录外） | 已装 0.2.2-rc.1，仅 `.cmd` 垫片 |
 | pi | 实测 | 实测 | 实测 | 实测 | 实测 | 未安装，M5 前需先装 |
 
-codex 一行参考了开源项目 The Pair 在 codex 0.166 上的实测结论，M0 要在本机版本上逐项核对：
+某个 CLI 没有只读模式时的兜底：讨论模式仍用它的默认模式运行，并在提示词里明确要求"本回合只讨论，不要修改任何文件"。claude 和 grok 的 `plan` 属于这种情况，提示词兜底仍然要留。dsh 没有 `--model`，模型在 profile 配置里，`agents.model` 对它不起作用。
 
-- `exec resume` 不接受 `-s`，沙箱模式只能用 `-c sandbox_mode=` 指定。首回合和续接回合统一用这种写法。
-- 不在 git 仓库里时，不加 `--skip-git-repo-check` 会拒绝启动。
-- 用户自己的配置若要求审批，无头的执行回合会卡在没人回答的审批上，所以执行模式显式指定 `approval_policy="never"`，由沙箱负责边界。
-- 用量是线程累计值，不是本回合的值。
+M0 确认：claude 的 `bypassPermissions`、codex 的 `workspace-write`、grok 的 `bypassPermissions` 和 dsh 的 `workspace-write` 都能把文件写到工作目录之外。
 
-claude 一行也有两点待 M0 核对：`plan` 模式下模型会不会把讨论发言写成"计划"；会话开始事件里的权限模式字段是否如实反映生效的模式。
-
-某个 CLI 没有只读模式时的兜底：讨论模式仍用它的默认模式运行，并在提示词里明确要求"本回合只讨论，不要修改任何文件"。
+参考项目里的 codex 写法（`--skip-git-repo-check`、`-c sandbox_mode=`、`approval_policy="never"`）这次没有单独重跑。本机跑通的是上表的 `-s`。非 git 目录、用量累计对照也没有单独重跑。适配器仍按本节前面的进程模型处理非 git 目录、权限模式核对和用量折算，字段以实测记录为准。
 
 ### 安全边界
 

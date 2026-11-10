@@ -1,0 +1,2 @@
+{"type":"error","message":"session \"session-does-not-exist\" does not exist; omit --session-id to start a new Session"}
+dsh: session "session-does-not-exist" does not exist; omit --session-id to start a new Session
