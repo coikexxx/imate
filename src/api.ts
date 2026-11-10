@@ -1,6 +1,11 @@
+import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   Agent,
+  Message,
+  ProjectRuntime,
+  SendMessageResponse,
+  ProjectEventMap,
   AgentInput,
   CliInfo,
   NewProjectInput,
@@ -14,6 +19,14 @@ import type {
 // 后端失败时 invoke 会 reject，值是一句中文说明；调用方用 String(e) 展示即可。
 export const api = {
   listClis: () => invoke<CliInfo[]>("list_clis"),
+  listMessages: (projectId: string, beforeId: number | null = null, limit = 50) =>
+    invoke<Message[]>("list_messages", { projectId, beforeId, limit }),
+  sendMessage: (projectId: string, content: string) => invoke<SendMessageResponse>("send_message", { projectId, content }),
+  stopProject: (projectId: string) => invoke<void>("stop_project", { projectId }),
+  getProjectRuntime: (projectId: string) => invoke<ProjectRuntime>("get_project_runtime", { projectId }),
+  confirmRuntimeCleanup: (runId: string) => invoke<void>("confirm_runtime_cleanup", { runId }),
+  listenProjectEvent: <K extends keyof ProjectEventMap>(name: K, receive: (payload: ProjectEventMap[K]) => void) =>
+    listen<ProjectEventMap[K]>(name, (event) => receive(event.payload)),
 
   listProjects: () => invoke<ProjectSummary[]>("list_projects"),
   createProject: (input: NewProjectInput) => invoke<Project>("create_project", { input }),

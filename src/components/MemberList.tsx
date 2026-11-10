@@ -1,15 +1,17 @@
 import { MAX_AGENTS } from "../lib/wizard";
-import type { Agent, CliInfo } from "../types";
+import type { Agent, AgentStatus, CliInfo } from "../types";
 import { Button } from "./ui";
 
 interface Props {
   agents: Agent[];
   clis: CliInfo[];
   onAdd: () => void;
+  statuses?: Record<string, AgentStatus>;
+  onMention?: (agent: Agent) => void;
   onEdit: (agent: Agent) => void;
 }
 
-export function MemberList({ agents, clis, onAdd, onEdit }: Props) {
+export function MemberList({ agents, clis, onAdd, onEdit, statuses = {}, onMention }: Props) {
   const labelOf = (cliId: string) => clis.find((c) => c.id === cliId)?.label ?? cliId;
 
   return (
@@ -34,9 +36,9 @@ export function MemberList({ agents, clis, onAdd, onEdit }: Props) {
               <div className="text-xs text-slate-400">
                 {agent.role} · {labelOf(agent.cli)}
               </div>
-              {/* 实时状态在 M2 接入；此阶段没有进程在运行，恒为空闲 */}
-              <div className="text-xs text-slate-500">空闲</div>
+              <div className="text-xs text-sky-400">{({ idle: "空闲", thinking: "思考中", talking: "发言中", working: "工具运行中", error: "执行出错" })[statuses[agent.id] ?? "idle"]}</div>
             </button>
+            {onMention && <button type="button" className="px-2 text-xs text-slate-400 hover:text-sky-300" onClick={() => onMention(agent)}>@ 点名</button>}
           </li>
         ))}
       </ul>

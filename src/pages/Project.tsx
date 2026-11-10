@@ -1,6 +1,9 @@
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
+import { useStore } from "zustand";
+import { ChatPanel } from "../components/ChatPanel";
+import { projectStore } from "../stores/project";
 import { api } from "../api";
 import { AgentForm } from "../components/AgentForm";
 import { MemberList } from "../components/MemberList";
@@ -14,6 +17,8 @@ import {
   type PersonaTemplate,
   type ProjectDetail,
 } from "../types";
+
+const EMPTY_AGENT_STATUSES: Record<string, import("../types").AgentStatus> = {};
 
 type Editing = { kind: "new" } | { kind: "edit"; agent: Agent } | null;
 
@@ -34,10 +39,16 @@ export default function Project() {
   const [editing, setEditing] = useState<Editing>(null);
   const [tab, setTab] = useState<"files" | "rules">("rules");
   const [error, setError] = useState<string | null>(null);
+  const [mention, setMention] = useState<string | undefined>();
+  const activeRunId = useStore(projectStore, (state) => state.projectId === id ? state.activeRunId : null);
+  const agentStatuses = useStore(projectStore, (state) => state.projectId === id ? state.agentStatuses : EMPTY_AGENT_STATUSES);
+  const consumeMention = useCallback(() => setMention(undefined), []);
 
   const reload = useCallback(async () => {
     setDetail(await api.getProject(id));
   }, [id]);
+
+  const refreshAfterRun = useCallback(() => { reload().catch((e) => setError(String(e))); }, [reload]);
 
   useEffect(() => {
     reload().catch((e) => setError(String(e)));
@@ -103,7 +114,7 @@ export default function Project() {
         </Link>
         <h1 className="text-base font-semibold">{project.name}</h1>
         <span className="rounded bg-slate-800 px-2 py-0.5 text-xs">
-          {STATUS_LABELS[project.status]}
+          {activeRunId ? "执行中" : STATUS_LABELS[project.status]}
         </span>
         <span className="truncate text-xs text-slate-500" title={project.folderPath}>
           {project.folderPath}
@@ -122,13 +133,15 @@ export default function Project() {
         <MemberList
           agents={agents}
           clis={clis}
+          statuses={agentStatuses}
+          onMention={(agent) => setMention(agent.name)}
           onAdd={() => setEditing({ kind: "new" })}
           onEdit={(agent) => setEditing({ kind: "edit", agent })}
         />
 
         <section className="grid min-h-0 grid-rows-[2fr_3fr] gap-3 p-3">
           <Pending title="像素办公室" stage="M4" />
-          <Pending title="群聊与指令" stage="M2" />
+          <ChatPanel projectId={id} agents={agents} folderExists={detail.folderExists} mention={mention} onMentionUsed={consumeMention} onFinished={refreshAfterRun} />
         </section>
 
         <aside className="flex min-h-0 flex-col border-l border-slate-800">

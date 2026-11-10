@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { composePersona, emptyPersona, parsePersona } from "../lib/persona";
+import { normalizeName } from "../lib/mentions";
 import { validateAgent } from "../lib/wizard";
 import type { AgentInput, CliInfo, PersonaTemplate } from "../types";
 import { PersonaEditor } from "./PersonaEditor";
@@ -32,7 +33,7 @@ export function AgentForm({
 }: Props) {
   const [name, setName] = useState(initial?.name ?? "");
   const [role, setRole] = useState(initial?.role ?? "");
-  const [cli, setCli] = useState(initial?.cli ?? clis.find((c) => c.installed)?.id ?? "");
+  const [cli, setCli] = useState(initial?.cli ?? clis.find((c) => c.installed && c.supported)?.id ?? "");
   const [model, setModel] = useState(initial?.model ?? "");
   const [isLeader, setIsLeader] = useState(forceLeader || (initial?.isLeader ?? false));
   const [persona, setPersona] = useState(initial?.persona ?? composePersona(emptyPersona()));
@@ -58,7 +59,10 @@ export function AgentForm({
       model: model.trim() || null,
       isLeader,
     };
-    const problem = validateAgent(input, takenNames);
+    const selected = clis.find((c) => c.id === cli);
+    const duplicate = takenNames.some((other) => normalizeName(other) === normalizeName(input.name));
+    const problem = duplicate ? `成员名「${input.name}」已存在` :
+      !selected?.supported ? "该 CLI 尚未接入，M5 阶段实现" : !selected.installed ? "请先安装所选 CLI" : validateAgent(input, takenNames);
     if (problem) {
       setError(problem);
       return;
@@ -105,9 +109,9 @@ export function AgentForm({
               请选择
             </option>
             {clis.map((c) => (
-              <option key={c.id} value={c.id} disabled={!c.installed}>
+              <option key={c.id} value={c.id} disabled={!c.installed || !c.supported}>
                 {c.label}
-                {c.installed ? (c.version ? `（${c.version}）` : "") : "（未安装）"}
+                {!c.supported ? "（M5 接入）" : c.installed ? (c.version ? `（${c.version}）` : "") : "（未安装）"}
               </option>
             ))}
           </select>
@@ -139,7 +143,7 @@ export function AgentForm({
         </div>
         <PersonaEditor value={persona} onChange={setPersona} />
         <p className="text-xs text-slate-500">
-          边界是写给 Agent 看的软约束，应用不做硬性拦截；各 CLI 的沙箱强度也不相同。
+          人设边界属于提示词约束。执行模式会自动运行工具，可能写出项目目录；CLI 会继承自身的用户与项目配置。
         </p>
       </div>
 
