@@ -148,7 +148,8 @@ export default function Project() {
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto">
             {tab === "rules" ? (
-              <RulesPanel projectId={id} />
+              // 文件夹重新选定后路径会变，用 key 让规章面板重新读取，不必来回切页签
+              <RulesPanel key={`${detail.folderExists}:${project.folderPath}`} projectId={id} />
             ) : (
               <div className="h-full p-3">
                 <Pending title="文件树" stage="M4" />
