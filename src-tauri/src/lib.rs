@@ -1,3 +1,4 @@
+mod runner;
 mod cli_registry;
 mod commands;
 mod error;
