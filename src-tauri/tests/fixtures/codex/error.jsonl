@@ -1,0 +1,10 @@
+{"type":"thread.started","thread_id":"01a1c3f5-908c-72f1-8877-bc97139d21c0"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `no-such-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 1/5 (unexpected status 404 Not Found: Model \"no-such-model\" is not supported by any configured account in this group, url: https://<API_HOST>/responses, request id: 27167e03-4e64-440e-b051-59174e1ffbda)"}
+{"type":"error","message":"Reconnecting... 2/5 (unexpected status 404 Not Found: Model \"no-such-model\" is not supported by any configured account in this group, url: https://<API_HOST>/responses, request id: 53f4d446-61a8-4b2c-8ae3-dfae335a5ff1)"}
+{"type":"error","message":"Reconnecting... 3/5 (unexpected status 404 Not Found: Model \"no-such-model\" is not supported by any configured account in this group, url: https://<API_HOST>/responses, request id: f07f9add-1627-420a-b805-57cb8fdda128)"}
+{"type":"error","message":"Reconnecting... 4/5 (unexpected status 404 Not Found: Model \"no-such-model\" is not supported by any configured account in this group, url: https://<API_HOST>/responses, request id: e5f6399c-84c1-478e-8267-f585263c96a2)"}
+{"type":"error","message":"Reconnecting... 5/5 (unexpected status 404 Not Found: Model \"no-such-model\" is not supported by any configured account in this group, url: https://<API_HOST>/responses, request id: d3a295a9-ccca-4028-b835-5fe888c60f84)"}
+{"type":"error","message":"unexpected status 404 Not Found: Model \"no-such-model\" is not supported by any configured account in this group, url: https://<API_HOST>/responses, request id: e567fcdd-9496-4b67-a353-4ac9094d7f5b"}
+{"type":"turn.failed","error":{"message":"unexpected status 404 Not Found: Model \"no-such-model\" is not supported by any configured account in this group, url: https://<API_HOST>/responses, request id: e567fcdd-9496-4b67-a353-4ac9094d7f5b"}}
