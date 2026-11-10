@@ -1,4 +1,5 @@
 mod chat;
+mod assistant;
 mod prompts;
 mod runner;
 mod cli_registry;
@@ -28,6 +29,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::draft_rules,
+            commands::draft_persona,
+            commands::cancel_draft,
             commands::list_messages,
             commands::send_message,
             commands::stop_project,

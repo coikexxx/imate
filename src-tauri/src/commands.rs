@@ -26,6 +26,7 @@ use crate::templates::{self, PersonaTemplate};
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub runtime: Mutex<ActiveRuns>,
+    pub draft_sessions: Mutex<crate::assistant::DraftSessions>,
     pub data_dir: PathBuf,
     instance: String,
 }
@@ -326,6 +327,13 @@ impl ActiveRuns {
         for key in keys { self.cancel(&key); }
     }
     pub fn is_empty(&self) -> bool { self.runs.is_empty() }
+    pub fn run_for(&self, key: &str) -> Option<String> { self.runs.get(key).map(|(id, _)| id.clone()) }
+    pub fn replace_reservation(&mut self, key: &str, old_id: &str, run_id: &str) {
+        if let Some((id, _)) = self.runs.get_mut(key) { *id = run_id.to_string(); }
+        for id in self.directories.values_mut() { if id == old_id { *id = run_id.to_string(); } }
+        for id in self.sessions.values_mut() { if id == old_id { *id = run_id.to_string(); } }
+        self.generations.remove(old_id); self.generations.insert(run_id.to_string(), 0);
+    }
 }
 
 pub struct StartedMessage {
@@ -343,7 +351,8 @@ pub struct SendMessageResponse { pub run_id: String, pub user_message: Message, 
 
 impl AppState {
     pub fn new(conn: Connection, data_dir: PathBuf) -> AppResult<Self> {
-        let state = Self { db: Mutex::new(conn), runtime: Mutex::new(ActiveRuns::default()), data_dir, instance: crate::store::new_id() };
+        let state = Self { db: Mutex::new(conn), runtime: Mutex::new(ActiveRuns::default()),
+            draft_sessions: Mutex::new(crate::assistant::DraftSessions::default()), data_dir, instance: crate::store::new_id() };
         state.recover()?; Ok(state)
     }
     pub fn db_lock(&self) -> AppResult<MutexGuard<'_, Connection>> {
@@ -661,6 +670,30 @@ pub async fn stop_project(state: State<'_, AppState>, project_id: String) -> App
         let start = tokio::time::Instant::now();
         while state.runtime_lock()?.current(&project_id, &run_id) {
             if start.elapsed() > Duration::from_secs(8) { return Err(AppError::Invalid("停止仍在清理中，请检查运行状态".into())); }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn draft_rules(app: tauri::AppHandle, state: State<'_, AppState>, input: crate::assistant::DraftInput) -> AppResult<crate::assistant::DraftResponse> {
+    crate::assistant::run_draft(app, &state, crate::assistant::DraftKind::Rules, input).await
+}
+
+#[tauri::command]
+pub async fn draft_persona(app: tauri::AppHandle, state: State<'_, AppState>, input: crate::assistant::DraftInput) -> AppResult<crate::assistant::DraftResponse> {
+    crate::assistant::run_draft(app, &state, crate::assistant::DraftKind::Persona, input).await
+}
+
+#[tauri::command]
+pub async fn cancel_draft(state: State<'_, AppState>, draft_id: String) -> AppResult<()> {
+    let run_id = state.close_draft(&draft_id)?;
+    if let Some(run_id) = run_id {
+        let key = format!("draft:{draft_id}");
+        let start = tokio::time::Instant::now();
+        while state.runtime_lock()?.current(&key, &run_id) {
+            if start.elapsed() >= Duration::from_secs(8) { return Err(AppError::Invalid("助理仍在清理中，请检查残留进程".into())); }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
