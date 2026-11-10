@@ -5,14 +5,14 @@
 
 ## 证据范围与待验证项
 
-本文件原有命令和行为均为 Windows 11 的 M0 历史记录；保留原命令中的 `-C/--cwd` 等参数，不按设计改写实测证据。M2 应用统一通过子进程 current_dir 设置目录，省略这些参数后的行为须在对应平台验证。下面是评审后的待办矩阵，**不是新增实测结果**；本次方案修订没有运行真实 CLI。
+本文件原有命令和行为是 Windows 11 的 M0 历史记录；保留原命令中的 `-C/--cwd` 等参数，不按设计改写实测证据。M2 macOS 实测另列于后，不能外推 Windows。M2 应用通过子进程 current_dir 设置目录，省略目录参数后的结论仅对已记录的平台和版本成立。
 
 | 平台/CLI | 已有证据 | 待验证项 | 状态 |
 |---|---|---|---|
 | Windows / claude 2.1.319 | init 回显模式、同模式续接、plan 拒绝项目写入、执行可写上级目录 | 跨模式续接、result.usage/费用的本回合语义、新 runner 的进程树处理 | 未验证 |
 | Windows / codex 0.167.0 | 新线程 read-only/workspace-write 行为、续接记忆；thread.started 不回显权限 | G1 resume 权限覆盖及 Discuss → Execute → Discuss；G2 累计/本回合语义；非 git cwd；新 runner 清理 | 未验证 |
 | Windows / grok 1.0.77、dsh 0.2.2-rc.1 | 下文已有场景；grok 回显模式，dsh 不回显 | M5 跨模式续接、用量归一、应用 current_dir 与进程行为 | 未验证 |
-| macOS / claude、codex | 无 M0 样本 | G1/G2/G3：记录本机版本，桌面 PATH、非 git cwd、权限/续接、用量与取消/退出/异常残留 | 未执行 |
+| macOS / Claude Code 2.1.322、Codex 0.167.0 | G1/G2 CLI 基线；G3 Claude 模式回显和续接；M2 应用对话、点名、停止与草稿保存见后文 | Claude 工具层拒写；Finder/Dock PATH；异常退出后的实际恢复；Windows runner 独立验证 | 部分通过 |
 | pi | M0 未安装 | M5 安装登录后重新实测 | 未执行 |
 
 判定规则：权限回显只能证明回显内容，文件写入行为只对已记录的平台/CLI 版本/模式成立；能写上级目录只证明项目目录不是可靠边界，不能推断全盘写权限。用量字段存在不等于其语义已确认；第二回合数值变大不能证明累计，无法判定时归一值保持 None、保留 rawUsage。
@@ -228,6 +228,18 @@ Codex 运行期间 stdout 出现了两个 `item.type=error` 配置诊断事件�
 
 CLI stderr 出现插件元数据警告及远程插件缓存 401，实际模型回合仍成功。这只证明观测到了这些诊断，不证明全部 hooks/MCP/插件启用，也不等于模型登录失败。
 
-### 尚未执行
+### 尚未执行项（截至 2026-11-10 前置验证）
 
 G3 的 Finder/Dock 环境、runner 进程树取消/超时/正常退出、异常恢复和 UI 交互仍待对应 Task；本次尚未写生产代码。Claude 工具层拒写的验收口径需先解决，不能标 M2 完成。
+
+## M2 实施验收补记（macOS，2026-11-11）
+
+环境为 macOS 27.0.1（26A434）arm64，Claude Code 2.1.322、Codex 0.167.0。通过 `open` 从开发终端启动本机调试应用；这不等同于 Finder/Dock 脱离终端环境的启动验收。所有真实 CLI 交互均在仓库外的临时项目中完成，原始响应没有进入仓库。
+
+- Claude 与 Codex 均完成文件创建、读取及同一 CLI 会话续接；`@成员` 消息实际路由到 Codex 成员。
+- UI Stop 后 run 记为 `cancelled`，运行所有权记录被清除。runner 自动化已覆盖真实测试子进程的 stdin、静默超时、工具超时、持续 stderr、长行、EOF 宽限、取消和 Unix 进程树清理；异常杀 app 后的真实残留与恢复没有手动测试。
+- 助理实际生成四段人设并用反馈续接同一会话，确认后才保存。规章草稿应用到编辑器不写磁盘，只有明确确认保存后才写入。取消向导和成员表单均未留下保存结果。
+- 代码测试覆盖启动恢复、interrupted 状态、运行所有权及同目录清理确认阻塞；app 异常退出后的实际重启和人工清理确认仍未手动验收。Windows runner 平台行为未验证。
+- Claude `system/init.permissionMode` 回显与续接已核对，但 Discuss 请求没有触发写工具，所以本机没有工具层拒写证据；该能力状态为“模式已核对、工具层拒写未验证”，不宣称硬隔离。
+
+以上仅适用于所记 macOS/CLI 版本和启动路径。Claude 工具层拒写、Finder/Dock PATH、异常恢复手验及 Windows runner 验收未完成，因此 M2 尚未达到手册中的全部验收标准。

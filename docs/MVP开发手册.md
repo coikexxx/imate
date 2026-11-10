@@ -1,6 +1,6 @@
 # imates MVP 开发手册
 
-> 版本：2026-11-10（第 4 版，按 M2 多 Agent 评审校准权限、运行契约与 M3 前置规则）· 状态：M1 已完成
+> 版本：2026-11-11（第 4 版，按 M2 多 Agent 评审校准权限、运行契约与 M3 前置规则）· 状态：M1 已完成；M2 实现已完成，实际验收未闭环
 > 实施计划：[M0 CLI 实测](plans/2026-11-10-M0-CLI实测.md)、[M1 骨架](plans/2026-11-10-M1-骨架.md)、[M2 单 Agent 对话](plans/2026-11-10-M2-单Agent对话.md)
 > 设计依据：[参考项目调研](参考项目调研.md)
 
@@ -173,8 +173,8 @@ M0 确认：claude 的 `bypassPermissions`、codex 的 `workspace-write`、grok 
 
 | CLI | M0 权限证据 | 会话与模式切换 | 用量归一规则 | 接入阶段 |
 |---|---|---|---|---|
-| claude | `system/init.permissionMode` 可核对；`plan` 拒绝项目写入但会写自己的计划目录 | 同模式续接已验证；跨模式切换待 G3 | 有 `result.usage` / 费用字段；按 G3 确认本回合语义，禁止重复累加 assistant usage | M2 |
-| codex | `thread.started` 无权限字段；Windows 新会话沙箱行为已有样本 | 续接记忆已验证，续接覆盖沙箱和跨模式切换待 G1 | `turn.completed.usage` 是否累计待 G2；缓存输入不重复计入 input | M2 |
+| claude | `system/init.permissionMode` 可核对；Windows M0 有拒写样本，macOS 2.1.322 工具层拒写仍未验证；`plan` 会写自己的计划目录 | macOS 同会话 plan → bypassPermissions → plan 已验证模式回显和续接，不能据此声称工具层拒写 | macOS G3 对照了 `result.usage` 与 `model_usage_since_last_result`；后者提供本回合费用，`total_cost_usd` 为会话累计；不重复累加 assistant usage | M2 |
+| codex | `thread.started` 无权限字段；Windows M0 有新会话样本，macOS 0.167.0 G1 已有工具和文件事实 | macOS 同模式续接与 Discuss → Execute → Discuss 已通过 G1；结果不外推其他版本/平台 | macOS G2 已证实 `turn.completed.usage` 为线程累计，同会话按可靠基线取差；缓存输入不重复计入 input | M2 |
 | grok | `system/init.permissionMode` 可核对；讨论模式仍写自己的会话目录 | 同模式续接已验证，跨模式切换未验证 | 存在 `result.usage`，本回合/累计语义待 M5 对照 | M5 |
 | dsh | `session` 不回显权限；Windows 沙箱行为已有样本 | 续接可传权限参数，但跨模式切换未验证 | 按 `step_end.usage` 的步级计数归集；必须验证不重复纳入 `final` 或累计字段 | M5 |
 | pi | 未安装、无样本 | 未验证 | 未验证 | M5 |
@@ -608,6 +608,8 @@ agents: name_key                             -- trim().to_lowercase()，项目�
 | M4 文件与动画 | 文件监听与文件树、外部修改规章文件的检测、像素办公室 | 改动的文件高亮；状态变化实时反映到小人 |
 | M5 其余适配器 | grok、dsh、pi | 五种 CLI 都能当成员参与讨论和执行 |
 | M6 打磨打包 | 设置页、报错文案、用量展示、Win 与 mac 安装包 | 在干净机器上可安装使用 |
+
+M2 当前已完成实现和自动化检查，macOS 实际 CLI/UI 验收部分通过。Claude Discuss 的工具层拒写证据、Finder/Dock 启动 PATH、异常退出后的真实恢复流程仍未验收；Windows runner 平台测试也未执行。按上述验收标准，M2 暂不标为完成。
 
 依赖关系：M0 与 M1 互不依赖，可以并行；M2 同时依赖 M0 和 M1；M2 → M3 必须按序。M4 的文件树只依赖 M1，像素办公室依赖 M2 的状态事件；M5 依赖 M2。M4 和 M5 可以在 M3 之后以任意顺序进行。
 
