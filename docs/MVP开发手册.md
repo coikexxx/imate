@@ -144,14 +144,14 @@ pub trait CliAdapter: Send + Sync {
 
 ### 各 CLI 的调用方式
 
-下表里 claude、codex、grok 经 M0 实测确认。dsh 因当时环境里没有 `DEEPSEEK_API_KEY`，标「未跑通」的格子只来自 `--help`。细节见 [CLI 实测记录](CLI实测记录.md)。
+下表里 claude、codex、grok 经 M0 实测确认。dsh 的参数来自 `--help` 和 2026-11-10 的进程输出：密钥已被接受，模型回合因 DeepSeek 余额不足（`QUOTA` 402）没有跑完，写文件和正文行为还没有证实。细节见 [CLI 实测记录](CLI实测记录.md)。
 
 | CLI | 无头调用 | 流式输出 | 续接 | 讨论模式（只读） | 执行模式（自动） | 本机状态 |
 |---|---|---|---|---|---|---|
 | claude | `claude -p`，提示词经 stdin | `--output-format stream-json --verbose`，本次没有 token 增量 | `--resume <session_id>`，ID 不变 | `--permission-mode plan`（拦住工作目录里的写，但会写自己的计划目录） | `--permission-mode bypassPermissions`（能写到工作目录外） | 已装 2.1.319 |
 | codex | `codex exec --json -C <dir> -`，提示词经 stdin | `--json`，整段 `agent_message`，没有 token 增量 | `codex exec resume <thread_id> --json -`（不能加 `-s`） | `-s read-only` | `-s workspace-write`（能写到工作目录外） | 已装 0.167.0 |
 | grok | `grok --prompt-file <文件> --cwd <dir>` | `--output-format streaming-messages-json`，整段消息。要逐字增量改用 `streaming-json` | `-r <session_id>`，ID 不变 | `--permission-mode plan`（拦住工作目录里的写，但会写自己的会话目录） | `--permission-mode bypassPermissions`（能写到工作目录外） | 已装 1.0.77 |
-| dsh | `dsh headless -`，提示词经 stdin；先 `cd` 到工作目录。Git Bash 用 `cmd //c` | `--json`（未跑通到文本事件） | `--session-id <id>`（不是 `--resume`，未跑通） | `--permission-mode read-only --approval-policy never`（未跑通） | `--permission-mode workspace-write --approval-policy never`（未跑通） | 已装 0.2.2-rc.1，仅 `.cmd` 垫片，缺 API key |
+| dsh | `dsh headless -`，提示词经 stdin；先 `cd` 到工作目录。Git Bash 用 `cmd //c` | `--json`。会输出 `session` / `status` / `final`。本次没有文本事件 | `--session-id <id>`。本次续接后 ID 不变、`turn` 递增，模型回合未完成 | `--permission-mode read-only --approval-policy never`（写文件行为未证实） | `--permission-mode workspace-write --approval-policy never`（写文件行为未证实） | 已装 0.2.2-rc.1，仅 `.cmd` 垫片。密钥可用，账户余额不足 |
 | pi | 实测 | 实测 | 实测 | 实测 | 实测 | 未安装，M5 前需先装 |
 
 某个 CLI 没有只读模式时的兜底：讨论模式仍用它的默认模式运行，并在提示词里明确要求"本回合只讨论，不要修改任何文件"。claude 和 grok 的 `plan` 属于这种情况，提示词兜底仍然要留。dsh 没有 `--model`，模型在 profile 配置里，`agents.model` 对它不起作用。

@@ -20,7 +20,7 @@ imates 是一个 Tauri 2 桌面应用，让一个人像管理团队一样管理�
 
 | 里程碑 | 计划 | 状态 |
 |---|---|---|
-| M0 CLI 实测 | 已有 | claude、codex、grok 已实测；dsh 缺 API key |
+| M0 CLI 实测 | 已有 | claude、codex、grok 已实测；dsh 密钥可用，模型回合因余额不足未跑通 |
 | M1 骨架 | 已有 | 未开始 |
 | M2 单 Agent 对话 | 未写 | 依赖 M0 和 M1 |
 | M3 团队协作 | 未写 | 依赖 M2 |

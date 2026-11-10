@@ -121,7 +121,7 @@
 
 ### 命令
 
-帮助里确认的写法如下。除缺密钥的那次 discuss 之外，这些命令没有在有模型的情况下跑通。
+2026-11-10 在已设置 `DEEPSEEK_API_KEY` 的 PowerShell 里，用 Git Bash 跑了下面三条命令，以及 blocked、escape。进程能启动，密钥也被接受。五个模型回合都在调用工具前因余额不足结束。讨论、执行、续接的 stdout 含用户主目录，且没有模型正文，不作为成功样本提交。已提交的只有未知会话的 `error.jsonl`。
 
 | 场景 | 完整命令 |
 |---|---|
@@ -131,34 +131,36 @@
 
 ### 事件格式
 
-只看到缺密钥时的事件，没有工具调用、文本增量和用量。因此没有提交样本。
+每次模型回合的 stdout 都是 6 行合法 JSON，结构相同。没有文本、工具调用和用量。下面的示例来自这次 discuss，路径已换成 `<HOME>`。这份内容没有入库。
 
 | 关注点 | 事件类型与字段路径 | 样本中的一行示例 |
 |---|---|---|
-| 会话 ID | 第一行 `type: session` 的 `sessionId`，形如 `session-…`。结束时 `final.sessionId` 再出现一次 | `{"type":"session","sessionId":"session-1ca4fa2a-4a42-4cb9-9693-ba0976c24992","cwd":"<HOME>\\AppData\\Local\\Temp\\imates-m0"}` |
-| 文本增量 | 未观察到 | |
-| 工具调用 | 未观察到 | |
-| 回合结束与最终文本 | `final`。失败时 `reason.kind` 为 `error`，`text` 为空字符串 | `{"type":"final","sessionId":"session-1ca4fa2a-4a42-4cb9-9693-ba0976c24992","reason":{"kind":"error","error":{"code":"MISSING_CREDENTIAL"}},"text":""}` |
+| 会话 ID | 第一行 `type: session` 的 `sessionId`，形如 `session-…`。`final.sessionId` 再出现一次，值相同。`cwd` 是启动时的工作目录 | `{"type":"session","sessionId":"session-f8659c30-dacd-45d4-b816-f0fc1a517326","cwd":"<HOME>\\AppData\\Local\\Temp\\imates-m0"}` |
+| 文本增量 | 未观察到。`final.text` 是空字符串，输出里没有「测试目录」 | |
+| 工具调用 | 未观察到。`step` 停在 1，没有工具事件 | |
+| 回合结束与最终文本 | `status.phase` 为 `turn_end`，以及 `type: final`。失败时 `reason.kind` 为 `error`，`reason.error.code` 为 `QUOTA`，`status` 为 402，`text` 为空 | `{"type":"final","sessionId":"session-f8659c30-dacd-45d4-b816-f0fc1a517326","reason":{"kind":"error","error":{"message":"Insufficient Balance (request_id: …)","code":"QUOTA","status":402}},"text":""}` |
 | 用量 | 未观察到 | |
 
-中间还有 `status`，`phase` 依次为 `turn_start`、`step_start`、`step_end`、`turn_end`。
+中间 `status.phase` 依次为 `turn_start`、`step_start`、`step_end`、`turn_end`。
+
+未知会话走另一条路径，见下面「出错时的表现」。
 
 ### 行为
 
-- 只读模式是否拦住写文件：未测。配置里有预设 `read-only`（sandbox `read-only`，默认 approval `ask`）
-- 执行模式是否全程无确认：未测。预设 `workspace-write` 的默认 approval 是 `ask`。命令行可以用 `--approval-policy never` 盖掉。另有 `danger-full-access`，approval 为 `never`，本次没有用
-- 执行模式能否写到工作目录之外：未测
-- 续接是否生效：未测。帮助里的参数是 `--session-id`，不是 `--resume`。未知 id 会报错。`--permission-mode` 在续接时仍然可以带
-- 出错时的表现（退出码、stdout、stderr）：本次 discuss 退出码 1。stderr 是 `MISSING_CREDENTIAL`：provider `deepseek-official` 没有 API key。stdout 仍是 JSONL，`turn_end.reason.error.code` 和 `final.reason.error.code` 都是 `MISSING_CREDENTIAL`。没有跑到未知会话 ID 那个错误场景
-- stdout 是否每行都是合法 JSON：这次失败输出的 6 行都是合法 JSON。stderr 是纯文本，没有并进 stdout
-- 其他注意事项：headless 没有 `--model`。模型写在 profile 配置 `agent-default-model` 里，这次是 provider `deepseek-official`、model `deepseek-flash`。手册里的 `agents.model` 对 dsh 没有对应的命令行参数，适配器传了也不会生效。Windows 上 `bash` 工具关闭，启用的是 `pwsh`。本机环境变量和用户级环境变量里都没有 `DEEPSEEK_API_KEY`，所以 execute、resume、blocked、escape 都没跑。
+- 只读模式是否拦住写文件：没有得到结论。`read-only` 那次在工具调用前就以 QUOTA 结束。`blocked.txt` 不存在，是因为模型没有执行，不能当成沙箱拦住了写入。配置里的预设 `read-only` 仍是 sandbox `read-only`，默认 approval `ask`。
+- 执行模式是否全程无确认：没有得到结论。`workspace-write` 加 `--approval-policy never` 已经发出，模型回合同样是 QUOTA。脚本开始前删过 `hello.txt`，结束后文件仍不存在。预设 `workspace-write` 的默认 approval 是 `ask`，命令行的 `--approval-policy never` 用来盖掉它。另有 `danger-full-access`，approval 为 `never`，本次没有用。
+- 执行模式能否写到工作目录之外：没有得到结论。escape 场景同样是 QUOTA，上一级的 `imates-m0-escape.txt` 不存在。
+- 续接是否生效：会话接上了，记忆没有验证。resume 使用 execute 的 `sessionId` `session-6cd2dd5b-8be9-4b62-8a28-3b855f6af6ce`，输出里的 `sessionId` 相同，`turn` 为 2。`final.text` 仍为空，输出里没有 `hello`。此前 execute 没有创建 `hello.txt`。帮助里的参数是 `--session-id`。未知 id 会报错。续接命令上仍然可以带 `--permission-mode`。
+- 出错时的表现（退出码、stdout、stderr）：五个模型场景的 stderr 第一行都是 `[llm-deepseek-api-key] model listing from https://api.deepseek.com/models loaded 2 model(s), skipped 0 row(s)`，第二行是 `dsh: QUOTA: Insufficient Balance`。stdout 的 `turn_end.reason.error` 与 `final.reason.error` 都是 `code` 为 `QUOTA`、`status` 为 402、消息为 `Insufficient Balance (request_id: …)`。进程退出码打在运行脚本的终端里，没有写入文件，这里不补一个数字。未知会话 `--session-id session-does-not-exist` 的合并输出有两行：第一行是 JSON `{"type":"error","message":"session \"session-does-not-exist\" does not exist; omit --session-id to start a new Session"}`，第二行是同样的文字，前缀为 `dsh: `。这份 `error.jsonl` 没有用户主目录，已提交。它的进程退出码同样没有落盘。更早一次没有密钥时，discuss 的退出码是 1，错误码是 `MISSING_CREDENTIAL`；那份输出已删除，没有提交。
+- stdout 是否每行都是合法 JSON：模型回合的 stdout 6 行都是合法 JSON，stderr 没有并进去。`error.jsonl` 用 `2>&1` 合并，第 2 行不是 JSON。
+- 其他注意事项：headless 没有 `--model`。模型写在 profile 配置 `agent-default-model` 里，这次是 provider `deepseek-official`、model `deepseek-flash`。手册里的 `agents.model` 对 dsh 没有对应的命令行参数，适配器传了也不会生效。Windows 上 `bash` 工具关闭，启用的是 `pwsh`。这次密钥已被接受。DeepSeek 账户余额不足，所以中文正文、工具事件、用量、只读拦截和越界写都还要等充值后重跑。临时目录 `$TEMP/imates-m0` 先留着。
 
 ## 对适配器设计的影响
 
-1. claude 的 `-p`、codex 的 `-`、dsh 帮助里的 `-` 都从 stdin 读提示词。dsh 的进程能启动，但还没有在有密钥的情况下跑完。grok 本次用的是 `--prompt-file`，文件方式可用，stdin 没测。`CommandSpec` 已有的 `stdin` 和 `prompt_file` 够用：grok 走 `prompt_file`，其余走 `stdin`。
-2. claude 这次的 `stream-json` 没有逐段文本，整段在 `assistant` 消息里。帮助里的 `--include-partial-messages` 没开，不能据此否定增量能力。codex 没有文本增量。grok 选定的 `streaming-messages-json` 也是整段；它的 `streaming-json` 才有 `type:text` 的增量，会话 ID 要等最后的 `end.sessionId`。dsh 还没有跑到模型输出。
-3. claude 的 `session_id`、codex 的 `thread_id`、grok 的 `session_id` 续接后都不变，适配器不用每回合回写。dsh 的 `sessionId` 在缺密钥那次的开头和 `final` 里相同，续接本身未测。
-4. codex 的 `-s read-only` 拦住了工作目录里的写文件。claude 和 grok 的 `plan` 都拦住了 `blocked.txt`，但分别把计划写进了 `.claude/plans/` 和 grok 自己的会话目录。这两个 CLI 的讨论模式不可靠，提示词里仍要写明本回合不要改文件。dsh 的只读行为未测。
-5. claude 的 `bypassPermissions`、codex 的 `workspace-write`、grok 的 `bypassPermissions` 都能把文件写到工作目录之外。创建 Agent 的表单要保留这条安全提示。dsh 未测。
+1. claude 的 `-p`、codex 的 `-`、dsh 的 `-` 都从 stdin 读提示词。dsh 这次会建会话并读 stdin；密钥有效，模型回合在出文本前以 QUOTA 402 结束。grok 本次用的是 `--prompt-file`，文件方式可用，stdin 没测。`CommandSpec` 已有的 `stdin` 和 `prompt_file` 够用：grok 走 `prompt_file`，其余走 `stdin`。
+2. claude 这次的 `stream-json` 没有逐段文本，整段在 `assistant` 消息里。帮助里的 `--include-partial-messages` 没开，不能据此否定增量能力。codex 没有文本增量。grok 选定的 `streaming-messages-json` 也是整段；它的 `streaming-json` 才有 `type:text` 的增量，会话 ID 要等最后的 `end.sessionId`。dsh 这次没有模型正文，不能判断有没有文本增量。
+3. claude 的 `session_id`、codex 的 `thread_id`、grok 的 `session_id` 续接后都不变，适配器不用每回合回写。dsh 续接后 `sessionId` 也不变，`turn` 从 1 增到 2，说明 `--session-id` 接上了同一会话。模型回合失败，记忆是否保留还没有验证。
+4. codex 的 `-s read-only` 拦住了工作目录里的写文件。claude 和 grok 的 `plan` 都拦住了 `blocked.txt`，但分别把计划写进了 `.claude/plans/` 和 grok 自己的会话目录。这两个 CLI 的讨论模式不可靠，提示词里仍要写明本回合不要改文件。dsh 的 `read-only` 这次没有机会碰到文件。
+5. claude 的 `bypassPermissions`、codex 的 `workspace-write`、grok 的 `bypassPermissions` 都能把文件写到工作目录之外。创建 Agent 的表单要保留这条安全提示。dsh 的 `workspace-write` 这次没有机会写文件。
 
-没有发现 `CliAdapter` 必须加方法。dsh 的模型不在命令行上，适配器应忽略 `agents.model`。dsh 的续接参数是 `--session-id`，不是手册里原先写的 `--resume`。
+没有发现 `CliAdapter` 必须加方法。dsh 的模型不在命令行上，适配器应忽略 `agents.model`。dsh 的续接参数是 `--session-id`。适配器要把 `final.reason.kind` 为 `error`、且 `error.code` 为 `QUOTA` 或 `MISSING_CREDENTIAL` 当成回合失败，空的 `final.text` 不是成功回复。未知会话是另一条 `type: error`，stderr 会再打一行 `dsh: ` 前缀。
