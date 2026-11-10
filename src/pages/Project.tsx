@@ -1,31 +1,188 @@
-import { useEffect, useState } from "react";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { api } from "../api";
-import type { ProjectDetail } from "../types";
+import { AgentForm } from "../components/AgentForm";
+import { MemberList } from "../components/MemberList";
+import { RulesPanel } from "../components/RulesPanel";
+import { Button, Modal } from "../components/ui";
+import {
+  STATUS_LABELS,
+  type Agent,
+  type AgentInput,
+  type CliInfo,
+  type PersonaTemplate,
+  type ProjectDetail,
+} from "../types";
+
+type Editing = { kind: "new" } | { kind: "edit"; agent: Agent } | null;
+
+/** 尚未实现的区域：说明它是什么、哪个阶段接入。 */
+function Pending({ title, stage }: { title: string; stage: string }) {
+  return (
+    <div className="flex h-full items-center justify-center rounded border border-dashed border-slate-700 text-sm text-slate-500">
+      {title}（{stage} 阶段接入）
+    </div>
+  );
+}
 
 export default function Project() {
   const { id = "" } = useParams();
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
+  const [clis, setClis] = useState<CliInfo[]>([]);
+  const [templates, setTemplates] = useState<PersonaTemplate[]>([]);
+  const [editing, setEditing] = useState<Editing>(null);
+  const [tab, setTab] = useState<"files" | "rules">("rules");
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    api
-      .getProject(id)
-      .then(setDetail)
-      .catch((e) => setError(String(e)));
+  const reload = useCallback(async () => {
+    setDetail(await api.getProject(id));
   }, [id]);
 
+  useEffect(() => {
+    reload().catch((e) => setError(String(e)));
+    api.listClis().then(setClis);
+    api.listPersonaTemplates().then(setTemplates);
+  }, [reload]);
+
+  if (error && !detail) {
+    return (
+      <main className="p-8">
+        <Link to="/" className="text-sm text-slate-400 hover:text-slate-100">
+          ← 返回
+        </Link>
+        <p className="mt-4 text-sm text-red-400">{error}</p>
+      </main>
+    );
+  }
+  if (!detail) return <main className="p-8 text-sm text-slate-400">加载中…</main>;
+
+  const { project, agents } = detail;
+
+  // AgentForm 会捕获这里抛出的错误并显示在表单里
+  async function saveAgent(input: AgentInput) {
+    if (editing?.kind === "edit") await api.updateAgent(editing.agent.id, input);
+    else await api.createAgent(id, input);
+    setEditing(null);
+    await reload();
+  }
+
+  async function removeAgent(agent: Agent) {
+    const confirmed = await confirm(`移除成员「${agent.name}」？`, {
+      title: "移除成员",
+      kind: "warning",
+    });
+    if (!confirmed) return;
+    try {
+      await api.deleteAgent(agent.id);
+      setEditing(null);
+      await reload();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function relocate() {
+    const picked = await open({ directory: true, multiple: false, title: "重新选择项目文件夹" });
+    if (typeof picked !== "string") return;
+    try {
+      await api.updateProject(id, project.name, project.description, picked);
+      await reload();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  const editingAgent = editing?.kind === "edit" ? editing.agent : null;
+
   return (
-    <main className="p-8">
-      <Link to="/" className="text-sm text-slate-400 hover:text-slate-100">
-        ← 返回
-      </Link>
-      {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
-      {detail && (
-        <h1 className="mt-4 text-xl font-bold">
-          {detail.project.name}（{detail.agents.length} 个成员）
-        </h1>
+    <div className="flex h-full flex-col">
+      <header className="flex items-center gap-4 border-b border-slate-800 px-4 py-3">
+        <Link to="/" className="text-sm text-slate-400 hover:text-slate-100">
+          ← 返回
+        </Link>
+        <h1 className="text-base font-semibold">{project.name}</h1>
+        <span className="rounded bg-slate-800 px-2 py-0.5 text-xs">
+          {STATUS_LABELS[project.status]}
+        </span>
+        <span className="truncate text-xs text-slate-500" title={project.folderPath}>
+          {project.folderPath}
+        </span>
+      </header>
+
+      {!detail.folderExists && (
+        <div className="flex items-center justify-between bg-red-950 px-4 py-2 text-sm text-red-200">
+          <span>项目文件夹不存在：{project.folderPath}</span>
+          <Button onClick={relocate}>重新选择文件夹</Button>
+        </div>
       )}
-    </main>
+      {error && <p className="px-4 py-2 text-sm text-red-400">{error}</p>}
+
+      <div className="grid min-h-0 flex-1 grid-cols-[240px_1fr_340px]">
+        <MemberList
+          agents={agents}
+          clis={clis}
+          onAdd={() => setEditing({ kind: "new" })}
+          onEdit={(agent) => setEditing({ kind: "edit", agent })}
+        />
+
+        <section className="grid min-h-0 grid-rows-[2fr_3fr] gap-3 p-3">
+          <Pending title="像素办公室" stage="M4" />
+          <Pending title="群聊与指令" stage="M2" />
+        </section>
+
+        <aside className="flex min-h-0 flex-col border-l border-slate-800">
+          <div className="flex border-b border-slate-800 text-sm">
+            {(["files", "rules"] as const).map((key) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setTab(key)}
+                className={`flex-1 px-3 py-2 ${
+                  tab === key ? "border-b-2 border-sky-500 text-sky-300" : "text-slate-400"
+                }`}
+              >
+                {key === "files" ? "文件" : "规章"}
+              </button>
+            ))}
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {tab === "rules" ? (
+              <RulesPanel projectId={id} />
+            ) : (
+              <div className="h-full p-3">
+                <Pending title="文件树" stage="M4" />
+              </div>
+            )}
+          </div>
+        </aside>
+      </div>
+
+      {editing && (
+        <Modal
+          title={editingAgent ? `编辑成员：${editingAgent.name}` : "添加成员"}
+          onClose={() => setEditing(null)}
+        >
+          <AgentForm
+            key={editingAgent?.id ?? "new"}
+            initial={editingAgent ?? undefined}
+            clis={clis}
+            templates={templates}
+            takenNames={agents.filter((a) => a.id !== editingAgent?.id).map((a) => a.name)}
+            forceLeader={editingAgent ? editingAgent.isLeader : agents.length === 0}
+            submitLabel={editingAgent ? "保存" : "添加"}
+            onSubmit={saveAgent}
+            onCancel={() => setEditing(null)}
+          />
+          {editingAgent && !editingAgent.isLeader && (
+            <div className="mt-4 border-t border-slate-800 pt-4">
+              <Button variant="danger" onClick={() => removeAgent(editingAgent)}>
+                移除该成员
+              </Button>
+            </div>
+          )}
+        </Modal>
+      )}
+    </div>
   );
 }
