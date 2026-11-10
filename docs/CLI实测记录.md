@@ -178,3 +178,56 @@
 5. claude 的 `bypassPermissions`、codex 的 `workspace-write`、grok 的 `bypassPermissions`、dsh 的 `workspace-write` 都能把文件写到工作目录之外。创建 Agent 的表单要保留这条安全提示。
 
 没有发现 `CliAdapter` 必须加方法。dsh 的模型不在命令行上，适配器应忽略 `agents.model`。dsh 的续接参数是 `--session-id`。用量字段是 camelCase，和其他 CLI 的 snake_case 不同。适配器要把 `final.reason.kind` 为 `error`、且 `error.code` 为 `QUOTA` 或 `MISSING_CREDENTIAL` 当成回合失败，空的 `final.text` 不是成功回复。未知会话是另一条 `type: error`，stderr 会再打一行 `dsh: ` 前缀。成功时 stderr 的模型列表行不要当成失败。
+
+
+## M2 实施前置验证（macOS，2026-11-10）
+
+本节是本机重新执行的结果，不替代上面的 Windows M0 样本。平台 macOS 27.0.1（26A434）arm64；Codex 0.167.0、Claude Code 2.1.322。启动来源为 Codex 桌面任务的终端进程，尚未完成 Finder/Dock 启动环境验收。全部模型调用均在仓库外新建的非 git 临时项目目录，提示词经 stdin，工作目录通过子进程 cwd 设置，无 `-C`。原始 stdout/stderr 及会话文件留在临时目录和 CLI 自身会话目录，未提交。
+
+### G1：Codex 沙箱与续接——已通过本机 CLI 基线
+
+使用计划中的 `-c sandbox_mode=...`、`-c approval_policy="never"`、`--json --skip-git-repo-check`。同一线程顺序验证如下，所有 CLI 进程退出码均为 0，均收到 `turn.completed`，没有审批等待：
+
+| 回合 | 模式 | 工具与文件事实 |
+|---|---|---|
+| 首次 | read-only | 命令实际尝试创建 blocked-first.txt，工具退出 1，`operation not permitted`，文件不存在 |
+| 同模式续接 | read-only | 再次实际尝试创建 blocked-same.txt，工具退出 1，沙箱拒绝，文件不存在；正确复述上一回合文件名 |
+| 同线程切换 | workspace-write | 命令退出 0，codex-created.txt 内容为 g1-execute；线程 ID 不变 |
+| 同线程切回 | read-only | 分别尝试修改已有文件与创建新文件，两个工具均退出 1；原文件仍为 g1-execute，新文件不存在 |
+
+另建独立 Execute 线程：首次创建 execute-first.txt，续接后更新为 second 并创建 execute-resumed.txt。文件事实、记忆与线程 ID 均符合预期，两个 CLI 进程都退出 0、收到完成事件。独立目录由 `git rev-parse` 确认不是 git 仓库。同一执行线程续接前后 `turn.completed.usage` 分别为 input 46875/output 244 与 input 94442/output 507；session token_count 累计同步增长。
+
+注意：部分被拒绝的命令没有在 `--json` 中产生 `command_execution` 事件，但该线程的本地 session 记录含实际工具请求和 `exit_code: 1 / operation not permitted` 工具结果，stderr 也记录 seatbelt 拒绝。G1 使用这些工具证据与最终文件状态共同判断，没有仅凭模型正文判定。
+
+### G2：Codex 用量——已证实本机版本为线程累计
+
+同线程四次 `turn.completed.usage` 与各回合末 session `token_count.info.total_token_usage` 逐字段对应；不能将其直接当作每回合用量：
+
+| 回合 | 累计 input_tokens | 累计 cached_input_tokens | 累计 output_tokens |
+|---|---:|---:|---:|
+| 首次 Discuss | 45612 | 26368 | 97 |
+| 同模式 Discuss 续接 | 91674 | 72064 | 211 |
+| 切到 Execute | 139444 | 118656 | 316 |
+| 切回 Discuss | 237440 | 215424 | 569 |
+
+session 同时提供 `last_token_usage`，它是最后一次模型请求，不等于整个 CLI 回合。实现须保存 rawUsage 累计读数，同一 Agent/session 的后续回合取与最近可靠基线的差；新线程首回合以零为基线。续接缺基线、字段缺失或计数下降时归一值保持 None，不能强行当零。缓存读为输入子集，不重复相加；无费用字段则 costUsd=None。Windows/其他版本不能仅凭本机结论宣称已验收。
+
+### G3：Claude 模式、续接与用量——部分通过，工具层拒写未验证
+
+同一 session 顺序执行 plan → bypassPermissions → plan，每次 `system/init.permissionMode` 与请求一致、session ID 不变、退出码 0、`result.is_error=false`。
+
+- plan 首回合要求实际调用 Write 创建测试文件，模型明确拒绝调用工具，文件不存在。
+- bypassPermissions 续接实际调用 Write，工具返回创建成功，hello-claude.txt 内容为 g3-execute，并正确复述首回合文件名。
+- 切回 plan 要求改写旧文件及创建新文件，模型再次拒绝调用工具；原文件内容不变，新文件不存在。追加一次普通创建请求仍无工具调用。
+- 因三次 plan 请求均未触发写工具，本机只证实权限回显及模型遵循讨论意图，**没有取得工具层拒写证据**。不能把 G3 的“写入先拒绝、再成功、再次拒绝”全部标为通过，也不能声称 plan 是文件系统隔离。
+- 用量对照：`result.usage` 的 input/output/cache 字段与 `model_usage_since_last_result` 对应；`total_cost_usd` 在同 session 内累计（0.273949 → 0.3301658 → 0.365098 → 0.3801448）。后续回合费用分别为 0.0562168、0.0349322、0.0150468，与各回合 `model_usage_since_last_result.*.costUSD` 对应。实现不得将 total_cost_usd 直接当本回合费用；没有可靠 since-last-result 字段时费用保持 None。
+
+### 额外可观察行为
+
+Codex 运行期间 stdout 出现了两个 `item.type=error` 配置诊断事件，但后续仍成功执行命令并发出 `turn.completed`，进程退出码为 0。适配器不能把所有该类事件直接视为致命错误；对可识别的配置警告保留脱敏诊断并继续，`turn.failed`、明确模型错误仍锁定失败。不修改用户全局配置。
+
+CLI stderr 出现插件元数据警告及远程插件缓存 401，实际模型回合仍成功。这只证明观测到了这些诊断，不证明全部 hooks/MCP/插件启用，也不等于模型登录失败。
+
+### 尚未执行
+
+G3 的 Finder/Dock 环境、runner 进程树取消/超时/正常退出、异常恢复和 UI 交互仍待对应 Task；本次尚未写生产代码。Claude 工具层拒写的验收口径需先解决，不能标 M2 完成。
