@@ -7,36 +7,38 @@
 
 - 版本：2.1.319（Claude Code）
 - 可执行文件：npm 全局命令 `claude`（`%APPDATA%\npm\claude`）
-- 提示词传入方式：`-p` 时经 stdin（本次未跑通模型回合）
-- 工作目录指定方式：未测。进程的当前目录即工作目录（命令未使用单独的目录参数）
+- 提示词传入方式：`claude -p`，提示词经 stdin
+- 工作目录指定方式：没有目录参数。先 `cd` 到目标目录再启动。`system/init` 的 `cwd` 就是这个目录
 
 ### 命令
 
 | 场景 | 完整命令 |
 |---|---|
-| 讨论（只读） | |
-| 执行（自动） | |
-| 续接 | |
+| 讨论（只读） | `claude -p --output-format stream-json --verbose --permission-mode plan`，提示词经 stdin |
+| 执行（自动） | `claude -p --output-format stream-json --verbose --permission-mode bypassPermissions`，提示词经 stdin |
+| 续接 | 在讨论命令后加 `--resume <session_id>`。续接后 `session_id` 不变 |
 
 ### 事件格式
 
+`system/init` 会带上工具列表和本机技能，一行很长，下面只摘字段。
+
 | 关注点 | 事件类型与字段路径 | 样本中的一行示例 |
 |---|---|---|
-| 会话 ID | | |
-| 文本增量 | | |
-| 工具调用 | | |
-| 回合结束与最终文本 | | |
-| 用量 | | |
+| 会话 ID | 多数事件都有 `session_id`。会话一开始的 `system/init` 里就有，并带 `permissionMode` | `{"type":"system","subtype":"init","session_id":"7a83cd2c-cc9d-4f7f-aafb-06ad043be63b","permissionMode":"plan","model":"claude-sonnet-5-5"}` |
+| 文本增量 | 本次没有逐段增量。正文在 `assistant.message.content[]` 里 `type` 为 `text` 的 `text`。帮助里有 `--include-partial-messages`，这次没开 | `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"我是 Claude，一个在终端里协助你完成软件工程任务的 AI 助手。"}]}}` |
+| 工具调用 | 同在 `assistant.message.content[]`，`type` 为 `tool_use`。读文件的 `name` 是 `Read`，`input.file_path`。写文件的 `name` 是 `Write`，还有 `input.content`。工具结果在下一条 `user.message.content[]`，`type` 为 `tool_result` | `{"type":"tool_use","name":"Read","input":{"file_path":"<HOME>\\AppData\\Local\\Temp\\imates-m0\\README.md"}}` |
+| 回合结束与最终文本 | `type: result`。成功时 `subtype` 为 `success` 且 `is_error` 为 false，最终文本在 `result` | `{"type":"result","subtype":"success","is_error":false,"result":"我是 Claude……","session_id":"7a83cd2c-cc9d-4f7f-aafb-06ad043be63b"}` |
+| 用量 | `result.usage` 的 `input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`。费用在 `result.total_cost_usd` | `{"input_tokens":4,"output_tokens":234,"cache_read_input_tokens":29991,"cache_creation_input_tokens":30228}` |
 
 ### 行为
 
-- 只读模式是否拦住写文件：
-- 执行模式是否全程无确认：
-- 执行模式能否写到工作目录之外：
-- 续接是否生效：
-- 出错时的表现（退出码、stdout、stderr）：
-- stdout 是否每行都是合法 JSON：认证失败的那次输出是合法 JSON 行，但不是一次成功的讨论回合
-- 其他注意事项：`--permission-mode` 的可选值为 `acceptEdits`、`auto`、`bypassPermissions`、`manual`、`dontAsk`、`plan`。2026-11-10 跑 discuss 时退出码为 1，stderr 为空。stdout 有 `system/init`、`assistant`、`result/success`。最后一条 `type: result` 的 `is_error` 为 true，`terminal_reason` 为 `api_error`，`result` 文本是登录已到时限、无法续期，需要 `claude auth login`。没有调用模型，execute、resume、blocked、escape、error 都未跑，也没有提交样本。
+- 只读模式是否拦住写文件：工作目录里的 `blocked.txt` 没有创建。`plan` 模式下模型改用 `Write` 把计划写到了用户目录的 `.claude/plans/`。所以 `plan` 挡住了任务文件，没有挡住 Claude 自己的计划目录。测完已删除那份计划文件。
+- 执行模式是否全程无确认：是。`bypassPermissions` 直接调用 `Write`，进程没有挂起，退出码 0，`hello.txt` 内容为 `hi`，stderr 为空。`system/init.permissionMode` 与请求的模式一致。
+- 执行模式能否写到工作目录之外：能。同一权限用 `Write` 在上一级目录创建了 `imates-m0-escape.txt`。测完已删除。
+- 续接是否生效：生效。`--resume` 续接 execute 的会话后，`session_id` 仍是 `cfba7141-e804-4a67-b6ea-50623844e7c4`，回答提到创建了内容为 hi 的 `hello.txt`。
+- 出错时的表现（退出码、stdout、stderr）：`--model no-such-model` 退出码 1。stderr 有一行 `[claude-code:unrecognized_model]`。stdout 仍有 JSON 事件，最后 `result` 的 `subtype` 仍是 `success`，但 `is_error` 为 true，`result` 文本说明模型不存在。`error.jsonl` 用 `2>&1` 合并，所以中间有 1 行纯文本。
+- stdout 是否每行都是合法 JSON：discuss、execute、resume 是。error 因为并进了 stderr，有 1 行纯文本。
+- 其他注意事项：`--permission-mode` 的可选值是 `acceptEdits`、`auto`、`bypassPermissions`、`manual`、`dontAsk`、`plan`。登录过期时进程退出码 1，`result.is_error` 为 true，`terminal_reason` 为 `api_error`。重新 `claude auth login` 之后，上述场景都跑通了。样本里的用户主目录已换成 `<HOME>`。`system/init` 的 `apiKeySource` 不是令牌本身。
 
 ## codex
 
@@ -153,10 +155,10 @@
 
 ## 对适配器设计的影响
 
-1. codex 可以用参数 `-` 从 stdin 读提示词。dsh 的帮助也写明 `-` 读 stdin，进程能启动。grok 本次用的是 `--prompt-file`，文件方式可用，stdin 没测。claude 的 `-p` 按帮助从 stdin 读，但登录失败，没有跑完。`CommandSpec` 已有的 `stdin` 和 `prompt_file` 够用：grok 走 `prompt_file`，其余走 `stdin`。
-2. codex 没有文本增量，群聊只能在每条 `agent_message` 完成时整段显示。grok 选定的 `streaming-messages-json` 也是整段；它的 `streaming-json` 才有 `type:text` 的增量，会话 ID 要等最后的 `end.sessionId`。claude 和 dsh 没有跑到模型输出，不能判断。
-3. codex 的 `thread_id` 和 grok 的 `session_id` 续接后都不变，适配器不用每回合回写。claude 未测。dsh 的 `sessionId` 在失败那次的开头和 `final` 里相同，续接本身未测。
-4. codex 的 `-s read-only` 拦住了工作目录里的写文件。grok 的 `plan` 拦住了 `blocked.txt`，但把计划写进了自己的会话目录，讨论模式不可靠，提示词里仍要写明本回合不要改文件。claude、dsh 的只读行为未测。
-5. codex 的 `workspace-write` 和 grok 的 `bypassPermissions` 都能把文件写到工作目录之外。创建 Agent 的表单要保留这条安全提示。claude、dsh 未测。
+1. claude 的 `-p`、codex 的 `-`、dsh 帮助里的 `-` 都从 stdin 读提示词。dsh 的进程能启动，但还没有在有密钥的情况下跑完。grok 本次用的是 `--prompt-file`，文件方式可用，stdin 没测。`CommandSpec` 已有的 `stdin` 和 `prompt_file` 够用：grok 走 `prompt_file`，其余走 `stdin`。
+2. claude 这次的 `stream-json` 没有逐段文本，整段在 `assistant` 消息里。帮助里的 `--include-partial-messages` 没开，不能据此否定增量能力。codex 没有文本增量。grok 选定的 `streaming-messages-json` 也是整段；它的 `streaming-json` 才有 `type:text` 的增量，会话 ID 要等最后的 `end.sessionId`。dsh 还没有跑到模型输出。
+3. claude 的 `session_id`、codex 的 `thread_id`、grok 的 `session_id` 续接后都不变，适配器不用每回合回写。dsh 的 `sessionId` 在缺密钥那次的开头和 `final` 里相同，续接本身未测。
+4. codex 的 `-s read-only` 拦住了工作目录里的写文件。claude 和 grok 的 `plan` 都拦住了 `blocked.txt`，但分别把计划写进了 `.claude/plans/` 和 grok 自己的会话目录。这两个 CLI 的讨论模式不可靠，提示词里仍要写明本回合不要改文件。dsh 的只读行为未测。
+5. claude 的 `bypassPermissions`、codex 的 `workspace-write`、grok 的 `bypassPermissions` 都能把文件写到工作目录之外。创建 Agent 的表单要保留这条安全提示。dsh 未测。
 
 没有发现 `CliAdapter` 必须加方法。dsh 的模型不在命令行上，适配器应忽略 `agents.model`。dsh 的续接参数是 `--session-id`，不是手册里原先写的 `--resume`。
