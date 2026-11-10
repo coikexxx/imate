@@ -1,6 +1,17 @@
-# Tauri + React + Typescript
+# imates
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+像管理团队一样管理多个 AI Agent 的桌面应用。每个项目有一组分工不同的 Agent，围绕你下发的指令讨论、达成一致并落实工作。
+
+当前进度：M1 骨架（项目、成员、人设、规章的创建与管理）。Agent 的实际运行在 M2 接入。
+
+## 开发
+
+```bash
+npm install
+npm run tauri dev
+```
+
+测试：`npm test`（前端）、`cd src-tauri && cargo test`（后端）。
 
 ## 文档
 
