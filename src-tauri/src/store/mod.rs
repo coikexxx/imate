@@ -1,4 +1,5 @@
 pub mod migrations;
+pub mod projects;
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
