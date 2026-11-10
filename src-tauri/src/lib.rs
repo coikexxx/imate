@@ -1,3 +1,4 @@
+mod cli_registry;
 mod error;
 mod store;
 
