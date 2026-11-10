@@ -1,6 +1,7 @@
 mod cli_registry;
 mod error;
 mod persona;
+mod rules;
 mod store;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
