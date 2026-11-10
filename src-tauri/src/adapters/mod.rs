@@ -1,3 +1,4 @@
+pub mod claude;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
