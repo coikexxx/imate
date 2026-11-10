@@ -112,35 +112,51 @@
 
 ## dsh
 
-- 版本：
-- 可执行文件：
-- 提示词传入方式：
-- 工作目录指定方式：
+- 版本：0.2.2-rc.1
+- 可执行文件：npm 全局的 `dsh.cmd`（`%APPDATA%\npm\dsh.cmd`）。Git Bash 里要写成 `cmd //c "dsh ..."`
+- 提示词传入方式：参数 `-` 表示读 stdin。帮助里的完整写法是 `dsh --profile headless`，直接写 `dsh headless` 也能启动
+- 工作目录指定方式：没有目录参数。必须先 `cd` 到目标目录再启动，适配器用子进程的 `current_dir`
 
 ### 命令
 
+帮助里确认的写法如下。除缺密钥的那次 discuss 之外，这些命令没有在有模型的情况下跑通。
+
 | 场景 | 完整命令 |
 |---|---|
-| 讨论（只读） | |
-| 执行（自动） | |
-| 续接 | |
+| 讨论（只读） | `dsh headless --json --permission-mode read-only --approval-policy never -`，提示词经 stdin |
+| 执行（自动） | `dsh headless --json --permission-mode workspace-write --approval-policy never -`，提示词经 stdin |
+| 续接 | `dsh headless --json --session-id <id> --permission-mode read-only --approval-policy never -`，提示词经 stdin |
 
 ### 事件格式
 
+只看到缺密钥时的事件，没有工具调用、文本增量和用量。因此没有提交样本。
+
 | 关注点 | 事件类型与字段路径 | 样本中的一行示例 |
 |---|---|---|
-| 会话 ID | | |
-| 文本增量 | | |
-| 工具调用 | | |
-| 回合结束与最终文本 | | |
-| 用量 | | |
+| 会话 ID | 第一行 `type: session` 的 `sessionId`，形如 `session-…`。结束时 `final.sessionId` 再出现一次 | `{"type":"session","sessionId":"session-1ca4fa2a-4a42-4cb9-9693-ba0976c24992","cwd":"<HOME>\\AppData\\Local\\Temp\\imates-m0"}` |
+| 文本增量 | 未观察到 | |
+| 工具调用 | 未观察到 | |
+| 回合结束与最终文本 | `final`。失败时 `reason.kind` 为 `error`，`text` 为空字符串 | `{"type":"final","sessionId":"session-1ca4fa2a-4a42-4cb9-9693-ba0976c24992","reason":{"kind":"error","error":{"code":"MISSING_CREDENTIAL"}},"text":""}` |
+| 用量 | 未观察到 | |
+
+中间还有 `status`，`phase` 依次为 `turn_start`、`step_start`、`step_end`、`turn_end`。
 
 ### 行为
 
-- 只读模式是否拦住写文件：
-- 执行模式是否全程无确认：
-- 执行模式能否写到工作目录之外：
-- 续接是否生效：
-- 出错时的表现（退出码、stdout、stderr）：
-- stdout 是否每行都是合法 JSON：
-- 其他注意事项：
+- 只读模式是否拦住写文件：未测。配置里有预设 `read-only`（sandbox `read-only`，默认 approval `ask`）
+- 执行模式是否全程无确认：未测。预设 `workspace-write` 的默认 approval 是 `ask`。命令行可以用 `--approval-policy never` 盖掉。另有 `danger-full-access`，approval 为 `never`，本次没有用
+- 执行模式能否写到工作目录之外：未测
+- 续接是否生效：未测。帮助里的参数是 `--session-id`，不是 `--resume`。未知 id 会报错。`--permission-mode` 在续接时仍然可以带
+- 出错时的表现（退出码、stdout、stderr）：本次 discuss 退出码 1。stderr 是 `MISSING_CREDENTIAL`：provider `deepseek-official` 没有 API key。stdout 仍是 JSONL，`turn_end.reason.error.code` 和 `final.reason.error.code` 都是 `MISSING_CREDENTIAL`。没有跑到未知会话 ID 那个错误场景
+- stdout 是否每行都是合法 JSON：这次失败输出的 6 行都是合法 JSON。stderr 是纯文本，没有并进 stdout
+- 其他注意事项：headless 没有 `--model`。模型写在 profile 配置 `agent-default-model` 里，这次是 provider `deepseek-official`、model `deepseek-flash`。手册里的 `agents.model` 对 dsh 没有对应的命令行参数，适配器传了也不会生效。Windows 上 `bash` 工具关闭，启用的是 `pwsh`。本机环境变量和用户级环境变量里都没有 `DEEPSEEK_API_KEY`，所以 execute、resume、blocked、escape 都没跑。
+
+## 对适配器设计的影响
+
+1. codex 可以用参数 `-` 从 stdin 读提示词。dsh 的帮助也写明 `-` 读 stdin，进程能启动。grok 本次用的是 `--prompt-file`，文件方式可用，stdin 没测。claude 的 `-p` 按帮助从 stdin 读，但登录失败，没有跑完。`CommandSpec` 已有的 `stdin` 和 `prompt_file` 够用：grok 走 `prompt_file`，其余走 `stdin`。
+2. codex 没有文本增量，群聊只能在每条 `agent_message` 完成时整段显示。grok 选定的 `streaming-messages-json` 也是整段；它的 `streaming-json` 才有 `type:text` 的增量，会话 ID 要等最后的 `end.sessionId`。claude 和 dsh 没有跑到模型输出，不能判断。
+3. codex 的 `thread_id` 和 grok 的 `session_id` 续接后都不变，适配器不用每回合回写。claude 未测。dsh 的 `sessionId` 在失败那次的开头和 `final` 里相同，续接本身未测。
+4. codex 的 `-s read-only` 拦住了工作目录里的写文件。grok 的 `plan` 拦住了 `blocked.txt`，但把计划写进了自己的会话目录，讨论模式不可靠，提示词里仍要写明本回合不要改文件。claude、dsh 的只读行为未测。
+5. codex 的 `workspace-write` 和 grok 的 `bypassPermissions` 都能把文件写到工作目录之外。创建 Agent 的表单要保留这条安全提示。claude、dsh 未测。
+
+没有发现 `CliAdapter` 必须加方法。dsh 的模型不在命令行上，适配器应忽略 `agents.model`。dsh 的续接参数是 `--session-id`，不是手册里原先写的 `--resume`。

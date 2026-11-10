@@ -144,17 +144,19 @@ pub trait CliAdapter: Send + Sync {
 
 ### 各 CLI 的调用方式
 
-下表来自各 CLI 的 `--help`，标"实测"的项在 M0 阶段逐个验证并回填本表。
+下表里 codex、grok 经 M0 实测确认。claude 因登录过期、dsh 因缺少 `DEEPSEEK_API_KEY` 没有跑通模型回合，这两行里标「未跑通」的格子只来自 `--help`。细节见 [CLI 实测记录](CLI实测记录.md)。
 
 | CLI | 无头调用 | 流式输出 | 续接 | 讨论模式（只读） | 执行模式（自动） | 本机状态 |
 |---|---|---|---|---|---|---|
-| claude | `claude -p` | `--output-format stream-json --verbose` | `--resume <id>` | `--permission-mode plan` | `--permission-mode bypassPermissions`（实测） | 已装 2.1.319 |
-| codex | `codex exec -C <dir>` | `--json`（实测） | `codex exec resume <id>` | `-s read-only` | `-s workspace-write` | 已装 0.167.0 |
-| grok | `grok -p --cwd <dir>` | `--output-format streaming-json` | `-r <id>` | `--permission-mode plan` | `--permission-mode bypassPermissions`（实测） | 已装 1.0.77 |
-| dsh | `dsh headless "<任务>"` | 实测 | 实测（帮助里有 `--resume <session>`） | 实测 | 实测 | 已装 0.2.2-rc.1，仅 `.cmd` 垫片 |
+| claude | `claude -p`，提示词经 stdin | `--output-format stream-json --verbose` | `--resume <id>` | `--permission-mode plan` | `--permission-mode bypassPermissions`（未跑通） | 已装 2.1.319，登录过期 |
+| codex | `codex exec --json -C <dir> -`，提示词经 stdin | `--json`，整段 `agent_message`，没有 token 增量 | `codex exec resume <thread_id> --json -`（不能加 `-s`） | `-s read-only` | `-s workspace-write`（能写到工作目录外） | 已装 0.167.0 |
+| grok | `grok --prompt-file <文件> --cwd <dir>` | `--output-format streaming-messages-json`，整段消息。要逐字增量改用 `streaming-json` | `-r <session_id>`，ID 不变 | `--permission-mode plan`（拦住工作目录里的写，但会写自己的会话目录） | `--permission-mode bypassPermissions`（能写到工作目录外） | 已装 1.0.77 |
+| dsh | `dsh headless -`，提示词经 stdin；先 `cd` 到工作目录。Git Bash 用 `cmd //c` | `--json`（未跑通到文本事件） | `--session-id <id>`（不是 `--resume`，未跑通） | `--permission-mode read-only --approval-policy never`（未跑通） | `--permission-mode workspace-write --approval-policy never`（未跑通） | 已装 0.2.2-rc.1，仅 `.cmd` 垫片，缺 API key |
 | pi | 实测 | 实测 | 实测 | 实测 | 实测 | 未安装，M5 前需先装 |
 
-某个 CLI 没有只读模式时的兜底：讨论模式仍用它的默认模式运行，并在提示词里明确要求"本回合只讨论，不要修改任何文件"。
+某个 CLI 没有只读模式时的兜底：讨论模式仍用它的默认模式运行，并在提示词里明确要求"本回合只讨论，不要修改任何文件"。grok 的 `plan` 属于这种情况，提示词兜底仍然要留。dsh 没有 `--model`，模型在 profile 配置里，`agents.model` 对它不起作用。
+
+M0 确认：codex 的 `workspace-write` 和 grok 的 `bypassPermissions` 都能把文件写到工作目录之外。
 
 ### 安全边界
 
