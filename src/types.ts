@@ -42,6 +42,8 @@ export interface Agent {
   cli: string;
   model: string | null;
   isLeader: boolean;
+  sessionId: string | null;
+  lastSeenMessageId: number | null;
   seatIndex: number;
   createdAt: number;
 }

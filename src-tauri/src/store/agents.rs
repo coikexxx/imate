@@ -22,6 +22,8 @@ pub struct Agent {
     pub cli: String,
     pub model: Option<String>,
     pub is_leader: bool,
+    pub session_id: Option<String>,
+    pub last_seen_message_id: Option<i64>,
     pub seat_index: i64,
     pub created_at: i64,
 }
@@ -39,7 +41,7 @@ pub struct NewAgent {
 }
 
 const COLUMNS: &str = "id, project_id, name, role, persona, persona_dirty, cli, model, \
-                       is_leader, seat_index, created_at";
+                       is_leader, session_id, last_seen_message_id, seat_index, created_at";
 
 fn from_row(row: &Row) -> rusqlite::Result<Agent> {
     Ok(Agent {
@@ -52,8 +54,10 @@ fn from_row(row: &Row) -> rusqlite::Result<Agent> {
         cli: row.get(6)?,
         model: row.get(7)?,
         is_leader: row.get(8)?,
-        seat_index: row.get(9)?,
-        created_at: row.get(10)?,
+        session_id: row.get(9)?,
+        last_seen_message_id: row.get(10)?,
+        seat_index: row.get(11)?,
+        created_at: row.get(12)?,
     })
 }
 
@@ -125,11 +129,17 @@ pub fn create(conn: &Connection, project_id: &str, input: &NewAgent) -> AppResul
     let seat_index = (0..MAX_AGENTS)
         .find(|seat| !existing.iter().any(|a| a.seat_index == *seat))
         .unwrap_or(0);
+    let last_seen_message_id: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(id), 0) FROM messages WHERE project_id = ?1",
+        [project_id],
+        |row| row.get(0),
+    )?;
 
     let id = new_id();
     conn.execute(
-        "INSERT INTO agents (id, project_id, name, role, persona, cli, model, is_leader, seat_index, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO agents (id, project_id, name, role, persona, cli, model, is_leader, \
+                            last_seen_message_id, seat_index, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             id,
             project_id,
@@ -139,6 +149,7 @@ pub fn create(conn: &Connection, project_id: &str, input: &NewAgent) -> AppResul
             input.cli,
             model,
             is_leader,
+            last_seen_message_id,
             seat_index,
             now_ms()
         ],
@@ -170,6 +181,9 @@ pub fn update(conn: &Connection, id: &str, input: &NewAgent) -> AppResult<Agent>
     let persona_dirty = old.persona_dirty || old.persona != input.persona;
     conn.execute(
         "UPDATE agents SET name = ?1, role = ?2, persona = ?3, persona_dirty = ?4, \
+                           session_id = CASE \
+                               WHEN cli != ?5 OR COALESCE(model, '') != COALESCE(?6, '') \
+                               THEN NULL ELSE session_id END, \
                            cli = ?5, model = ?6, is_leader = ?7 \
          WHERE id = ?8",
         params![
@@ -185,6 +199,37 @@ pub fn update(conn: &Connection, id: &str, input: &NewAgent) -> AppResult<Agent>
     )?;
     projects::touch(conn, &old.project_id)?;
     get(conn, id)
+}
+
+pub fn set_session(conn: &Connection, id: &str, session_id: Option<&str>) -> AppResult<()> {
+    let changed = conn.execute(
+        "UPDATE agents SET session_id = ?1 WHERE id = ?2",
+        params![session_id, id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::NotFound(format!("成员 {id}")));
+    }
+    Ok(())
+}
+
+/// 成功回合推进游标；仅当数据库里的人设仍是本回合使用的版本时清除 dirty。
+pub fn finish_context(
+    conn: &Connection,
+    id: &str,
+    applied_persona: &str,
+    seen_message_id: i64,
+) -> AppResult<()> {
+    let changed = conn.execute(
+        "UPDATE agents SET \
+             last_seen_message_id = MAX(COALESCE(last_seen_message_id, 0), ?1), \
+             persona_dirty = CASE WHEN persona = ?2 THEN 0 ELSE persona_dirty END \
+         WHERE id = ?3",
+        params![seen_message_id, applied_persona, id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::NotFound(format!("成员 {id}")));
+    }
+    Ok(())
 }
 
 /// 删除成员。组长不能删除（要先交接，或者删除整个项目）。
@@ -232,6 +277,76 @@ mod tests {
         assert!(first.is_leader);
         assert_eq!(first.seat_index, 0);
         assert!(!first.persona_dirty);
+    }
+
+    #[test]
+    fn new_agent_starts_at_latest_message_in_its_project() {
+        let conn = open_in_memory().unwrap();
+        let project_a = projects::create(&conn, "项目甲", "", "/tmp/甲").unwrap();
+        let project_b = projects::create(&conn, "项目乙", "", "/tmp/乙").unwrap();
+        for (project_id, content) in [(&project_a.id, "甲一"), (&project_a.id, "甲二"), (&project_b.id, "乙一")] {
+            conn.execute(
+                "INSERT INTO messages (project_id, sender_type, kind, content, created_at) VALUES (?1, 'user', 'chat', ?2, 1)",
+                rusqlite::params![project_id, content],
+            ).unwrap();
+        }
+
+        let agent = create(&conn, &project_a.id, &input("老王", true)).unwrap();
+        assert_eq!(agent.last_seen_message_id, Some(2));
+    }
+
+    #[test]
+    fn session_and_cursor_are_exposed_and_finished_conditionally() {
+        let (conn, pid) = setup();
+        let agent = create(&conn, &pid, &input("老王", true)).unwrap();
+        set_session(&conn, &agent.id, Some("thread-1")).unwrap();
+        assert_eq!(get(&conn, &agent.id).unwrap().session_id.as_deref(), Some("thread-1"));
+
+        let mut edited = input("老王", true);
+        edited.persona = PERSONA.replace("务实", "谨慎");
+        update(&conn, &agent.id, &edited).unwrap();
+        finish_context(&conn, &agent.id, PERSONA, 10).unwrap();
+        let after_old_turn = get(&conn, &agent.id).unwrap();
+        assert_eq!(after_old_turn.last_seen_message_id, Some(10));
+        assert!(after_old_turn.persona_dirty);
+
+        finish_context(&conn, &agent.id, &edited.persona, 4).unwrap();
+        let after_current_turn = get(&conn, &agent.id).unwrap();
+        assert_eq!(after_current_turn.last_seen_message_id, Some(10));
+        assert!(!after_current_turn.persona_dirty);
+
+        let serialized = serde_json::to_value(after_current_turn).unwrap();
+        assert_eq!(serialized["sessionId"], "thread-1");
+        assert_eq!(serialized["lastSeenMessageId"], 10);
+    }
+
+    #[test]
+    fn changing_cli_or_model_invalidates_session() {
+        let (conn, pid) = setup();
+        let agent = create(&conn, &pid, &input("老王", true)).unwrap();
+        set_session(&conn, &agent.id, Some("thread-1")).unwrap();
+
+        let mut changed_cli = input("老王", true);
+        changed_cli.cli = "codex".into();
+        assert_eq!(update(&conn, &agent.id, &changed_cli).unwrap().session_id, None);
+
+        set_session(&conn, &agent.id, Some("thread-2")).unwrap();
+        let mut changed_model = changed_cli.clone();
+        changed_model.model = Some("模型甲".into());
+        assert_eq!(update(&conn, &agent.id, &changed_model).unwrap().session_id, None);
+    }
+
+    #[test]
+    fn changing_project_directory_invalidates_all_agent_sessions() {
+        let (conn, pid) = setup();
+        let first = create(&conn, &pid, &input("组长", true)).unwrap();
+        let second = create(&conn, &pid, &input("成员", false)).unwrap();
+        set_session(&conn, &first.id, Some("thread-1")).unwrap();
+        set_session(&conn, &second.id, Some("thread-2")).unwrap();
+
+        projects::update(&conn, &pid, "测试项目", "", "/tmp/新目录").unwrap();
+        assert_eq!(get(&conn, &first.id).unwrap().session_id, None);
+        assert_eq!(get(&conn, &second.id).unwrap().session_id, None);
     }
 
     #[test]

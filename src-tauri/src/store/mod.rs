@@ -1,6 +1,8 @@
 pub mod agents;
 pub mod migrations;
+pub mod messages;
 pub mod projects;
+pub mod runs;
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};

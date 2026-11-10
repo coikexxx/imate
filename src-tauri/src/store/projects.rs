@@ -114,7 +114,9 @@ pub fn update(
     folder_path: &str,
 ) -> AppResult<Project> {
     let (name, folder_path) = validate(name, folder_path)?;
-    let changed = conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let old = get(&tx, id)?;
+    let changed = tx.execute(
         "UPDATE projects SET name = ?1, description = ?2, folder_path = ?3, updated_at = ?4 \
          WHERE id = ?5",
         params![name, description.trim(), folder_path, now_ms(), id],
@@ -122,6 +124,13 @@ pub fn update(
     if changed == 0 {
         return Err(AppError::NotFound(format!("项目 {id}")));
     }
+    if old.folder_path != folder_path {
+        tx.execute(
+            "UPDATE agents SET session_id = NULL WHERE project_id = ?1",
+            [id],
+        )?;
+    }
+    tx.commit()?;
     get(conn, id)
 }
 
