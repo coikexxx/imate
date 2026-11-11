@@ -1,3 +1,4 @@
+pub mod grok;
 pub mod codex;
 pub mod claude;
 use std::ffi::OsString;
