@@ -64,6 +64,9 @@ pub fn run() {
             commands::delete_rule,
             commands::list_rule_templates,
             commands::list_persona_templates,
+            commands::list_files,
+            commands::open_file,
+            commands::watch_project,
         ])
         .build(tauri::generate_context!())
         .expect("无法构建 imates 应用");

@@ -137,7 +137,11 @@ pub fn update_project(
     let runtime = state.runtime_lock()?;
     let conn = lock(&state)?;
     let project = projects::get(&conn, &id)?;
-    if project.folder_path != folder_path { runtime.ensure_project_idle(&id)?; }
+    if project.folder_path != folder_path {
+        runtime.ensure_project_idle(&id)?;
+        state.watch.remove(&id);
+        conn.execute("DELETE FROM settings WHERE key=?1", [format!("{RULES_DIGEST_PREFIX}{id}")])?;
+    }
     projects::update(&conn, &id, &name, &description, &folder_path)
 }
 
@@ -145,7 +149,9 @@ pub fn update_project(
 pub fn delete_project(state: State<'_, AppState>, id: String) -> AppResult<()> {
     let runtime = state.runtime_lock()?;
     runtime.ensure_project_idle(&id)?;
+    state.watch.remove(&id);
     let conn = lock(&state)?;
+    conn.execute("DELETE FROM settings WHERE key=?1", [format!("{RULES_DIGEST_PREFIX}{id}")])?;
     projects::delete(&conn, &id)
 }
 
@@ -199,23 +205,26 @@ pub fn list_rules(state: State<'_, AppState>, project_id: String) -> AppResult<V
     rules::list(Path::new(&folder))
 }
 
-#[tauri::command]
-pub fn save_rule(
-    state: State<'_, AppState>,
-    project_id: String,
-    filename: String,
-    content: String,
-) -> AppResult<()> {
-    state.save_rule_for_project(&project_id, &filename, &content).map(|_| ())
+fn emit_rule_notice(app: &tauri::AppHandle, state: &AppState, project_id: &str, message: Message) {
+    let version = state.rules_version(project_id).unwrap_or_default();
+    emit_events(app, vec![
+        ("message:new", json!({"projectId": project_id, "runId": Value::Null, "message": message})),
+        ("rules:changed", json!({"projectId": project_id, "version": version})),
+    ]);
 }
 
 #[tauri::command]
-pub fn delete_rule(
-    state: State<'_, AppState>,
-    project_id: String,
-    filename: String,
-) -> AppResult<()> {
-    state.delete_rule_for_project(&project_id, &filename).map(|_| ())
+pub fn save_rule(app: tauri::AppHandle, state: State<'_, AppState>, project_id: String, filename: String, content: String) -> AppResult<()> {
+    let message = state.save_rule_for_project(&project_id, &filename, &content)?;
+    emit_rule_notice(&app, state.inner(), &project_id, message);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_rule(app: tauri::AppHandle, state: State<'_, AppState>, project_id: String, filename: String) -> AppResult<()> {
+    let message = state.delete_rule_for_project(&project_id, &filename)?;
+    emit_rule_notice(&app, state.inner(), &project_id, message);
+    Ok(())
 }
 
 #[tauri::command]
@@ -226,6 +235,71 @@ pub fn list_rule_templates() -> Vec<RuleDoc> {
 #[tauri::command]
 pub fn list_persona_templates() -> Vec<PersonaTemplate> {
     templates::persona_templates()
+}
+
+#[tauri::command]
+pub fn list_files(state: State<'_, AppState>, project_id: String) -> AppResult<crate::files::FileListing> {
+    let folder = project_folder(&state, &project_id)?;
+    crate::files::list_files(Path::new(&folder))
+}
+
+#[tauri::command]
+pub fn open_file(app: tauri::AppHandle, state: State<'_, AppState>, project_id: String, path: String) -> AppResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let folder = project_folder(&state, &project_id)?;
+    let target = crate::files::resolve_inside(Path::new(&folder), &path)?;
+    app.opener()
+        .open_path(crate::files::display_path(&target), None::<&str>)
+        .map_err(|error| AppError::Invalid(format!("无法打开文件：{error}")))
+}
+
+#[tauri::command]
+pub fn watch_project(app: tauri::AppHandle, state: State<'_, AppState>, project_id: String) -> AppResult<Vec<String>> {
+    ensure_project_watch(&app, state.inner(), &project_id)?;
+    Ok(state.watch.changed(&project_id))
+}
+
+/// 外部规章变化：写通知并告诉前端刷新。没有变化时什么都不发。
+fn emit_rule_sync(app: &tauri::AppHandle, state: &AppState, project_id: &str) {
+    if let Ok(Some((message, version))) = state.sync_rules(project_id) {
+        emit_events(app, vec![
+            ("message:new", json!({"projectId": project_id, "runId": Value::Null, "message": message})),
+            ("rules:changed", json!({"projectId": project_id, "version": version})),
+        ]);
+    }
+}
+
+/// 确保项目文件夹正在被监听。重复调用没有副作用。
+pub fn ensure_project_watch(app: &tauri::AppHandle, state: &AppState, project_id: &str) -> AppResult<()> {
+    let folder = {
+        let conn = state.db_lock()?;
+        projects::get(&conn, project_id)?.folder_path
+    };
+    let handle = app.clone();
+    let id = project_id.to_string();
+    let created = state.watch.ensure(project_id, Path::new(&folder), move |batch| {
+        let state = handle.state::<AppState>();
+        if !batch.paths.is_empty() {
+            emit_events(&handle, vec![("files:changed", json!({
+                "projectId": id, "paths": batch.paths, "changed": state.watch.changed(&id)}))]);
+        }
+        if batch.rules_touched {
+            emit_rule_sync(&handle, state.inner(), &id);
+        }
+    })?;
+    if created {
+        // 应用没开着的时候规章也可能被改过，开始监听时先对一次账。
+        emit_rule_sync(app, state, project_id);
+    }
+    Ok(())
+}
+
+/// 一条新指令开始：之前的高亮作废。监听启动失败不挡住发送。
+fn begin_change_window(app: &tauri::AppHandle, project_id: &str) {
+    let state = app.state::<AppState>();
+    let _ = ensure_project_watch(app, state.inner(), project_id);
+    state.watch.reset_changed(project_id);
+    emit_events(app, vec![("files:changed", json!({"projectId": project_id, "paths": [], "changed": []}))]);
 }
 
 #[cfg(test)]
@@ -1011,6 +1085,7 @@ pub async fn send_message(app: tauri::AppHandle, state: State<'_, AppState>, pro
         let conn = state.db_lock()?;
         crate::orchestrator::begin_user_instruction(&conn, &project_id, &text)?
     };
+    begin_change_window(&app, &project_id);
     let user_message = {
         let conn = state.db_lock()?;
         messages::get(&conn, instruction.source_message_id)?
@@ -1046,6 +1121,7 @@ async fn launch_direct_message(app: tauri::AppHandle, state: State<'_, AppState>
 }
 
 fn spawn_direct(app: tauri::AppHandle, project_id: String, started: StartedMessage, cli: crate::cli_registry::ResolvedCli) -> AppResult<SendMessageResponse> {
+    begin_change_window(&app, &project_id);
     let response = SendMessageResponse { run_id: started.run_id.clone(), user_message: started.user_message.clone(), agent_message_id: started.agent_message_id };
     emit_events(&app, vec![("message:new", json!({"projectId":project_id,"runId":started.run_id,"message":started.user_message})),
         ("agent:status", json!({"projectId":project_id,"runId":started.run_id,"agentId":started.prepared.agent.id,"status":"thinking"}))]);
