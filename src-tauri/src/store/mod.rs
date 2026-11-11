@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod instructions;
 pub mod migrations;
 pub mod messages;
 pub mod projects;
