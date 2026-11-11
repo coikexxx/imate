@@ -1,3 +1,4 @@
+mod files;
 mod proxy;
 mod dsh_config;
 mod chat;
