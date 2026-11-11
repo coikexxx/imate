@@ -1,6 +1,6 @@
 # imates MVP 开发手册
 
-> 版本：2026-11-11（第 4 版，按 M2 多 Agent 评审校准权限、运行契约与 M3 前置规则）· 状态：M1 已完成；M2 实现已完成，实际验收未闭环。2026-11-11 决定暂不补测剩余三项。M3 实现已落地，自动测试通过，真实 CLI 团队讨论未执行；M5 grok、dsh 与应用统一代理已接入，窗口部分验收通过，跨模式拒写、dsh 余额与 pi 安装仍阻塞
+> 版本：2026-11-11（第 4 版，按 M2 多 Agent 评审校准权限、运行契约与 M3 前置规则）· 状态：M1 已完成；M2 实现已完成，实际验收未闭环。2026-11-11 决定暂不补测剩余三项。M3 实现已落地，自动测试通过，真实 CLI 团队讨论未执行；M5 grok、dsh 与应用统一代理已接入，窗口部分验收通过，Grok 跨模式拒写、Dsh 账号路径接入与 pi 安装仍阻塞
 > 实施计划：[M0 CLI 实测](plans/2026-11-10-M0-CLI实测.md)、[M1 骨架](plans/2026-11-10-M1-骨架.md)、[M2 单 Agent 对话](plans/2026-11-10-M2-单Agent对话.md)、[M3 团队协作](plans/2026-11-11-M3-团队协作.md)、[M5 其余适配器](plans/2026-11-11-M5-其余适配器.md)（实现完成，验收受阻，pi 待安装）
 > 设计依据：[参考项目调研](参考项目调研.md)
 
@@ -161,7 +161,7 @@ pub trait CliAdapter: Send + Sync {
 | claude | `claude -p`，提示词经 stdin | `--output-format stream-json --verbose`，本次没有 token 增量 | `--resume <session_id>`，ID 不变 | `--permission-mode plan`（拦住工作目录里的写，但会写自己的计划目录） | `--permission-mode bypassPermissions`（能写到工作目录外） | Windows 2.1.319 |
 | codex | `codex exec --json -`，提示词经 stdin | `--json`，整段 `agent_message`，没有 token 增量 | `codex exec resume <thread_id> --json -`（不能加 `-s`，权限覆盖待 G1） | `-s read-only` | `-s workspace-write`（Windows 样本可写到工作目录外） | M0 样本 0.167.0 |
 | grok | `grok --prompt-file <文件>` | `--output-format streaming-messages-json`，整段消息。要逐字增量改用 `streaming-json` | `-r <session_id>`，ID 不变 | `--permission-mode plan`（拦住工作目录里的写，但会写自己的会话目录） | `--permission-mode bypassPermissions`（能写到工作目录外） | Windows 1.0.77；本机代理恢复联网，同模式执行/续接通过，plan→execute 工具仍拒写 |
-| dsh | `dsh headless -`，提示词经 stdin；runner 设置 current_dir，M0 人工调用在 Git Bash 用 `cmd //c` | `--json`，整段 `text`，另有 `thinking`。用量在 `step_end.usage`（camelCase） | `--session-id <id>`，ID 不变，`turn` 递增 | `--permission-mode read-only --approval-policy never`（沙箱拒绝写入） | `--permission-mode workspace-write --approval-policy never`（能写到工作目录外） | Windows 0.2.2-rc.1；M5 首回合 cwd 正确，余额不足未完成 |
+| dsh | `dsh headless -`，提示词经 stdin；runner 设置 current_dir，M0 人工调用在 Git Bash 用 `cmd //c` | `--json`，整段 `text`，另有 `thinking`。用量在 `step_end.usage`（camelCase） | `--session-id <id>`，ID 不变，`turn` 递增 | `--permission-mode read-only --approval-policy never`（沙箱拒绝写入） | `--permission-mode workspace-write --approval-policy never`（能写到工作目录外） | Windows 0.2.2-rc.1；原 headless API Key 路径返回 402；临时账号补丁下同会话三回合通过，应用尚未采用 |
 | pi | 实测 | 实测 | 实测 | 实测 | 实测 | 未安装，M5 前需先装 |
 
 某个 CLI 没有强制只读模式时的兜底：仍按其实际能力运行，并在提示词里明确要求"本回合只讨论，不要修改任何文件"；界面标为讨论意图，不承诺文件绝对不变。claude 和 grok 的 `plan` 会写各自的计划/会话目录，提示词兜底仍然要留。dsh 没有 `--model`，模型在 profile 配置里，`agents.model` 对它不起作用。
@@ -177,7 +177,7 @@ M0 确认：claude 的 `bypassPermissions`、codex 的 `workspace-write`、grok 
 | claude | `system/init.permissionMode` 可核对。Windows 2.1.319 在 2026-11-11 有工具层拒写：plan 下 Write 被拒绝且目标文件不存在，bypassPermissions 下 Write 成功。M0 另有写入计划目录的样本。macOS 2.1.322 仍无工具层证据。以上都不等于硬隔离 | Windows 2.1.319 同一 session 的 plan → bypassPermissions → plan 已核对模式、续接和文件事实。macOS 2.1.322 只核对了模式回显和续接，该次 plan 请求没有触发写工具 | macOS G3 与 Windows 2.1.319 都对照了 `result.usage` 与 `model_usage_since_last_result`；后者的 `costUSD` 是本回合费用，`total_cost_usd` 为会话累计；不重复累加 assistant usage | M2 |
 | codex | `thread.started` 无权限字段；Windows M0 有新会话样本，macOS 0.167.0 G1 已有工具和文件事实 | macOS 同模式续接与 Discuss → Execute → Discuss 已通过 G1；结果不外推其他版本/平台 | macOS G2 已证实 `turn.completed.usage` 为线程累计，同会话按可靠基线取差；缓存输入不重复计入 input | M2 |
 | grok | `system/init.permissionMode` 可核对；本次 plan 的 write 被拒且文件不存在，不等于硬隔离 | Windows 1.0.77 经本机代理恢复联网。应用同一执行会话创建文件/续接通过；G4 plan→execute 的回显为 bypassPermissions，但 write 仍按 plan 拒绝，跨模式失败、团队混合模式未通过；macOS 未验证 | G4 两回合 input 从 38776 降至 1203、费用从 0.092212 降至 0.02762，确认不是会话累计；应用成功回合的 token/费用已保存 | M5 已接入，同模式执行通过，混合模式待整改 |
-| dsh | `session` 不回显权限；Windows M0 沙箱行为已有样本；M5 首回合 cwd 与进程目录一致 | M0 同模式续接已有证据；2026-11-11 M5 首回合返回 QUOTA / 402，跨模式未验证；macOS 未验证 | 按 M0 `step_end.usage` 逐步归集，`final` 不含 usage；M5 因余额不足未产生可归一用量，追加验证未完成 | M5 已接入，真实 CLI 验收受阻 |
+| dsh | `session` 不回显权限；Windows M0 沙箱行为已有样本；M5 首回合 cwd 与进程目录一致 | Windows 0.2.2-rc.1 临时启用凭据、授权与账号服务并选择 deepseek-account 后，同一会话 read-only → workspace-write → read-only 的工具和文件事实通过；应用原命令仍走 API Key 并返回 402；macOS 未验证 | 按 `step_end.usage` 逐步归集，`final` 不含 usage；临时账号路径三回合 input 为 2734 / 654 / 514，不是会话累计，费用保持空值 | M5 已接入，临时账号路径通过；应用认证接入和窗口验收待完成 |
 | pi | 未安装、无样本 | 未验证 | 未验证 | M5 |
 
 有权限回显时必须核对，回显不符立即失败；没有回显时只能报告“此版本/平台行为已验证”或“未验证”。G1 至少覆盖同模式续接和同一会话的 `Discuss → Execute → Discuss`，以工具确实尝试写入、工具结果及文件状态共同判定，不能仅凭模型声称遵守只读。跨模式不通过时，不能用单个 `session_id` 承载混合模式；适配器保持该能力阻塞，回填分模式会话或重建会话方案及测试后再启用。
@@ -615,7 +615,7 @@ M2 当前已完成实现，macOS 实际 CLI/UI 验收部分通过。2026-11-11 �
 
 M3 实现已落地。同日自动测试为后端 `cargo test` 144 passed、2 ignored，前端 `npm test` 29 passed，`npm run build` 通过。真实 CLI 团队讨论未执行，因此不把手册第 11 节“正常走完讨论到交付”记为已验收。上述 M2 三项不因 M3 测试通过而改为完成。
 
-M5 当前进度（2026-11-11）：Task 1–6 与 Task 10/11 已完成，应用统一网络代理覆盖全部已接入 CLI（默认跟随系统，可手动或直连），旧 Grok 设置自动迁移。2026-11-11 后端串行 172 passed、2 ignored，前端 32 passed，cargo build 与 npm run build 通过；默认并行测试仍有原有 runner 时序用例失败，未修改断言。窗口清单 1–4、8 通过，7 部分通过；成功 Grok 直接回合保存 token/费用。G4 同会话 plan→execute 仍被工具按 plan 拒写，G5 dsh QUOTA / 402 余额不足，pi 未安装；团队协作及团队用量未验收。M5 未完成，M3 整改仍待定。实测详情见 [CLI 实测记录](CLI实测记录.md)，逐项结果见 [M5 Task 9–11](plans/2026-11-11-M5-其余适配器.md)。不改变 M2、M3 的未验收状态。
+M5 当前进度（2026-11-11）：Task 1–6 与 Task 10/11 已完成，应用统一网络代理覆盖全部已接入 CLI（默认跟随系统，可手动或直连），旧 Grok 设置自动迁移。2026-11-11 后端串行 172 passed、2 ignored，前端 32 passed，cargo build 与 npm run build 通过；默认并行测试仍有原有 runner 时序用例失败，未修改断言。窗口清单 1–4、8 通过，7 部分通过；成功 Grok 直接回合保存 token/费用。G4 同会话 plan→execute 仍被工具按 plan 拒写，G5 原 headless API Key 路径返回 QUOTA / 402；临时账号补丁下三回合通过，应用尚未采用该路径；pi 未安装；团队协作及团队用量未验收。M5 未完成，M3 整改仍待定。实测详情见 [CLI 实测记录](CLI实测记录.md)，逐项结果见 [M5 Task 9–11](plans/2026-11-11-M5-其余适配器.md)。不改变 M2、M3 的未验收状态。
 
 依赖关系：M0 与 M1 互不依赖，可以并行；M2 同时依赖 M0 和 M1；M2 → M3 必须按序。M4 的文件树只依赖 M1，像素办公室依赖 M2 的状态事件；M5 依赖 M2。M4 和 M5 可以在 M3 之后以任意顺序进行。
 

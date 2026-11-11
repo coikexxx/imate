@@ -11,7 +11,7 @@
 |---|---|---|---|
 | Windows / claude 2.1.319 | init 回显模式、同模式续接；M0 的 plan 拒绝项目文件但写入计划目录；2026-11-11 的跨模式 Write 工具层拒绝与成功写入，以及 `result.usage` / 费用语义 | 应用内 Discuss 走查 | 部分通过 |
 | Windows / codex 0.167.0 | 新线程 read-only/workspace-write 行为、续接记忆；thread.started 不回显权限 | G1 resume 权限覆盖及 Discuss → Execute → Discuss；G2 累计/本回合语义；非 git cwd；新 runner 清理 | 未验证 |
-| Windows / grok 1.0.77、dsh 0.2.2-rc.1 | M0 场景；M5 适配器与测试已落地，dsh 首回合 cwd 正确 | 跨模式续接、追加用量对照及应用窗口验收；grok 联网超时，dsh QUOTA / 402 | M5 验收受阻 |
+| Windows / grok 1.0.77、dsh 0.2.2-rc.1 | M0 场景；M5 适配器与测试已落地，dsh 首回合 cwd 正确 | grok 跨模式工具仍拒写；dsh 临时账号补丁三回合通过，但应用原 headless 认证路径未改；团队窗口验收未完成 | M5 验收受阻 |
 | macOS / Claude Code 2.1.322、Codex 0.167.0 | G1/G2 CLI 基线；G3 Claude 模式回显和续接；M2 应用对话、点名、停止与草稿保存见后文 | Claude 工具层拒写；Finder/Dock PATH；异常退出后的实际恢复 | 部分通过 |
 | pi | M0 未安装 | M5 安装登录后重新实测 | 未执行 |
 
@@ -307,23 +307,23 @@ Windows 用例覆盖了关闭 stdout 后的 EOF 宽限、父进程先退出并�
 
 不能以文件不存在认定只读生效：本次根本没有进入可观测的模型回合。需恢复 Grok 网络访问后重新执行 G4。
 
-### G5 dsh：余额不足，未完成
+### G5 dsh：原 headless API Key 路径返回 402，后续账号核对见文末
 
 首回合命令为 `dsh headless --json --permission-mode read-only --approval-policy never -`，使用上文解析后的真实入口启动。20.39 秒后退出码为 1。session 事件的 cwd 与临时项目目录一致，session ID 为 `session-99adadb5-f0f6-475c-9039-f00ed53d6496`；无权限回显。没有工具调用。最终 `reason.kind=error`、`error.code=QUOTA`、`error.status=402`，错误正文为 `Insufficient Balance`。未修改任何测试目标文件。
 
 | 回合 | 结果 | 会话、工具与文件事实 |
 |---|---|---|
 | 1，read-only | QUOTA / 402 / Insufficient Balance | cwd 正确；无 write 调用；`blocked-first.txt` 不存在，不能据此验收只读拒写 |
-| 2，workspace-write 续接 | 未执行 | 按计划遇到充值阻塞即停止 |
+| 2，workspace-write 续接 | 未执行 | 原 headless 路径返回 402，停止后续回合 |
 | 3，read-only 续接 | 未执行 | 跨模式切回及工具层拒写未验证 |
 
-唯一 step_end 没有 usage，final 的键为 type、sessionId、reason、text。这里不能归一为 0 token，也没有可用的本回合/累计对照。需充值后重新执行 G5。
+唯一 step_end 没有 usage，final 的键为 type、sessionId、reason、text。这里不能归一为 0 token，也没有可用的本回合/累计对照。该次 API Key 路径失败不证明 Web 登录账号余额不足；后续账号路径复测见文末。
 
 ### 已确认与保留项
 
 两个适配器的解析与用量规则以同版本的 M0 真实样本及测试为依据，本次失败没有产生与该证据矛盾的用量读数；没有据此编造新的归一语义。G4/G5 跨模式验收、成功回合用量追加对照未完成；窗口部分走查见下文，macOS 未验证。pi 未安装，未录制样本或编写适配器。
 
-本次原始输出仅保存在仓库之外的临时目录，未入库；记录中的路径与请求标识已省略。网络恢复、余额补足后按 M5 Task 7 重跑，不将这次失败记为通过。
+本次原始输出仅保存在仓库之外的临时目录，未入库；记录中的路径与请求标识已省略。网络及认证路径确认后按 M5 Task 7 重跑，不将这次失败记为通过。
 
 
 ### M5 窗口走查与复测（增加代理配置前）
@@ -368,4 +368,45 @@ Dsh 仍为 QUOTA / 402，未再调用；Pi 未安装。完整团队讨论/执行
 
 真实 Tauri 窗口完成系统代理显示、非法地址报错保留输入、手动与直连保存/重新打开，以及项目页修改后首页读到同一配置的检查；最终恢复 system。只读数据库查询：测试前仅旧 grok_proxy 键，测试后为 network_proxy，值均为 system / 空地址。旧设置自动迁移，冲突优先保留统一配置，非法值不静默删除，迁移失败回滚由自动测试覆盖。
 
-代理测试先 5 failed / 5 passed，实现后 10 passed；全套后端串行 172 passed、2 ignored，前端 32 passed，两端构建通过。所有已接入 CLI 的两种运行模式、设置改变前后的适配器环境快照及 runner 真实子进程传递均有断言；原有默认并行时序限制未处理。本次没有新增真实模型 API 请求，不代表所有供应商联网或完整团队流程已验收；Grok 跨模式拒写、Dsh 余额与 Pi 安装仍阻塞。
+代理测试先 5 failed / 5 passed，实现后 10 passed；全套后端串行 172 passed、2 ignored，前端 32 passed，两端构建通过。所有已接入 CLI 的两种运行模式、设置改变前后的适配器环境快照及 runner 真实子进程传递均有断言；原有默认并行时序限制未处理。本次没有新增真实模型 API 请求，不代表所有供应商联网或完整团队流程已验收；Grok 跨模式拒写、Dsh 认证路径与 Pi 安装仍阻塞；Dsh 后续账号核对见下节。
+
+### Dsh Web 账号与 headless 认证核对（2026-11-11）
+
+用户确认通过 `dsh web` 的账号信息查看余额。核对本机启动器、版本与组合配置：Web 和应用使用同一 Dsh 0.2.2-rc.1 入口，但 Web 默认 provider 为 `deepseek-account`，headless 为 `deepseek-official`（API Key）。`deepseek-official` 不读取账号登录态。因此前述 QUOTA / 402 是 API Key 路径返回的错误，不能据此判断 Web 登录账号余额不足，也不能要求用户充值来修复账号接入。
+
+本机 Dsh 源码 `packages/bundle/headless/cordis.patch.yml` 默认禁用 credentials、authorization 和 deepseek-account；本机组合配置中 credentials 已启用，authorization 与 deepseek-account 仍禁用。只临时切 provider 时返回 `ACCOUNT_SIGN_IN_REQUIRED`；再启用 deepseek-account 时 stderr 明确提示 `pending (waiting for service: authorization)`，说明该错误也可能来自服务未启动，而非用户没有登录。仅核对已保存 grant 的结构、存在性与 issuer 是否匹配，没有输出 token、API Key 或账号身份。
+
+最终在仓库外临时目录通过 `--profile headless --patch <临时账号补丁> --json ... -`，使用以下不含凭据的配置：
+
+```yaml
+- id: agent-default-model
+  config:
+    provider: deepseek-account
+    model: deepseek-flash
+- id: credentials
+  disabled: false
+- id: authorization
+  disabled: false
+- id: deepseek-account
+  disabled: false
+```
+
+该补丁只用于测试进程，未写入用户全局 profile，也未改动 imates 的现有适配器命令。提示词经 stdin，实际 node/入口直接启动，cwd 为仓库外非 git 临时目录。三回合均 exit=0、final.reason.kind=completed、cwd 正确，沿用同一个 session：
+
+| 回合 | 耗时 | 工具与文件事实 | 结果 |
+|---|---:|---|---|
+| read-only | 18.53 秒 | write 返回 FS_SANDBOX_DENIED；blocked-first.txt 不存在 | 工具层拒写通过 |
+| workspace-write 续接 | 10.93 秒 | write/read 完成；created.txt 严格为 g-execute；正确复述 blocked-first.txt | 执行与续接通过 |
+| read-only 续接 | 9.97 秒 | 两次 write 均为 FS_SANDBOX_DENIED；created.txt 保持 g-execute；blocked-again.txt 不存在 | 切回只读通过 |
+
+逐步汇总 `step_end.usage`，各步原始字段均存在，费用字段仍未知：
+
+| 回合 | inputTokens | outputTokens | cacheReadInputTokens | cacheCreationInputTokens | costUsd |
+|---|---:|---:|---:|---:|---|
+| 1 | 2734 | 404 | 13824 | 0 | 空 |
+| 2 | 654 | 220 | 26368 | 0 | 空 |
+| 3 | 514 | 290 | 18560 | 0 | 空 |
+
+inputTokens 随续接回合下降，支持逐回合归集而非会话累计；未重复累加 final。原始输出仅留仓库外临时目录。用户原有 Web 进程仍运行。
+
+结论：已登录账号可以完成模型调用和同会话跨模式切换；原先“需要充值”的判断已更正。现有 imates 仍调用原 headless 路径，未自动采用该补丁，应用内 Dsh 创建文件、团队流程及团队用量仍未验收。下一步需确定账号接入方式，不能把临时诊断成功写成应用修复完成。
