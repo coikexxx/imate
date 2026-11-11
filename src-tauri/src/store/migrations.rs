@@ -77,6 +77,46 @@ CREATE TABLE settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+"#, r#"
+CREATE TABLE instructions (
+    id                     TEXT PRIMARY KEY,
+    project_id             TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_message_id      INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
+    kind                   TEXT NOT NULL,
+    target_agent_id        TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    phase                  TEXT NOT NULL,
+    status                 TEXT NOT NULL,
+    discuss_rounds         INTEGER NOT NULL DEFAULT 0,
+    turn_count             INTEGER NOT NULL DEFAULT 0,
+    current_batch          TEXT,
+    resume_phase           TEXT,
+    context_snapshot_json  TEXT,
+    wait_reason            TEXT,
+    created_at             INTEGER NOT NULL,
+    updated_at             INTEGER NOT NULL,
+    finished_at            INTEGER
+);
+
+CREATE TABLE instruction_inputs (
+    id               TEXT PRIMARY KEY,
+    instruction_id   TEXT NOT NULL REFERENCES instructions(id) ON DELETE CASCADE,
+    message_id       INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    kind             TEXT NOT NULL,
+    target_agent_id  TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    status           TEXT NOT NULL,
+    created_at       INTEGER NOT NULL,
+    finished_at      INTEGER
+);
+CREATE INDEX instruction_inputs_by_message ON instruction_inputs(instruction_id, message_id);
+
+ALTER TABLE tasks ADD COLUMN instruction_id TEXT REFERENCES instructions(id) ON DELETE SET NULL;
+ALTER TABLE tasks ADD COLUMN batch_id TEXT;
+ALTER TABLE tasks ADD COLUMN superseded_by_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL;
+
+ALTER TABLE runs ADD COLUMN instruction_id TEXT REFERENCES instructions(id) ON DELETE SET NULL;
+ALTER TABLE runs ADD COLUMN task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL;
+
+ALTER TABLE agents ADD COLUMN name_key TEXT;
 "#];
 
 /// 把数据库升级到最新版本。版本号记在 `PRAGMA user_version`。
@@ -85,8 +125,87 @@ pub fn migrate(conn: &mut Connection) -> AppResult<()> {
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
         let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
+        if index + 1 == 2 {
+            backfill_name_keys(&tx)?;
+        }
         tx.pragma_update(None, "user_version", (index + 1) as i64)?;
         tx.commit()?;
     }
     Ok(())
+}
+
+/// 只填充空白的 `name_key`。同一项目归一化后重名时不建唯一索引，调用方事务会回滚。
+fn backfill_name_keys(conn: &Connection) -> AppResult<()> {
+    let mut stmt = conn.prepare("SELECT id, project_id, name, name_key FROM agents")?;
+    let rows: Vec<(String, String, String, Option<String>)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+        .collect::<Result<_, _>>()?;
+    drop(stmt);
+    let mut seen = std::collections::HashMap::<(String, String), String>::new();
+    for (id, project_id, name, name_key) in &rows {
+        let key = name_key.clone().filter(|key| !key.is_empty()).unwrap_or_else(|| name.trim().to_lowercase());
+        if let Some(other) = seen.insert((project_id.clone(), key), id.clone()) {
+            if other != *id {
+                return Err(crate::error::AppError::Invalid("成员名归一后有冲突，请先修改名称".into()));
+            }
+        }
+    }
+    for (id, _, name, name_key) in &rows {
+        if name_key.as_deref().unwrap_or("").is_empty() {
+            conn.execute("UPDATE agents SET name_key = ?1 WHERE id = ?2", rusqlite::params![name.trim().to_lowercase(), id])?;
+        }
+    }
+    conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS agents_name_key ON agents(project_id, name_key);")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v1_with_project(conn: &Connection) {
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute(
+            "INSERT INTO projects (id,name,description,folder_path,status,created_at,updated_at) VALUES ('p','甲','','/tmp','idle',1,1)",
+            [],
+        ).unwrap();
+    }
+
+    #[test]
+    fn m3_migration_appends_instruction_tables_and_rejects_ambiguous_names() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        v1_with_project(&conn);
+        conn.execute("INSERT INTO agents (id,project_id,name,role,persona,cli,is_leader,seat_index,created_at) VALUES ('a','p','前端','开发','x','claude',1,0,1)", []).unwrap();
+        conn.execute("INSERT INTO agents (id,project_id,name,role,persona,cli,is_leader,seat_index,created_at) VALUES ('b','p',' 前端 ','开发','x','codex',0,1,1)", []).unwrap();
+        assert!(migrate(&mut conn).is_err());
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn m3_migration_backfills_name_keys_and_accepts_an_instruction() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        v1_with_project(&conn);
+        conn.execute("INSERT INTO agents (id,project_id,name,role,persona,cli,is_leader,seat_index,created_at) VALUES ('a','p',' 前端 ','开发','x','claude',1,0,1)", []).unwrap();
+        conn.execute("INSERT INTO agents (id,project_id,name,role,persona,cli,is_leader,seat_index,created_at) VALUES ('b','p','测试','测试','x','codex',0,1,1)", []).unwrap();
+        migrate(&mut conn).unwrap();
+        let keys: Vec<(String, String)> = {
+            let mut stmt = conn.prepare("SELECT id, name_key FROM agents ORDER BY id").unwrap();
+            stmt.query_map([], |row| Ok((row.get(1)?, row.get(0)?))).unwrap().map(|row| row.unwrap()).collect()
+        };
+        assert_eq!(keys, vec![("前端".into(), "a".into()), ("测试".into(), "b".into())]);
+        conn.execute("INSERT INTO messages (project_id,sender_type,kind,content,created_at) VALUES ('p','user','instruction','开始',1)", []).unwrap();
+        let message_id: i64 = conn.query_row("SELECT id FROM messages", [], |row| row.get(0)).unwrap();
+        conn.execute(
+            "INSERT INTO instructions (id,project_id,source_message_id,kind,phase,status,discuss_rounds,turn_count,created_at,updated_at) VALUES ('i','p',?1,'team','triage','running',0,0,1,1)",
+            [message_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id,project_id,title,order_index,created_at) VALUES ('t','p','旧任务',0,1)",
+            [],
+        ).unwrap();
+        let instruction_id: Option<String> = conn.query_row("SELECT instruction_id FROM tasks WHERE id='t'", [], |row| row.get(0)).unwrap();
+        assert_eq!(instruction_id, None);
+    }
 }
