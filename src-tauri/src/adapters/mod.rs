@@ -1,3 +1,4 @@
+pub mod dsh;
 pub mod grok;
 pub mod codex;
 pub mod claude;

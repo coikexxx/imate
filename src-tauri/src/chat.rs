@@ -115,7 +115,7 @@ pub fn should_rebuild_session(outcome: &crate::runner::RunOutcome, had_session: 
         return false;
     }
     let error = outcome.error.as_deref().unwrap_or_default().to_lowercase();
-    ["session not found", "session does not exist", "session doesn't exist", "no conversation found", "invalid session", "session is corrupt", "thread not found", "thread does not exist", "conversation not found", "conversation does not exist", "会话不存在", "会话损坏", "找不到会话"]
+    ["session not found", "session does not exist", "session doesn't exist", "no conversation found", "invalid session", "session is corrupt", "thread not found", "thread does not exist", "conversation not found", "conversation does not exist", "omit --session-id to start a new session", "会话不存在", "会话损坏", "找不到会话"]
         .iter().any(|pattern| error.contains(pattern))
 }
 
@@ -229,6 +229,16 @@ mod tests {
         assert!(!should_rebuild_session(&timeout, true, false));
         let mut unrelated = base; unrelated.error = Some("model not found".into());
         assert!(!should_rebuild_session(&unrelated, true, false));
+    }
+
+    #[test]
+    fn dsh_unknown_session_error_allows_one_rebuild() {
+        let outcome = crate::runner::RunOutcome { status: "failed".into(), session_id: Some("session-old".into()),
+            final_text: String::new(), partial_text: String::new(), usage: None, exit_code: Some(1),
+            error: Some("session \"session-old\" does not exist; omit --session-id to start a new Session".into()),
+            tool_seen: false, cleanup_complete: true };
+        assert!(should_rebuild_session(&outcome, true, false));
+        assert!(!should_rebuild_session(&outcome, true, true));
     }
 
 }
