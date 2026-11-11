@@ -420,3 +420,33 @@ inputTokens 随续接回合下降，支持逐回合归集而非会话累计；�
 新桥接真实目录读取：Web 约 5.47 秒、headless 约 4.68 秒，均 exit=0，仅产生 imates_dsh_catalog 事件。Web 返回 liberation、claude、kimi、gpt、deepseek-official、deepseek-account；headless 无 kimi/gpt，模型亦有不同。样本位于 src-tauri/tests/fixtures/dsh/models.json，只保留目录 ID/显示名，无端点或凭据。账号和自定义模型生成、窗口验收将在 Task 13 单独记录，此时仍未验收。
 
 自动检查：后端串行 180 passed、2 ignored，前端 33 passed，Node 桥接 4 passed，cargo build/npm run build 均通过。
+
+### Dsh 新桥接与应用验收（Task 13，2026-11-11）
+
+Windows Dsh 0.2.2-rc.1；真实调用均在仓库外临时目录，应用使用统一 system 代理，独立 CLI 测试显式沿用本机代理。来源配置通过 Dsh 自带 app-boot 只读 API 组合，只在测试子进程内启用服务，没有改写用户 profile 或输出凭据。
+
+**账号三回合（新桥接）：** 同一 session，全部 exit=0 / completed。
+
+| 回合 | 耗时 | 工具及文件事实 | inputTokens | outputTokens | cacheReadTokens | cacheWriteTokens |
+|---|---:|---|---:|---:|---:|---:|
+| read-only | 10.47 秒 | write 返回 FS_SANDBOX_DENIED，glob 确认 blocked-first.txt 不存在 | 2936 | 488 | 22144 | 0 |
+| workspace-write | 9.18 秒 | write/read 成功，created.txt 严格为 g-execute；正确复述首回合文件名 | 687 | 309 | 26496 | 0 |
+| read-only | 9.66 秒 | 两次 write 均拒绝，created.txt 保持 g-execute，blocked-again.txt 不存在 | 661 | 482 | 28672 | 0 |
+
+**自定义模型：** 显式选择 Web / gpt / gpt-6.1-sol（沿用 Dsh 中已有配置），18.32 秒创建 custom.txt，文件严格为 custom-model-ok；8.86 秒同 session 续接，无工具调用，正确复述文件名和内容。逐步汇总 input/output 分别为 11427/68、296/15；第一回合缓存字段并非每步都存在，汇总保持未知；第二回合 cacheRead=11008。费用仍未知。桥接没有把任一未知字段填成零。
+
+另一次显式选择 Web / gpt / gpt-6 在 8.70 秒后 exit=1，原生 final.reason.error 为 `PI_AI_ERROR / Upstream request failed`；无正文、工具或文件，未回退其他模型。错误发生于已开始的模型回合，不能据此称其他自定义模型不可用；gpt-6.1-sol 的成功调用单独记录。没有进行反复重试或修改用户网关配置。
+
+**真实 Tauri 窗口：** 通过 WebView2 调试接口发送鼠标/键盘及选择操作，未模拟 Tauri IPC。完成首页 headless 默认值检查；账号+headless 来源保存、重新打开；改为 Web 后项目页读取相同设置；成员下拉显示实际已配置模型；选择 Web/gpt/gpt-6.1-sol 后切 headless 来源，选择仍保留且标为“当前列表暂不可用”；恢复 Web、保存、重新编辑仍保留该模型。成员表单内的 Dsh 设置入口同样可用。截图已检查。
+
+| 应用直接回合 | 文件/回复 | 运行结果 | inputTokens | outputTokens | cacheReadInputTokens | cacheCreationInputTokens | costUsd |
+|---|---|---|---:|---:|---|---|---|
+| 默认账号、model=null | b-account.txt 严格为 account-ui-ok | ok | 4047 | 970 | 33920 | 0 | 空 |
+| Web/gpt/gpt-6.1-sol | c-custom.txt 严格为 custom-ui-ok | ok | 13732 | 107 | 空（部分步缺字段） | 空 | 空 |
+| 自定义模型续接 | 无工具，正确复述 c-custom.txt/custom-ui-ok | ok，同 session | 1043 | 11 | 10952 | 空 | 空 |
+
+数据库核对 agents.model 精确保存 {profile:web,provider:gpt,model:gpt-6.1-sol}；修改模型后账号会话失效，新建自定义模型 session，后续自定义回合保持该 session。三个成功直接回合 usage_json 均存在，仅存有依据的字段。未把这些直接回合计为团队用量验收。
+
+**停止与清理：** 自定义模型再次启动后实际点击停止；本次运行 cancelled，指令进入 waiting_user；本次 Dsh 进程退出，应用创建的 mjs/json 辅助文件删除，已有文件不变。随后放弃这条测试指令，项目恢复 idle。成功结束和上游失败的临时桥接文件也已清理。测试窗口正常关闭；原 Dsh Web 仍监听本机 3080，未关闭用户进程。最终应用认证为 account，目录来源为 web，网络代理为 system；验收成员保留已选择的自定义模型。
+
+Task 9 清单 1–5、8 已通过；其中旧第 2 项的“禁用模型框”已由用户新规格替代并重验。第 7 项 Grok/Dsh 直接回合停止通过，团队停止未验收。第 6/10 项团队完整流程/团队用量、第 9 可选项仍未验收；Grok 同 session 跨模式拒写、Pi 未安装保持原状，M5 不标完成。M2/M3 的未验收与 M3 整改状态不变。原始输出、截图和数据库摘要只留仓库外临时目录。
