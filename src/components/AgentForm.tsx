@@ -1,3 +1,4 @@
+import { modelIgnored } from "../lib/clis";
 import { useState } from "react";
 import { api } from "../api";
 import { composePersona, emptyPersona, parsePersona } from "../lib/persona";
@@ -63,13 +64,13 @@ export function AgentForm({
       role: role.trim(),
       persona,
       cli,
-      model: model.trim() || null,
+      model: modelIgnored(cli) ? null : model.trim() || null,
       isLeader,
     };
     const selected = clis.find((c) => c.id === cli);
     const duplicate = takenNames.some((other) => normalizeName(other) === normalizeName(input.name));
     const problem = duplicate ? `成员名「${input.name}」已存在` :
-      !selected?.supported ? "该 CLI 尚未接入，M5 阶段实现" : !selected.installed ? "请先安装所选 CLI" : validateAgent(input, takenNames);
+      !selected?.supported ? "该 CLI 尚未接入" : !selected.installed ? "请先安装所选 CLI" : validateAgent(input, takenNames);
     if (problem) {
       setError(problem);
       return;
@@ -118,13 +119,13 @@ export function AgentForm({
             {clis.map((c) => (
               <option key={c.id} value={c.id} disabled={!c.installed || !c.supported}>
                 {c.label}
-                {!c.supported ? "（M5 接入）" : c.installed ? (c.version ? `（${c.version}）` : "") : "（未安装）"}
+                {!c.supported ? "（尚未接入）" : c.installed ? (c.version ? `（${c.version}）` : "") : "（未安装）"}
               </option>
             ))}
           </select>
         </Field>
-        <Field label="模型（可选，留空用 CLI 默认）">
-          <input className={inputClass} value={model} onChange={(e) => setModel(e.target.value)} />
+        <Field label={modelIgnored(cli) ? "模型（DeepSeek Harness 在自己的 profile 里配置，这里不生效）" : "模型（可选，留空用 CLI 默认）"}>
+          <input className={inputClass} value={modelIgnored(cli) ? "" : model} disabled={modelIgnored(cli)} onChange={(e) => setModel(e.target.value)} />
         </Field>
       </div>
 

@@ -62,7 +62,7 @@ pub fn is_known(id: &str) -> bool {
 }
 
 pub fn is_supported(id: &str) -> bool {
-    matches!(id, "claude" | "codex")
+    matches!(id, "claude" | "codex" | "grok" | "dsh")
 }
 
 /// 从 `--version` 输出里取出第一个以数字开头且含点的版本词。
@@ -312,13 +312,13 @@ mod tests {
     }
 
     #[test]
-    fn supported_clis_preserve_display_order_but_only_enable_m2_adapters() {
+    fn supported_clis_preserve_display_order_and_leave_only_pi_pending() {
         let clis = detect_with(|_| None, |_| None);
         let ids: Vec<&str> = clis.iter().map(|cli| cli.id.as_str()).collect();
         assert_eq!(ids, ["claude", "codex", "grok", "dsh", "pi"]);
         assert_eq!(
             clis.iter().map(|cli| cli.supported).collect::<Vec<_>>(),
-            [true, true, false, false, false]
+            [true, true, true, true, false]
         );
     }
 

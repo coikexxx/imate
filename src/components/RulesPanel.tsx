@@ -1,3 +1,4 @@
+import { assistantAvailable } from "../lib/clis";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
@@ -36,7 +37,7 @@ export function RulesPanel({ projectId, project, agents, clis }: { projectId: st
 
   const saved = rules.find((rule) => rule.filename === selected);
   const dirty = saved !== undefined && saved.content !== draft;
-  const assistantReady = clis.some((cli) => cli.installed && cli.supported && ["claude", "codex"].includes(cli.id));
+  const assistantReady = assistantAvailable(clis);
   const context = (extra: Pick<DraftInput, "memberName" | "role" | "targetFilename">): Omit<DraftInput, "draftId" | "currentText" | "feedback"> => ({
     ...extra, folderPath: project.folderPath, projectName: project.name, description: project.description,
     rules: rules.map((rule) => rule.filename === selected ? { ...rule, content: draft } : rule),
@@ -123,7 +124,7 @@ export function RulesPanel({ projectId, project, agents, clis }: { projectId: st
 
       {selected !== null && (
         <>
-          <Button disabled={!assistantReady || !saved} title={!assistantReady ? "没有已安装且已接入的 Claude Code 或 Codex" : "只重写当前选中规章"}
+          <Button disabled={!assistantReady || !saved} title={!assistantReady ? "没有已安装且已接入的 CLI" : "只重写当前选中规章"}
             onClick={() => setDraftOpen(true)}>AI 重写当前规章</Button>
           <textarea
             className={`${inputClass} min-h-40 flex-1 font-mono`}

@@ -1,3 +1,4 @@
+import { assistantAvailable } from "../lib/clis";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
@@ -107,7 +108,7 @@ export default function Project() {
   }
 
   const editingAgent = editing?.kind === "edit" ? editing.agent : null;
-  const assistantReady = clis.some((cli) => cli.installed && cli.supported && ["claude", "codex"].includes(cli.id));
+  const assistantReady = assistantAvailable(clis);
   async function openAgentForm(target: Editing) {
     try { setProjectRules(await api.listRules(id)); setEditing(target); }
     catch (failure) { setError(String(failure)); }
@@ -198,7 +199,7 @@ export default function Project() {
               folderPath: project.folderPath, projectName: project.name, description: project.description,
               rules: projectRules, members: agents.map((agent) => ({ name: agent.name, role: agent.role, persona: agent.persona })),
             } : undefined}
-            assistantUnavailableReason={!detail.folderExists ? "项目文件夹不存在，无法起草" : !assistantReady ? "没有已安装且已接入的 Claude Code 或 Codex" : undefined}
+            assistantUnavailableReason={!detail.folderExists ? "项目文件夹不存在，无法起草" : !assistantReady ? "没有已安装且已接入的 CLI" : undefined}
           />
           {editingAgent && !editingAgent.isLeader && (
             <div className="mt-4 border-t border-slate-800 pt-4">

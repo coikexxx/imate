@@ -400,7 +400,7 @@ mod tests {
         ));
 
         let mut unsupported = input("测试", false);
-        unsupported.cli = "grok".into();
+        unsupported.cli = "pi".into();
         let error = normalize(&unsupported).unwrap_err().to_string();
         assert!(error.contains("M5"), "{error}");
     }

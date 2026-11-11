@@ -209,14 +209,15 @@ pub fn choose_cli_id(explicit: Option<&str>, clis: &[crate::cli_registry::CliInf
         return clis.iter().find(|cli| cli.id == id && cli.installed && cli.supported).map(|cli| cli.id.clone())
             .ok_or_else(|| invalid(format!("未找到已安装的助理 CLI：{id}")));
     }
-    ["claude", "codex"].iter().find_map(|id| clis.iter().find(|cli| cli.id == *id && cli.installed && cli.supported).map(|cli| cli.id.clone()))
-        .ok_or_else(|| invalid("没有已安装且已接入的助理 CLI，请安装 Claude Code 或 Codex"))
+    crate::cli_registry::KNOWN_CLIS.iter()
+        .find_map(|spec| clis.iter().find(|cli| cli.id == spec.id && cli.installed && cli.supported).map(|cli| cli.id.clone()))
+        .ok_or_else(|| invalid("没有已安装且已接入的助理 CLI，请先安装并登录 Claude Code、Codex、Grok 或 DeepSeek Harness 之一"))
 }
 
 impl AppState {
     pub fn prepare_draft(&self, kind: DraftKind, input: &DraftInput, cli: &crate::cli_registry::ResolvedCli) -> AppResult<StartedDraft> {
         validate_input(input, kind)?;
-        if !cli.info.supported || !matches!(cli.info.id.as_str(), "claude" | "codex") {
+        if !cli.info.supported {
             return Err(invalid(format!("助理 CLI「{}」尚未接入，计划在 M5 实现", cli.info.id)));
         }
         let folder = Path::new(&input.folder_path).canonicalize().map_err(|_| invalid("项目目录不存在或无法读取"))?;
@@ -456,8 +457,14 @@ mod tests {
     fn explicit_unsupported_cli_does_not_fall_back() {
         let mut clis = vec![cli().info]; let mut claude = clis[0].clone(); claude.id = "claude".into(); clis.push(claude);
         assert_eq!(choose_cli_id(None, &clis).unwrap(), "claude");
-        assert!(choose_cli_id(Some("grok"), &clis).unwrap_err().to_string().contains("M5"));
-        assert!(choose_cli_id(Some("pi"), &clis).is_err());
+        assert!(choose_cli_id(Some("pi"), &clis).unwrap_err().to_string().contains("尚未接入"));
+        assert!(choose_cli_id(Some("grok"), &clis).unwrap_err().to_string().contains("未找到已安装"));
+        let mut grok = clis[0].clone(); grok.id = "grok".into();
+        let mut dsh = clis[0].clone(); dsh.id = "dsh".into();
+        assert_eq!(choose_cli_id(Some("grok"), &[grok.clone()]).unwrap(), "grok");
+        assert_eq!(choose_cli_id(None, &[dsh.clone(), grok]).unwrap(), "grok", "默认按 claude、codex、grok、dsh 的顺序取");
+        assert_eq!(choose_cli_id(None, &[dsh]).unwrap(), "dsh");
+        assert!(choose_cli_id(None, &[]).is_err());
     }
     #[test]
     fn draft_runs_have_no_agent_or_chat_messages_and_feedback_resumes() {

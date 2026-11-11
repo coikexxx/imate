@@ -593,6 +593,8 @@ pub fn make_adapter(cli: &crate::cli_registry::ResolvedCli, mode: RunMode, basel
     match cli.info.id.as_str() {
         "claude" => Ok(Box::new(crate::adapters::claude::ClaudeAdapter::new(cli.program.clone(), mode).with_environment(cli))),
         "codex" => Ok(Box::new(crate::adapters::codex::CodexAdapter::new(cli.program.clone(), mode, baseline).with_environment(cli))),
+        "grok" => Ok(Box::new(crate::adapters::grok::GrokAdapter::new(cli.program.clone(), mode).with_environment(cli))),
+        "dsh" => Ok(Box::new(crate::adapters::dsh::DshAdapter::new(cli.program.clone(), mode).with_environment(cli))),
         id => Err(AppError::Invalid(format!("CLI {id} 尚未接入，计划在 M5 实现"))),
     }
 }
@@ -1465,4 +1467,20 @@ mod integration_tests {
             unsafe { libc::kill(pid as i32, libc::SIGKILL); }
         }
     }
+    #[test]
+    fn make_adapter_covers_every_supported_cli_and_rejects_pi() {
+        use crate::adapters::RunMode;
+        let resolved = |id: &str| crate::cli_registry::ResolvedCli {
+            info: crate::cli_registry::CliInfo { id: id.into(), label: id.into(), installed: true,
+                supported: crate::cli_registry::is_supported(id), path: Some("/bin/test".into()), version: None },
+            program: "/bin/test".into(), path_env: "/bin".into(),
+            environment_source: crate::cli_registry::EnvironmentSource::Process,
+        };
+        for id in ["claude", "codex", "grok", "dsh"] {
+            let adapter = super::make_adapter(&resolved(id), RunMode::Discuss, None).unwrap();
+            assert_eq!(adapter.id(), id);
+        }
+        assert!(super::make_adapter(&resolved("pi"), RunMode::Discuss, None).is_err());
+    }
+
 }

@@ -1,3 +1,4 @@
+import { assistantAvailable } from "../lib/clis";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router";
@@ -27,8 +28,8 @@ export default function ProjectWizard() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [rulesDraftOpen, setRulesDraftOpen] = useState(false);
-  const assistantReady = clis.some((cli) => cli.installed && cli.supported && ["claude", "codex"].includes(cli.id));
-  const assistantReason = assistantReady ? undefined : "没有已安装且已接入的 Claude Code 或 Codex";
+  const assistantReady = assistantAvailable(clis);
+  const assistantReason = assistantReady ? undefined : "没有已安装且已接入的 CLI";
   const draftContext = (extra: Pick<DraftInput, "memberName" | "role" | "targetFilename">): Omit<DraftInput, "draftId" | "currentText" | "feedback"> => ({
     ...extra, folderPath, projectName: name.trim(), description: description.trim(), rules,
     members: agents.map((agent): DraftMember => ({ name: agent.name, role: agent.role, persona: agent.persona })),
