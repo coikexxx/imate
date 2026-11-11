@@ -451,6 +451,59 @@ impl AppState {
         runtime.generations.remove(&reservation); runtime.generations.insert(run_id.clone(), 0);
         runtime.snapshots.insert(project_id.into(), RuntimeSnapshot { project_id: project_id.into(), run_id: run_id.clone(),
             agent_id: prepared.agent.id.clone(), status: "thinking".into(), seq: 0, partial_text: String::new() });
+        if content.trim().starts_with('@') {
+            if let Err(error) = crate::orchestrator::open_direct_instruction(&conn, project_id, user_message.id, &prepared.agent.id) {
+                runtime.remove(project_id, &run_id);
+                return Err(error);
+            }
+        }
+        Ok(StartedMessage { prepared, request, run_id, user_message, agent_message_id, cancellation, baseline })
+    }
+    /// 用户消息和直接指令已经落库。这里只补运行预留、占位消息和执行回合。
+    pub fn launch_existing_message(&self, project_id: &str, user_message_id: i64, cli: &crate::cli_registry::ResolvedCli) -> AppResult<StartedMessage> {
+        let mut runtime = self.runtime_lock()?;
+        runtime.ensure_project_idle(project_id)?;
+        let conn = self.db_lock()?;
+        let project = projects::get(&conn, project_id)?;
+        let folder = Path::new(&project.folder_path).canonicalize().map_err(|_| AppError::Invalid("项目目录不存在或无法读取".into()))?;
+        if !folder.is_dir() { return Err(AppError::Invalid("项目路径不是文件夹".into())); }
+        let roster = agents::list(&conn, project_id)?;
+        let user_message = messages::get(&conn, user_message_id)?;
+        let (agent, _) = crate::chat::resolve_recipient(&user_message.content, &roster)?;
+        if cli.info.id != agent.cli || !cli.info.supported { return Err(AppError::Invalid("成员 CLI 在发送前已改变，请重新发送".into())); }
+        let reservation = crate::store::new_id();
+        let cancellation = runtime.reserve(project_id, &reservation)?;
+        if let Err(error) = runtime.reserve_directory(&folder, &reservation)
+            .and_then(|_| runtime.reserve_session(&agent.cli, agent.session_id.as_deref(), &reservation)) {
+            runtime.remove(project_id, &reservation);
+            return Err(error);
+        }
+        let prepared_result = (|| {
+            let tx = conn.unchecked_transaction()?;
+            let prepared = ChatService::send(&tx, project_id, user_message_id, false)?;
+            let request = ChatService::request(&prepared, folder.clone());
+            let baseline = prepared.agent.session_id.as_deref().map(|id| runs::latest_usage(&tx, &prepared.agent.id, id)).transpose()?.flatten()
+                .and_then(|value| serde_json::from_value(value).ok());
+            let adapter = make_adapter(cli, RunMode::Execute, baseline.clone())?;
+            let spec = adapter.build_command(&request);
+            let command = serde_json::to_string(&json!({"program": spec.program, "args": spec.args})).map_err(|e| AppError::Invalid(e.to_string()))?;
+            let run = runs::insert_running(&tx, Some(&prepared.agent.id), "execute", &command, request.session_id.as_deref())?;
+            let placeholder = messages::insert(&tx, project_id, "assistant", Some(&prepared.agent.id), "chat", "")?;
+            save_owner(&tx, &self.new_owner(&run.id, Some(project_id), None, &folder))?;
+            tx.execute("UPDATE projects SET status='executing',updated_at=?1 WHERE id=?2", rusqlite::params![crate::store::now_ms(), project_id])?;
+            tx.commit()?;
+            Ok::<_, AppError>((prepared, request, baseline, run.id, placeholder.id))
+        })();
+        let (prepared, request, baseline, run_id, agent_message_id) = match prepared_result {
+            Ok(value) => value,
+            Err(error) => { runtime.remove(project_id, &reservation); return Err(error); }
+        };
+        if let Some((id, _)) = runtime.runs.get_mut(project_id) { *id = run_id.clone(); }
+        for id in runtime.directories.values_mut() { if id == &reservation { *id = run_id.clone(); } }
+        for id in runtime.sessions.values_mut() { if id == &reservation { *id = run_id.clone(); } }
+        runtime.generations.remove(&reservation); runtime.generations.insert(run_id.clone(), 0);
+        runtime.snapshots.insert(project_id.into(), RuntimeSnapshot { project_id: project_id.into(), run_id: run_id.clone(),
+            agent_id: prepared.agent.id.clone(), status: "thinking".into(), seq: 0, partial_text: String::new() });
         Ok(StartedMessage { prepared, request, run_id, user_message, agent_message_id, cancellation, baseline })
     }
     pub fn runtime_snapshot(&self, project_id: &str) -> AppResult<ProjectRuntime> {
@@ -523,6 +576,8 @@ impl AppState {
         let status = if outcome.cleanup_complete { outcome.status.as_str() } else { "interrupted" };
         let usage = outcome.usage.as_ref().map(serde_json::to_string).transpose().map_err(|e| AppError::Invalid(e.to_string()))?;
         if !runs::finish(&tx, &started.run_id, status, outcome.exit_code, usage.as_deref(), outcome.error.as_deref())? {
+            // 停止已经把 run 写成终态时，仍然释放内存中的这一代。
+            runtime.remove(project_id, &started.run_id);
             return Ok(vec![]);
         }
         let content = if outcome.status == "ok" { &outcome.final_text } else { &outcome.partial_text };
@@ -545,6 +600,11 @@ impl AppState {
             owner.cleanup_required = true; save_owner(&tx, &owner)?; Some(owner)
         };
         tx.commit()?;
+        if let Ok(Some(active)) = crate::store::instructions::active_instruction(&conn, project_id) {
+            if active.kind == "direct" {
+                let _ = crate::orchestrator::finish_direct_instruction(&conn, &active.id, outcome.status == "ok");
+            }
+        }
         let seq = runtime.snapshots.get(project_id).map(|s| s.seq + 1).unwrap_or(1);
         runtime.remove(project_id, &started.run_id);
         if let Some(owner) = pending_owner { runtime.directories.insert(owner.folder_path.into(), owner.run_id); }
@@ -603,6 +663,73 @@ pub fn confirm_runtime_cleanup(state: State<'_, AppState>, run_id: String) -> Ap
 
 #[tauri::command]
 pub async fn send_message(app: tauri::AppHandle, state: State<'_, AppState>, project_id: String, content: String) -> AppResult<SendMessageResponse> {
+    let text = content.trim().to_string();
+    if text.is_empty() { return Err(AppError::Invalid("消息不能为空".into())); }
+    let active_status = {
+        let conn = state.db_lock()?;
+        crate::store::instructions::active_instruction(&conn, &project_id)?.map(|item| item.status)
+    };
+    if active_status.as_deref() == Some("running") {
+        let message = {
+            let conn = state.db_lock()?;
+            crate::orchestrator::queue_user_text(&conn, &project_id, &text)?
+        };
+        let run_id = {
+            let conn = state.db_lock()?;
+            conn.query_row(
+                "SELECT runs.id FROM runs JOIN instructions ON instructions.id = runs.instruction_id \
+                 WHERE instructions.project_id = ?1 AND runs.status = 'running' ORDER BY runs.started_at DESC LIMIT 1",
+                [&project_id], |row| row.get(0),
+            ).ok()
+        }.unwrap_or_default();
+        emit_events(&app, vec![("message:new", json!({"projectId": project_id, "runId": run_id, "message": &message}))]);
+        return Ok(SendMessageResponse { run_id, user_message: message, agent_message_id: 0 });
+    }
+    let mentioned = text.starts_with('@');
+    if mentioned && active_status.is_none() {
+        return launch_direct_message(app, state, project_id, text).await;
+    }
+    if mentioned {
+        let instruction = {
+            let conn = state.db_lock()?;
+            crate::orchestrator::begin_user_instruction(&conn, &project_id, &text)?
+        };
+        let cli_id = {
+            let conn = state.db_lock()?;
+            agents::get(&conn, instruction.target_agent_id.as_deref().unwrap_or(""))?.cli
+        };
+        let cli = tauri::async_runtime::spawn_blocking(move || cli_registry::resolve_cli(&cli_id)).await
+            .map_err(|e| AppError::Invalid(format!("CLI 探测失败：{e}")))??;
+        let started = state.launch_existing_message(&project_id, instruction.source_message_id, &cli)?;
+        return spawn_direct(app, project_id, started, cli);
+    }
+    let instruction = {
+        let conn = state.db_lock()?;
+        crate::orchestrator::begin_user_instruction(&conn, &project_id, &text)?
+    };
+    let user_message = {
+        let conn = state.db_lock()?;
+        messages::get(&conn, instruction.source_message_id)?
+    };
+    let specs = {
+        let conn = state.db_lock()?;
+        match crate::orchestrator::advance(&conn, &project_id) {
+            Ok(specs) => specs,
+            Err(error) => {
+                let _ = crate::orchestrator::stop_instruction(&conn, &project_id);
+                return Err(error);
+            }
+        }
+    };
+    let run_id = specs.first().map(|spec| spec.run_id.clone()).unwrap_or_default();
+    emit_events(&app, vec![("message:new", json!({"projectId": &project_id, "runId": &run_id, "message": &user_message}))]);
+    let worker_app = app.clone();
+    let worker_project = project_id.clone();
+    tauri::async_runtime::spawn(async move { drive_team(worker_app, worker_project, specs).await; });
+    Ok(SendMessageResponse { run_id, user_message, agent_message_id: 0 })
+}
+
+async fn launch_direct_message(app: tauri::AppHandle, state: State<'_, AppState>, project_id: String, content: String) -> AppResult<SendMessageResponse> {
     let cli_id = {
         let conn = state.db_lock()?;
         let roster = agents::list(&conn, &project_id)?;
@@ -611,6 +738,10 @@ pub async fn send_message(app: tauri::AppHandle, state: State<'_, AppState>, pro
     let cli = tauri::async_runtime::spawn_blocking(move || cli_registry::resolve_cli(&cli_id)).await
         .map_err(|e| AppError::Invalid(format!("CLI 探测失败：{e}")))??;
     let started = state.prepare_send(&project_id, &content, &cli)?;
+    spawn_direct(app, project_id, started, cli)
+}
+
+fn spawn_direct(app: tauri::AppHandle, project_id: String, started: StartedMessage, cli: crate::cli_registry::ResolvedCli) -> AppResult<SendMessageResponse> {
     let response = SendMessageResponse { run_id: started.run_id.clone(), user_message: started.user_message.clone(), agent_message_id: started.agent_message_id };
     emit_events(&app, vec![("message:new", json!({"projectId":project_id,"runId":started.run_id,"message":started.user_message})),
         ("agent:status", json!({"projectId":project_id,"runId":started.run_id,"agentId":started.prepared.agent.id,"status":"thinking"}))]);
@@ -619,7 +750,6 @@ pub async fn send_message(app: tauri::AppHandle, state: State<'_, AppState>, pro
     let worker = tauri::async_runtime::spawn(async move { execute_project(worker_app, started, cli).await; });
     tauri::async_runtime::spawn(async move {
         if worker.await.is_err() {
-            // panic 后保留进程所有权，不能伪称已经完成树清理。
             let state = app.state::<AppState>();
             if let (Ok(mut runtime), Ok(conn)) = (state.runtime_lock(), state.db_lock()) {
                 if runtime.current(&rescue_project, &rescue_id) {
@@ -660,12 +790,221 @@ async fn execute_project(app: tauri::AppHandle, mut started: StartedMessage, cli
         if let Ok(events) = app.state::<AppState>().finish_project(&started, outcome) { emit_events(&app, events); }
         break;
     }
+    let project_id = started.prepared.agent.project_id.clone();
+    let still_running = app.state::<AppState>().db_lock().ok().and_then(|conn| {
+        crate::store::instructions::active_instruction(&conn, &project_id).ok().flatten()
+            .filter(|item| item.status == "running").map(|_| ())
+    }).is_some();
+    if still_running {
+        drive_team(app, project_id, Vec::new()).await;
+    }
+}
+
+async fn drive_team(app: tauri::AppHandle, project_id: String, mut pending: Vec<crate::orchestrator::TurnSpec>) {
+    let hold = format!("hold:{project_id}");
+    let mut holding_directory = false;
+    loop {
+        if pending.is_empty() {
+            let state = app.state::<AppState>();
+            let Ok(conn) = state.db_lock() else { break };
+            let Ok(active) = crate::store::instructions::active_instruction(&conn, &project_id) else { break };
+            if active.as_ref().map(|item| item.status.as_str()) != Some("running") { break; }
+            pending = match crate::orchestrator::advance(&conn, &project_id) {
+                Ok(specs) => specs,
+                Err(_) => break,
+            };
+            if pending.is_empty() { break; }
+        }
+        let batch = std::mem::take(&mut pending);
+        for spec in batch {
+            if !instruction_running(&app, &spec.instruction_id) {
+                release_hold(&app, &project_id, &hold, holding_directory);
+                return;
+            }
+            match run_orchestrated(&app, &project_id, &spec, &hold, &mut holding_directory).await {
+                OrchestratedStep::Outcome(outcome) => {
+                    let state = app.state::<AppState>();
+                    let Ok(conn) = state.db_lock() else { return };
+                    let floor = max_message_id(&conn, &project_id).unwrap_or(0);
+                    if crate::orchestrator::apply_outcome(&conn, &spec.run_id, &outcome).is_err() {
+                        release_hold(&app, &project_id, &hold, holding_directory);
+                        return;
+                    }
+                    emit_messages_after(&app, &conn, &project_id, &spec, floor);
+                    emit_events(&app, vec![("run:finished", json!({"projectId": project_id, "runId": spec.run_id,
+                        "agentId": spec.agent_id, "seq": 1, "status": outcome.status, "error": outcome.error}))]);
+                }
+                OrchestratedStep::Stopped => {
+                    release_hold(&app, &project_id, &hold, holding_directory);
+                    return;
+                }
+            }
+        }
+    }
+    release_hold(&app, &project_id, &hold, holding_directory);
+}
+
+enum OrchestratedStep { Outcome(crate::runner::RunOutcome), Stopped }
+
+fn instruction_running(app: &tauri::AppHandle, instruction_id: &str) -> bool {
+    app.state::<AppState>().db_lock().ok().and_then(|conn| {
+        crate::store::instructions::get(&conn, instruction_id).ok()
+    }).is_some_and(|item| item.status == "running")
+}
+
+fn max_message_id(conn: &Connection, project_id: &str) -> AppResult<i64> {
+    Ok(conn.query_row("SELECT COALESCE(MAX(id), 0) FROM messages WHERE project_id = ?1", [project_id], |row| row.get(0))?)
+}
+
+fn emit_messages_after(app: &tauri::AppHandle, conn: &Connection, project_id: &str, spec: &crate::orchestrator::TurnSpec, floor: i64) {
+    let ids = conn.prepare("SELECT id FROM messages WHERE project_id = ?1 AND id > ?2 ORDER BY id")
+        .and_then(|mut statement| {
+            let rows = statement.query_map(rusqlite::params![project_id, floor], |row| row.get::<_, i64>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()
+        });
+    let Ok(ids) = ids else { return };
+    for id in ids {
+        if let Ok(message) = messages::get(conn, id) {
+            emit_events(app, vec![("message:new", json!({"projectId": project_id, "runId": spec.run_id, "message": message}))]);
+        }
+    }
+}
+
+fn release_hold(app: &tauri::AppHandle, project_id: &str, hold: &str, holding: bool) {
+    if !holding { return; }
+    if let Ok(mut runtime) = app.state::<AppState>().runtime_lock() {
+        runtime.directories.retain(|_, id| id != hold);
+        if runtime.current(project_id, hold) { runtime.runs.remove(project_id); }
+    }
+}
+
+async fn run_orchestrated(
+    app: &tauri::AppHandle, project_id: &str, spec: &crate::orchestrator::TurnSpec, hold: &str, holding: &mut bool,
+) -> OrchestratedStep {
+    let state = app.state::<AppState>();
+    let (agent, folder) = {
+        let Ok(conn) = state.db_lock() else { return OrchestratedStep::Stopped };
+        let Ok(agent) = agents::get(&conn, &spec.agent_id) else {
+            let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, "成员不存在");
+            return OrchestratedStep::Stopped;
+        };
+        let Ok(project) = projects::get(&conn, project_id) else { return OrchestratedStep::Stopped };
+        let Ok(folder) = Path::new(&project.folder_path).canonicalize() else {
+            let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, "项目目录不存在或无法读取");
+            let _ = wait_instruction(&conn, project_id, "项目目录不存在或无法读取");
+            return OrchestratedStep::Stopped;
+        };
+        (agent, folder)
+    };
+    let cli = match tauri::async_runtime::spawn_blocking({
+        let cli_id = agent.cli.clone();
+        move || cli_registry::resolve_cli(&cli_id)
+    }).await {
+        Ok(Ok(cli)) => cli,
+        _ => {
+            if let Ok(conn) = state.db_lock() {
+                let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, "CLI 不可用");
+                let _ = wait_instruction(&conn, project_id, "CLI 不可用");
+            }
+            return OrchestratedStep::Stopped;
+        }
+    };
+    let mode = if spec.mode == "discuss" { RunMode::Discuss } else { RunMode::Execute };
+    let baseline = if let Ok(conn) = state.db_lock() {
+        agent.session_id.as_deref().and_then(|id| runs::latest_usage(&conn, &agent.id, id).ok().flatten())
+            .and_then(|value| serde_json::from_value(value).ok())
+    } else { None };
+    let adapter = match make_adapter(&cli, mode, baseline) {
+        Ok(adapter) => adapter,
+        Err(error) => {
+            if let Ok(conn) = state.db_lock() {
+                let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, &error.to_string());
+                let _ = wait_instruction(&conn, project_id, &error.to_string());
+            }
+            return OrchestratedStep::Stopped;
+        }
+    };
+    let request = crate::adapters::TurnRequest { prompt: spec.prompt.clone(), session_id: agent.session_id.clone(),
+        cwd: folder.clone(), mode, model: agent.model.clone() };
+    let cancellation = {
+        let Ok(mut runtime) = state.runtime_lock() else { return OrchestratedStep::Stopped };
+        if !*holding {
+            if let Err(error) = runtime.reserve_directory(&folder, hold) {
+                if let Ok(conn) = state.db_lock() {
+                    let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, &error.to_string());
+                    let _ = wait_instruction(&conn, project_id, &error.to_string());
+                }
+                return OrchestratedStep::Stopped;
+            }
+            *holding = true;
+        }
+        match runtime.reserve(project_id, &spec.run_id) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                if let Ok(conn) = state.db_lock() {
+                    let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, &error.to_string());
+                    let _ = wait_instruction(&conn, project_id, &error.to_string());
+                }
+                return OrchestratedStep::Stopped;
+            }
+        }
+    };
+    if let Ok(conn) = state.db_lock() {
+        let _ = save_owner(&conn, &state.new_owner(&spec.run_id, Some(project_id), None, &folder));
+    }
+    let run_id = spec.run_id.clone();
+    let agent_id = spec.agent_id.clone();
+    emit_events(app, vec![("agent:status", json!({"projectId": project_id, "runId": run_id, "agentId": agent_id, "status": "thinking"}))]);
+    let outcome = crate::runner::run_turn_managed(adapter, request, cancellation, |_| {}, crate::runner::RunnerConfig::default(),
+        Some(state.data_dir.join("runs").join(format!("{run_id}.log"))),
+        |pid| app.state::<AppState>().mark_started(project_id, &run_id, pid)).await;
+    if let Ok(mut runtime) = state.runtime_lock() {
+        if runtime.current(project_id, &run_id) {
+            runtime.runs.remove(project_id);
+            runtime.sessions.retain(|_, id| id != &run_id);
+            runtime.snapshots.remove(project_id);
+            runtime.generations.remove(&run_id);
+        }
+    }
+    if let Ok(conn) = state.db_lock() {
+        if outcome.cleanup_complete {
+            let _ = remove_owner(&conn, &run_id);
+        } else if let Ok(owners) = load_owners(&conn) {
+            if let Some(mut owner) = owners.into_iter().find(|owner| owner.run_id == run_id) {
+                owner.cleanup_required = true;
+                let _ = save_owner(&conn, &owner);
+                if let Ok(mut runtime) = state.runtime_lock() {
+                    runtime.directories.insert(folder, run_id.clone());
+                }
+                *holding = false;
+            }
+        }
+    }
+    OrchestratedStep::Outcome(outcome)
+}
+
+fn wait_instruction(conn: &Connection, project_id: &str, reason: &str) -> AppResult<()> {
+    let now = crate::store::now_ms();
+    conn.execute(
+        "UPDATE instructions SET status = 'waiting_user', wait_reason = ?1, updated_at = ?2 \
+         WHERE project_id = ?3 AND status = 'running'",
+        rusqlite::params![reason, now, project_id],
+    )?;
+    conn.execute("UPDATE runs SET status = 'cancelled', ended_at = ?1, error = ?2 WHERE instruction_id IN \
+        (SELECT id FROM instructions WHERE project_id = ?3) AND status = 'running'",
+        rusqlite::params![now, reason, project_id])?;
+    conn.execute("UPDATE projects SET status = 'waiting_user', updated_at = ?1 WHERE id = ?2", rusqlite::params![now, project_id])?;
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn stop_project(state: State<'_, AppState>, project_id: String) -> AppResult<()> {
     let run_id = { let mut runtime = state.runtime_lock()?;
         let id = runtime.runs.get(&project_id).map(|(id, _)| id.clone()); runtime.cancel(&project_id); id };
+    {
+        let conn = state.db_lock()?;
+        crate::orchestrator::stop_instruction(&conn, &project_id)?;
+    }
     if let Some(run_id) = run_id {
         let start = tokio::time::Instant::now();
         while state.runtime_lock()?.current(&project_id, &run_id) {
@@ -736,6 +1075,23 @@ mod integration_tests {
         let owner = load_owners(&state.db_lock().unwrap()).unwrap().pop().unwrap();
         assert_eq!(owner.pid, Some(123456)); assert!(!owner.nonce.is_empty());
         assert!(!serde_json::to_string(&owner).unwrap().contains("执行任务"));
+        assert!(crate::store::instructions::active_instruction(&state.db_lock().unwrap(), &first).unwrap().is_none());
+    }
+    #[test]
+    fn idle_mention_records_a_direct_instruction_and_completion_closes_it() {
+        let (state, _folder, first, _second, cli) = setup();
+        let started = state.prepare_send(&first, "@组长 改一句文案", &cli).unwrap();
+        let conn = state.db_lock().unwrap();
+        let instruction = crate::store::instructions::active_instruction(&conn, &first).unwrap().unwrap();
+        assert_eq!(instruction.kind, "direct");
+        assert_eq!(instruction.phase, "direct");
+        assert_eq!(runs::get(&conn, &started.run_id).unwrap().status, "running");
+        drop(conn);
+        state.finish_project(&started, outcome("ok")).unwrap();
+        let conn = state.db_lock().unwrap();
+        assert_eq!(crate::store::instructions::get(&conn, &instruction.id).unwrap().status, "completed");
+        assert_eq!(projects::get(&conn, &first).unwrap().status, "idle");
+        assert!(crate::store::instructions::active_instruction(&conn, &first).unwrap().is_none());
     }
     #[test]
     #[cfg(unix)]

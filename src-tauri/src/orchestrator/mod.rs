@@ -34,10 +34,44 @@ pub struct TurnSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredSnapshot {
+    #[serde(default)]
     message_bound: Option<i64>,
+    #[serde(default)]
     rules_version: Option<String>,
+    #[serde(default)]
     roster_version: Option<String>,
+    #[serde(default)]
     pending: Option<StoredPending>,
+    /// 边界上暂存的组长最终文本。继续时再执行，不重复调用这一回合。
+    #[serde(default)]
+    stashed_text: Option<String>,
+    #[serde(default)]
+    stashed_phase: Option<String>,
+    /// 运行中点名。不占用批次任务，做完后进入干预研判。
+    #[serde(default)]
+    mention: Option<StoredMention>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredMention {
+    agent_id: String,
+    content: String,
+    launched: bool,
+}
+
+impl Default for StoredSnapshot {
+    fn default() -> Self {
+        Self {
+            message_bound: None,
+            rules_version: None,
+            roster_version: None,
+            pending: None,
+            stashed_text: None,
+            stashed_phase: None,
+            mention: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,14 +102,149 @@ pub fn advance(conn: &Connection, project_id: &str) -> AppResult<Vec<TurnSpec>> 
         tx.commit()?;
         return Ok(Vec::new());
     }
-    let instruction = instructions::get(&tx, &active.id)?;
+    let mut instruction = instructions::get(&tx, &active.id)?;
     if instruction.status != "running" {
         tx.commit()?;
         return Ok(Vec::new());
     }
+    // 只有没有正在跑的回合时才消化队列，避免插话打断当前进程。
+    if instruction.phase != "intervention" && has_queued(&tx, &instruction.id)? {
+        arm_next_input(&tx, &instruction)?;
+        instruction = instructions::get(&tx, &instruction.id)?;
+    }
     let specs = dispatch(&tx, &instruction)?;
     tx.commit()?;
     Ok(specs)
+}
+
+/// 运行中的普通消息或 `@成员` 入队。不修改已有 run。
+pub fn queue_user_text(conn: &Connection, project_id: &str, content: &str) -> AppResult<Message> {
+    let active = instructions::active_instruction(conn, project_id)?.ok_or_else(|| invalid("没有正在运行的指令"))?;
+    if active.status != "running" {
+        return Err(invalid("只有进行中的指令可以接收插话"));
+    }
+    let roster = agents::list(conn, project_id)?;
+    let (agent, _) = crate::chat::resolve_recipient(content, &roster)?;
+    let text = content.trim();
+    let message = messages::insert(conn, project_id, "user", None, "chat", text)?;
+    if text.starts_with('@') {
+        instructions::enqueue_input(conn, &active.id, message.id, "direct", Some(&agent.id))?;
+    } else {
+        instructions::enqueue_input(conn, &active.id, message.id, "supplement", None)?;
+    }
+    Ok(message)
+}
+
+/// 等待用户时用一条新消息重新开始。放弃旧指令和创建新指令在同一事务里。
+pub fn begin_user_instruction(conn: &Connection, project_id: &str, content: &str) -> AppResult<Instruction> {
+    let text = content.trim();
+    if text.is_empty() {
+        return Err(invalid("消息不能为空"));
+    }
+    let tx = conn.unchecked_transaction()?;
+    let roster = agents::list(&tx, project_id)?;
+    let (agent, _) = crate::chat::resolve_recipient(text, &roster)?;
+    if let Some(active) = instructions::active_instruction(&tx, project_id)? {
+        if active.status == "running" {
+            return Err(invalid("该项目已有进行中的指令"));
+        }
+    }
+    let mentioned = text.starts_with('@');
+    let message = messages::insert(&tx, project_id, "user", None, if mentioned { "chat" } else { "instruction" }, text)?;
+    if let Some(active) = instructions::active_instruction(&tx, project_id)? {
+        if active.status == "running" {
+            return Err(invalid("该项目已有进行中的指令"));
+        }
+        abandon_in(&tx, &active.id)?;
+    }
+    let id = new_id();
+    let now = now_ms();
+    let kind = if mentioned { "direct" } else { "team" };
+    let phase = if mentioned { "direct" } else { "triage" };
+    let target = if mentioned { Some(agent.id.as_str()) } else { None };
+    tx.execute(
+        "INSERT INTO instructions (id, project_id, source_message_id, kind, target_agent_id, phase, status, \
+         discuss_rounds, turn_count, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', 0, 0, ?7, ?7)",
+        params![id, project_id, message.id, kind, target, phase, now],
+    )?;
+    tx.commit()?;
+    instructions::get(conn, &id)
+}
+
+/// 空闲 `@成员` 的直接指令。不经过组长。
+pub fn open_direct_instruction(conn: &Connection, project_id: &str, source_message_id: i64, agent_id: &str) -> AppResult<Instruction> {
+    instructions::insert_instruction(conn, project_id, source_message_id, "direct", Some(agent_id), "direct")
+}
+
+/// 直接指令的单回合结束。成功则完成，失败则等待用户。
+pub fn finish_direct_instruction(conn: &Connection, instruction_id: &str, succeeded: bool) -> AppResult<()> {
+    let instruction = instructions::get(conn, instruction_id)?;
+    if instruction.kind != "direct" || !matches!(instruction.status.as_str(), "running" | "waiting_user") {
+        return Ok(());
+    }
+    if succeeded {
+        // 回合结束前插进来的话留到下一边界，不把直接指令提前标完成。
+        if has_queued(conn, &instruction.id)? {
+            return Ok(());
+        }
+        let now = now_ms();
+        conn.execute(
+            "UPDATE instructions SET status = 'completed', finished_at = ?1, updated_at = ?1 WHERE id = ?2",
+            params![now, instruction.id],
+        )?;
+        set_project_status(conn, &instruction.project_id, "idle")?;
+    } else {
+        mark_waiting(conn, &instruction, "直接指令没有完成")?;
+    }
+    Ok(())
+}
+
+/// 停止当前代次：运行和未开始的任务、队列都取消，指令等待用户。
+pub fn stop_instruction(conn: &Connection, project_id: &str) -> AppResult<Option<Instruction>> {
+    let Some(active) = instructions::active_instruction(conn, project_id)? else {
+        return Ok(None);
+    };
+    if active.status != "running" {
+        return Ok(Some(active));
+    }
+    let tx = conn.unchecked_transaction()?;
+    let now = now_ms();
+    let reason = "已停止。部分文件可能已改动，不会自动撤销。";
+    tx.execute(
+        "UPDATE tasks SET status = 'cancelled', finished_at = ?1 WHERE instruction_id = ?2 AND status IN ('pending', 'running')",
+        params![now, active.id],
+    )?;
+    tx.execute(
+        "UPDATE instruction_inputs SET status = 'cancelled', finished_at = ?1 WHERE instruction_id = ?2 AND status = 'queued'",
+        params![now, active.id],
+    )?;
+    tx.execute(
+        "UPDATE runs SET status = 'cancelled', ended_at = ?1, error = ?2 WHERE instruction_id = ?3 AND status = 'running'",
+        params![now, "回合已停止，文件修改不会自动撤销", active.id],
+    )?;
+    tx.execute(
+        "UPDATE instructions SET status = 'waiting_user', wait_reason = ?1, updated_at = ?2 WHERE id = ?3",
+        params![reason, now, active.id],
+    )?;
+    set_project_status(&tx, project_id, "waiting_user")?;
+    messages::insert(&tx, project_id, "system", None, "system", reason)?;
+    tx.commit()?;
+    Ok(Some(instructions::get(conn, &active.id)?))
+}
+
+/// `action` 为 `retry`、`supplement` 或 `abandon`。补充内容放在 `note`。
+pub fn resume_instruction(conn: &Connection, instruction_id: &str, action: &str, note: Option<&str>) -> AppResult<Instruction> {
+    let instruction = instructions::get(conn, instruction_id)?;
+    if instruction.status != "waiting_user" {
+        return Err(invalid("只有等待用户的指令可以继续"));
+    }
+    match action {
+        "retry" => retry_instruction(conn, &instruction),
+        "supplement" => supplement_instruction(conn, &instruction, note.unwrap_or("")),
+        "abandon" => abandon_instruction(conn, &instruction),
+        _ => Err(invalid("未知的恢复操作")),
+    }
 }
 
 /// 记录一个已经预留的回合结果，并推进阶段。不在这里启动下一回合。
@@ -86,7 +255,9 @@ pub fn apply_outcome(conn: &Connection, run_id: &str, outcome: &RunOutcome) -> A
     }
     let instruction = instructions::get(conn, &run.instruction_id)?;
     let agent = agents::get(conn, &run.agent_id)?;
-    if run.mode == "execute" {
+    if run.mode == "execute" && run.task_id.is_none() {
+        apply_mention(conn, &run, &instruction, &agent, outcome)
+    } else if run.mode == "execute" {
         apply_execute(conn, &run, &instruction, &agent, outcome)
     } else if agent.is_leader {
         apply_leader(conn, &run, &instruction, &agent, outcome)
@@ -115,7 +286,7 @@ fn dispatch(conn: &Connection, instruction: &Instruction) -> AppResult<Vec<TurnS
         "intervention" => schedule_leader(conn, instruction, Stage::Intervention),
         "discuss" => schedule_discuss(conn, instruction),
         "execute" => schedule_execute(conn, instruction),
-        "direct" => Err(invalid("直接指令不走团队调度")),
+        "direct" => schedule_mention(conn, instruction),
         other => Err(invalid(format!("未知阶段 {other}"))),
     }
 }
@@ -184,6 +355,32 @@ fn schedule_execute(conn: &Connection, instruction: &Instruction) -> AppResult<V
     Ok(vec![spec(run_id, assignee.id, &instruction.id, Some(task.id), "execute", prompt, bound)])
 }
 
+fn schedule_mention(conn: &Connection, instruction: &Instruction) -> AppResult<Vec<TurnSpec>> {
+    let mut stored = load_snapshot(&instruction.context_snapshot_json)?;
+    let Some(mention) = stored.mention.clone() else {
+        return Ok(Vec::new());
+    };
+    if mention.launched {
+        return Ok(Vec::new());
+    }
+    if !reserve(conn, instruction, 1)? {
+        return Ok(Vec::new());
+    }
+    let agent = agents::get(conn, &mention.agent_id)?;
+    let prompt = format!(
+        "# 直接执行\n用户点名你处理下面这件事。做完给出简短汇报，不要继续其他任务。\n\
+本次调用只是你的一次发言。说完就结束，不要等其他成员。\n\
+不得修改 .imates/。\n\n{}",
+        mention.content.trim()
+    );
+    let run_id = insert_run(conn, &agent.id, "execute", &instruction.id, None)?;
+    stored.mention = Some(StoredMention { launched: true, ..mention });
+    save_snapshot(conn, &instruction.id, &stored)?;
+    set_project_status(conn, &instruction.project_id, "executing")?;
+    let bound = message_bound(conn, &instruction.project_id)?;
+    Ok(vec![spec(run_id, agent.id, &instruction.id, None, "execute", prompt, bound)])
+}
+
 fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agent: &Agent, outcome: &RunOutcome) -> AppResult<()> {
     if outcome.status != "ok" {
         finish_run(conn, &run.id, outcome, "failed")?;
@@ -200,6 +397,12 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
             return Err(error);
         }
     };
+    if instruction.phase != "intervention" && has_queued(conn, &instruction.id)? {
+        return park_leader(conn, run, instruction, agent, outcome);
+    }
+    if instruction.phase == "intervention" {
+        return apply_intervention(conn, run, instruction, agent, outcome, &parsed);
+    }
     match parsed.action.kind {
         ActionKind::Assign { decision, tasks } => {
             let batch: Vec<NewTask> = tasks.into_iter().map(|task| NewTask {
@@ -237,10 +440,8 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
             let tx = conn.unchecked_transaction()?;
             save_speech(&tx, instruction, agent, &parsed.speech)?;
             let stored = StoredSnapshot {
-                message_bound: None,
-                rules_version: None,
-                roster_version: None,
                 pending: Some(StoredPending::Discuss { agent_ids: to, topic, launched: false }),
+                ..StoredSnapshot::default()
             };
             tx.execute(
                 "UPDATE instructions SET phase = 'discuss', discuss_rounds = discuss_rounds + 1, context_snapshot_json = ?1, updated_at = ?2 WHERE id = ?3",
@@ -292,7 +493,14 @@ fn apply_execute(conn: &Connection, run: &RunRow, instruction: &Instruction, age
         params![instruction.id, instruction.current_batch],
         |row| row.get(0),
     )?;
-    if pending == 0 || outcome.status != "ok" {
+    let next_phase = if pending == 0 || outcome.status != "ok" { "review" } else { "execute" };
+    if has_queued(conn, &instruction.id)? {
+        ensure_resume_phase(conn, &instruction.id, next_phase)?;
+        let fresh = instructions::get(conn, &instruction.id)?;
+        arm_next_input(conn, &fresh)?;
+        return Ok(());
+    }
+    if next_phase == "review" {
         set_phase(conn, &instruction.id, "review")?;
         set_project_status(conn, &instruction.project_id, "discussing")?;
     }
@@ -309,7 +517,13 @@ fn apply_member_discuss(conn: &Connection, instruction: &Instruction, agent: &Ag
         return mark_waiting(conn, instruction, outcome.error.as_deref().unwrap_or("成员讨论失败"));
     }
     if running_count(conn, &instruction.id)? == 0 {
-        set_phase(conn, &instruction.id, "decide")?;
+        if has_queued(conn, &instruction.id)? {
+            ensure_resume_phase(conn, &instruction.id, "decide")?;
+            let fresh = instructions::get(conn, &instruction.id)?;
+            arm_next_input(conn, &fresh)?;
+        } else {
+            set_phase(conn, &instruction.id, "decide")?;
+        }
     }
     Ok(())
 }
@@ -580,7 +794,7 @@ fn roster_version(roster: &[Agent]) -> String {
 
 fn load_snapshot(json: &Option<String>) -> AppResult<StoredSnapshot> {
     let Some(json) = json.as_deref() else {
-        return Ok(StoredSnapshot { message_bound: None, rules_version: None, roster_version: None, pending: None });
+        return Ok(StoredSnapshot::default());
     };
     serde_json::from_str(json).map_err(|error| invalid(format!("上下文快照损坏：{error}")))
 }
@@ -610,6 +824,324 @@ fn spec(run_id: String, agent_id: String, instruction_id: &str, task_id: Option<
 
 fn invalid(message: impl Into<String>) -> AppError {
     AppError::Invalid(message.into())
+}
+
+fn has_queued(conn: &Connection, instruction_id: &str) -> AppResult<bool> {
+    Ok(instructions::list_inputs(conn, instruction_id)?.iter().any(|input| input.status == "queued"))
+}
+
+fn ensure_resume_phase(conn: &Connection, instruction_id: &str, phase: &str) -> AppResult<()> {
+    let fresh = instructions::get(conn, instruction_id)?;
+    if fresh.resume_phase.is_some() {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE instructions SET resume_phase = ?1, updated_at = ?2 WHERE id = ?3",
+        params![phase, now_ms(), instruction_id],
+    )?;
+    Ok(())
+}
+
+fn arm_next_input(conn: &Connection, instruction: &Instruction) -> AppResult<()> {
+    let inputs = instructions::list_inputs(conn, &instruction.id)?;
+    let Some(input) = inputs.into_iter().find(|item| item.status == "queued") else {
+        return Ok(());
+    };
+    let now = now_ms();
+    conn.execute(
+        "UPDATE instruction_inputs SET status = 'done', finished_at = ?1 WHERE id = ?2",
+        params![now, input.id],
+    )?;
+    let message = messages::get(conn, input.message_id)?;
+    let fresh = instructions::get(conn, &instruction.id)?;
+    if input.kind == "direct" {
+        let agent_id = input.target_agent_id.clone().ok_or_else(|| invalid("点名必须指定成员"))?;
+        let mut snap = load_snapshot(&fresh.context_snapshot_json)?;
+        snap.mention = Some(StoredMention { agent_id, content: message.content, launched: false });
+        save_snapshot(conn, &instruction.id, &snap)?;
+        set_phase(conn, &instruction.id, "direct")?;
+        return Ok(());
+    }
+    let snap = load_snapshot(&fresh.context_snapshot_json)?;
+    if snap.stashed_text.is_none() && fresh.resume_phase.is_none() && !matches!(fresh.phase.as_str(), "intervention" | "direct") {
+        conn.execute(
+            "UPDATE instructions SET resume_phase = ?1, updated_at = ?2 WHERE id = ?3",
+            params![fresh.phase, now, instruction.id],
+        )?;
+    }
+    conn.execute(
+        "UPDATE instructions SET wait_reason = ?1, updated_at = ?2 WHERE id = ?3",
+        params![message.content, now, instruction.id],
+    )?;
+    set_phase(conn, &instruction.id, "intervention")?;
+    set_project_status(conn, &instruction.project_id, "discussing")
+}
+
+fn park_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agent: &Agent, outcome: &RunOutcome) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    save_speech(&tx, instruction, agent, speech_of(&outcome.final_text))?;
+    finish_run(&tx, &run.id, outcome, "ok")?;
+    remember_agent(&tx, agent, &instruction.project_id, outcome)?;
+    let mut snap = load_snapshot(&instructions::get(&tx, &instruction.id)?.context_snapshot_json)?;
+    snap.stashed_text = Some(outcome.final_text.clone());
+    snap.stashed_phase = Some(instruction.phase.clone());
+    save_snapshot(&tx, &instruction.id, &snap)?;
+    arm_next_input(&tx, instruction)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn speech_of(text: &str) -> &str {
+    text.split("```imates").next().unwrap_or(text).trim()
+}
+
+fn apply_mention(conn: &Connection, run: &RunRow, instruction: &Instruction, agent: &Agent, outcome: &RunOutcome) -> AppResult<()> {
+    let content = if outcome.final_text.trim().is_empty() {
+        outcome.error.clone().unwrap_or_else(|| "点名没有完成".to_string())
+    } else {
+        outcome.final_text.clone()
+    };
+    messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "report", &content)?;
+    finish_run(conn, &run.id, outcome, if outcome.status == "ok" { "ok" } else { "failed" })?;
+    remember_agent(conn, agent, &instruction.project_id, outcome)?;
+    let fresh = instructions::get(conn, &instruction.id)?;
+    let mut snap = load_snapshot(&fresh.context_snapshot_json)?;
+    snap.mention = None;
+    save_snapshot(conn, &instruction.id, &snap)?;
+    conn.execute(
+        "UPDATE instructions SET phase = 'intervention', wait_reason = ?1, updated_at = ?2 WHERE id = ?3",
+        params![format!("点名结果：{content}"), now_ms(), instruction.id],
+    )?;
+    set_project_status(conn, &instruction.project_id, "discussing")
+}
+
+fn apply_intervention(
+    conn: &Connection,
+    run: &RunRow,
+    instruction: &Instruction,
+    agent: &Agent,
+    outcome: &RunOutcome,
+    parsed: &protocol::ParsedLeaderTurn,
+) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    save_speech(&tx, instruction, agent, &parsed.speech)?;
+    finish_run(&tx, &run.id, outcome, "ok")?;
+    remember_agent(&tx, agent, &instruction.project_id, outcome)?;
+    tx.commit()?;
+    match (&parsed.action.kind, parsed.action.disposition) {
+        (ActionKind::Reply { .. }, Some(protocol::Disposition::Continue)) => continue_instruction(conn, instruction),
+        (ActionKind::Reply { .. }, Some(protocol::Disposition::End)) => end_instruction(conn, instruction),
+        (ActionKind::Assign { decision, tasks }, Some(protocol::Disposition::Replace)) => {
+            replace_batch(conn, instruction, agent, decision, tasks)
+        }
+        _ => {
+            mark_waiting(conn, instruction, "干预阶段只接受 reply+continue、reply+end 或 assign+replace")?;
+            Err(invalid("干预阶段只接受 reply+continue、reply+end 或 assign+replace"))
+        }
+    }
+}
+
+fn continue_instruction(conn: &Connection, instruction: &Instruction) -> AppResult<()> {
+    if has_queued(conn, &instruction.id)? {
+        let fresh = instructions::get(conn, &instruction.id)?;
+        return arm_next_input(conn, &fresh);
+    }
+    let fresh = instructions::get(conn, &instruction.id)?;
+    let snap = load_snapshot(&fresh.context_snapshot_json)?;
+    if let Some(text) = snap.stashed_text.clone() {
+        let phase = snap.stashed_phase.clone().unwrap_or_else(|| fresh.phase.clone());
+        clear_stash(conn, &fresh.id)?;
+        conn.execute("UPDATE instructions SET resume_phase = NULL, updated_at = ?1 WHERE id = ?2", params![now_ms(), fresh.id])?;
+        let roster = agents::list(conn, &fresh.project_id)?;
+        let task = rework_limit(conn, &text)?;
+        let limits = LimitContext { discuss_rounds: fresh.discuss_rounds.max(0) as u32, task };
+        let parsed = parse_final(&text, protocol_phase(&phase), &roster, &limits)?;
+        return replay_action(conn, &fresh, parsed);
+    }
+    restore_phase(conn, &fresh)
+}
+
+fn end_instruction(conn: &Connection, instruction: &Instruction) -> AppResult<()> {
+    clear_stash(conn, &instruction.id)?;
+    let now = now_ms();
+    conn.execute(
+        "UPDATE tasks SET status = 'cancelled', finished_at = ?1 WHERE instruction_id = ?2 AND status IN ('pending', 'running')",
+        params![now, instruction.id],
+    )?;
+    instructions::cancel_queued(conn, &instruction.id)?;
+    if let Some(notice) = leftover_notice(&instructions::list_tasks(conn, &instruction.id)?) {
+        messages::insert(conn, &instruction.project_id, "system", None, "system", &notice)?;
+    }
+    conn.execute(
+        "UPDATE instructions SET status = 'completed', finished_at = ?1, updated_at = ?1 WHERE id = ?2",
+        params![now, instruction.id],
+    )?;
+    set_project_status(conn, &instruction.project_id, "idle")
+}
+
+fn replace_batch(
+    conn: &Connection,
+    instruction: &Instruction,
+    agent: &Agent,
+    decision: &str,
+    tasks: &[protocol::AssignedTask],
+) -> AppResult<()> {
+    clear_stash(conn, &instruction.id)?;
+    conn.execute(
+        "UPDATE tasks SET status = 'cancelled', finished_at = ?1 WHERE instruction_id = ?2 AND status = 'pending'",
+        params![now_ms(), instruction.id],
+    )?;
+    let batch: Vec<NewTask> = tasks.iter().map(|task| NewTask {
+        assignee_agent_id: task.to.clone(),
+        title: task.title.clone(),
+        detail: task.detail.clone(),
+        replaces_task_id: task.replaces_task_id.clone(),
+    }).collect();
+    instructions::insert_batch(conn, &instruction.id, Some(&agent.id), decision, &batch)?;
+    set_phase(conn, &instruction.id, "execute")?;
+    set_project_status(conn, &instruction.project_id, "executing")
+}
+
+fn replay_action(conn: &Connection, instruction: &Instruction, parsed: protocol::ParsedLeaderTurn) -> AppResult<()> {
+    let leader = leader(conn, &instruction.project_id)?;
+    match parsed.action.kind {
+        ActionKind::Assign { decision, tasks } => {
+            let batch: Vec<NewTask> = tasks.into_iter().map(|task| NewTask {
+                assignee_agent_id: task.to,
+                title: task.title,
+                detail: task.detail,
+                replaces_task_id: task.replaces_task_id,
+            }).collect();
+            instructions::insert_batch(conn, &instruction.id, Some(&leader.id), &decision, &batch)?;
+            set_phase(conn, &instruction.id, "execute")?;
+            set_project_status(conn, &instruction.project_id, "executing")
+        }
+        ActionKind::Reply { .. } => {
+            if let Some(notice) = leftover_notice(&instructions::list_tasks(conn, &instruction.id)?) {
+                messages::insert(conn, &instruction.project_id, "system", None, "system", &notice)?;
+            }
+            let now = now_ms();
+            conn.execute(
+                "UPDATE instructions SET status = 'completed', finished_at = ?1, updated_at = ?1 WHERE id = ?2",
+                params![now, instruction.id],
+            )?;
+            set_project_status(conn, &instruction.project_id, "idle")
+        }
+        ActionKind::Discuss { to, topic } => {
+            let stored = StoredSnapshot {
+                pending: Some(StoredPending::Discuss { agent_ids: to, topic, launched: false }),
+                ..StoredSnapshot::default()
+            };
+            conn.execute(
+                "UPDATE instructions SET phase = 'discuss', discuss_rounds = discuss_rounds + 1, context_snapshot_json = ?1, updated_at = ?2 WHERE id = ?3",
+                params![serde_json::to_string(&stored).map_err(|error| invalid(error.to_string()))?, now_ms(), instruction.id],
+            )?;
+            set_project_status(conn, &instruction.project_id, "discussing")
+        }
+        ActionKind::Rework { task_id, .. } => {
+            let changed = conn.execute(
+                "UPDATE tasks SET status = 'pending', rework_count = rework_count + 1, finished_at = NULL WHERE id = ?1 AND instruction_id = ?2",
+                params![task_id, instruction.id],
+            )?;
+            if changed == 0 {
+                return Err(AppError::NotFound(format!("任务 {task_id}")));
+            }
+            set_phase(conn, &instruction.id, "execute")?;
+            set_project_status(conn, &instruction.project_id, "executing")
+        }
+    }
+}
+
+fn restore_phase(conn: &Connection, instruction: &Instruction) -> AppResult<()> {
+    let fresh = instructions::get(conn, &instruction.id)?;
+    let phase = fresh.resume_phase.clone().filter(|phase| phase != "intervention" && phase != "direct").unwrap_or_else(|| {
+        if matches!(fresh.phase.as_str(), "intervention" | "direct") { "triage".to_string() } else { fresh.phase.clone() }
+    });
+    conn.execute(
+        "UPDATE instructions SET phase = ?1, resume_phase = NULL, updated_at = ?2 WHERE id = ?3",
+        params![phase, now_ms(), instruction.id],
+    )?;
+    let status = if phase == "execute" { "executing" } else { "discussing" };
+    set_project_status(conn, &instruction.project_id, status)
+}
+
+fn clear_stash(conn: &Connection, instruction_id: &str) -> AppResult<()> {
+    let fresh = instructions::get(conn, instruction_id)?;
+    let mut snap = load_snapshot(&fresh.context_snapshot_json)?;
+    snap.stashed_text = None;
+    snap.stashed_phase = None;
+    save_snapshot(conn, instruction_id, &snap)
+}
+
+fn abandon_in(conn: &Connection, instruction_id: &str) -> AppResult<()> {
+    let now = now_ms();
+    conn.execute(
+        "UPDATE instructions SET status = 'abandoned', updated_at = ?1, finished_at = ?1 WHERE id = ?2",
+        params![now, instruction_id],
+    )?;
+    conn.execute(
+        "UPDATE instruction_inputs SET status = 'cancelled', finished_at = ?1 WHERE instruction_id = ?2 AND status = 'queued'",
+        params![now, instruction_id],
+    )?;
+    conn.execute(
+        "UPDATE tasks SET status = 'cancelled', finished_at = ?1 WHERE instruction_id = ?2 AND status IN ('pending', 'running')",
+        params![now, instruction_id],
+    )?;
+    Ok(())
+}
+
+fn retry_instruction(conn: &Connection, instruction: &Instruction) -> AppResult<Instruction> {
+    if instruction.turn_count >= TURN_LIMIT {
+        return Err(invalid("已达到 30 回合上限，不能靠重试清零"));
+    }
+    if matches!(instruction.phase.as_str(), "execute" | "direct") {
+        return Err(invalid("执行阶段不能重试，请补充或放弃"));
+    }
+    if instructions::list_tasks(conn, &instruction.id)?.iter().any(|task| task.status == "failed") {
+        return Err(invalid("已有失败任务，请补充说明后续，不能重试已执行的任务"));
+    }
+    conn.execute(
+        "UPDATE instructions SET status = 'running', wait_reason = NULL, finished_at = NULL, updated_at = ?1 WHERE id = ?2",
+        params![now_ms(), instruction.id],
+    )?;
+    set_project_status(conn, &instruction.project_id, "discussing")?;
+    instructions::get(conn, &instruction.id)
+}
+
+fn supplement_instruction(conn: &Connection, instruction: &Instruction, note: &str) -> AppResult<Instruction> {
+    let note = note.trim();
+    if note.is_empty() {
+        return Err(invalid("补充内容不能为空"));
+    }
+    let tx = conn.unchecked_transaction()?;
+    if instruction.resume_phase.is_none() {
+        tx.execute(
+            "UPDATE instructions SET resume_phase = ?1, updated_at = ?2 WHERE id = ?3",
+            params![instruction.phase, now_ms(), instruction.id],
+        )?;
+    }
+    tx.execute(
+        "UPDATE instructions SET status = 'running', wait_reason = NULL, finished_at = NULL, updated_at = ?1 WHERE id = ?2",
+        params![now_ms(), instruction.id],
+    )?;
+    let message = messages::insert(&tx, &instruction.project_id, "user", None, "instruction", note)?;
+    tx.execute(
+        "INSERT INTO instruction_inputs (id, instruction_id, message_id, kind, target_agent_id, status, created_at) \
+         VALUES (?1, ?2, ?3, 'supplement', NULL, 'queued', ?4)",
+        params![new_id(), instruction.id, message.id, now_ms()],
+    )?;
+    tx.commit()?;
+    let fresh = instructions::get(conn, &instruction.id)?;
+    arm_next_input(conn, &fresh)?;
+    instructions::get(conn, &instruction.id)
+}
+
+fn abandon_instruction(conn: &Connection, instruction: &Instruction) -> AppResult<Instruction> {
+    let tx = conn.unchecked_transaction()?;
+    abandon_in(&tx, &instruction.id)?;
+    set_project_status(&tx, &instruction.project_id, "idle")?;
+    tx.commit()?;
+    instructions::get(conn, &instruction.id)
 }
 
 #[cfg(test)]
@@ -800,5 +1332,203 @@ mod tests {
         assert_eq!(waiting.status, "waiting_user");
         assert_eq!(waiting.turn_count, 30);
         assert_eq!(projects::get(&conn, &project_id).unwrap().status, "waiting_user");
+    }
+
+    #[test]
+    fn running_messages_queue_without_cancelling_the_current_run() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let specs = advance(&conn, &project_id).unwrap();
+        queue_user_text(&conn, &project_id, "补充一句：先看错误文案").unwrap();
+        queue_user_text(&conn, &project_id, "@前端 先把按钮文案改掉").unwrap();
+        let status: String = conn.query_row("SELECT status FROM runs WHERE id = ?1", [&specs[0].run_id], |row| row.get(0)).unwrap();
+        assert_eq!(status, "running");
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
+        let inputs = instructions::list_inputs(&conn, &specs[0].instruction_id).unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].kind, "supplement");
+        assert_eq!(inputs[0].status, "queued");
+        assert!(inputs[0].target_agent_id.is_none());
+        assert_eq!(inputs[1].kind, "direct");
+        assert_eq!(inputs[1].target_agent_id.as_deref(), Some(agents[1].id.as_str()));
+    }
+
+    #[test]
+    fn boundary_handles_supplement_then_mention_before_resuming_the_batch() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap();
+        let assign = fence("分两步。", r#"{"action":"assign","decision":"分两步做","tasks":[{"to":"前端","title":"第一步","detail":"做第一步"},{"to":"前端","title":"第二步","detail":"做第二步"}]}"#);
+        apply_outcome(&conn, &leader[0].run_id, &ok_text(&assign)).unwrap();
+        let first = advance(&conn, &project_id).unwrap();
+        queue_user_text(&conn, &project_id, "补充：标题要短").unwrap();
+        queue_user_text(&conn, &project_id, "@前端 先改按钮").unwrap();
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
+        apply_outcome(&conn, &first[0].run_id, &ok_text("第一步完成")).unwrap();
+
+        let intervention = advance(&conn, &project_id).unwrap();
+        assert_eq!(intervention.len(), 1);
+        assert!(intervention[0].prompt.contains("标题要短"));
+        let tasks = instructions::list_tasks(&conn, &first[0].instruction_id).unwrap();
+        assert_eq!(tasks[1].status, "pending");
+        assert_ne!(intervention[0].task_id.as_deref(), Some(tasks[1].id.as_str()));
+        apply_outcome(&conn, &intervention[0].run_id, &ok_text(&fence(
+            "先处理插话。",
+            r#"{"action":"reply","disposition":"continue","message":"继续原任务"}"#,
+        ))).unwrap();
+
+        let mention = advance(&conn, &project_id).unwrap();
+        assert_eq!(mention.len(), 1);
+        assert_eq!(mention[0].agent_id, agents[1].id);
+        assert_eq!(mention[0].mode, "execute");
+        assert!(mention[0].task_id.is_none());
+        assert!(mention[0].prompt.contains("先改按钮"));
+        assert_eq!(instructions::get_task(&conn, &tasks[1].id).unwrap().status, "pending");
+        apply_outcome(&conn, &mention[0].run_id, &ok_text("按钮已改")).unwrap();
+
+        let after_mention = advance(&conn, &project_id).unwrap();
+        assert!(after_mention[0].prompt.contains("按钮已改"));
+        apply_outcome(&conn, &after_mention[0].run_id, &ok_text(&fence(
+            "点名已经做完。",
+            r#"{"action":"reply","disposition":"continue","message":"回到原批次"}"#,
+        ))).unwrap();
+        let second = advance(&conn, &project_id).unwrap();
+        assert_eq!(second[0].task_id.as_deref(), Some(tasks[1].id.as_str()));
+        assert!(second[0].prompt.contains("第二步"));
+    }
+
+    #[test]
+    fn queued_input_stashes_the_leader_action_until_continue() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap();
+        queue_user_text(&conn, &project_id, "不要派工").unwrap();
+        let assign = fence("先派工。", r#"{"action":"assign","decision":"先做接口","tasks":[{"to":"前端","title":"接口","detail":"做接口"}]}"#);
+        apply_outcome(&conn, &leader[0].run_id, &ok_text(&assign)).unwrap();
+        let parked = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(parked.phase, "intervention");
+        assert!(instructions::list_tasks(&conn, &parked.id).unwrap().is_empty());
+        let review = advance(&conn, &project_id).unwrap();
+        assert!(review[0].prompt.contains("不要派工"));
+        apply_outcome(&conn, &review[0].run_id, &ok_text(&fence(
+            "按原计划。",
+            r#"{"action":"reply","disposition":"continue","message":"继续"}"#,
+        ))).unwrap();
+        let restored = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(restored.phase, "execute");
+        assert_eq!(instructions::list_tasks(&conn, &restored.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stop_cancels_generation_tasks_and_queue() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap();
+        let assign = fence("分两步。", r#"{"action":"assign","decision":"分两步做","tasks":[{"to":"前端","title":"第一步","detail":"做第一步"},{"to":"前端","title":"第二步","detail":"做第二步"}]}"#);
+        apply_outcome(&conn, &leader[0].run_id, &ok_text(&assign)).unwrap();
+        let first = advance(&conn, &project_id).unwrap();
+        queue_user_text(&conn, &project_id, "先别继续").unwrap();
+        let stopped = stop_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(stopped.status, "waiting_user");
+        assert!(stopped.wait_reason.unwrap_or_default().contains("部分文件"));
+        let tasks = instructions::list_tasks(&conn, &stopped.id).unwrap();
+        assert_eq!(tasks[0].status, "cancelled");
+        assert_eq!(tasks[1].status, "cancelled");
+        assert!(instructions::list_inputs(&conn, &stopped.id).unwrap().iter().all(|input| input.status == "cancelled"));
+        let run_status: String = conn.query_row("SELECT status FROM runs WHERE id = ?1", [&first[0].run_id], |row| row.get(0)).unwrap();
+        assert_eq!(run_status, "cancelled");
+        assert!(apply_outcome(&conn, &first[0].run_id, &ok_text("迟到的完成")).is_err());
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
+        assert_eq!(projects::get(&conn, &project_id).unwrap().status, "waiting_user");
+        let systems = messages::list(&conn, &project_id, None, 20).unwrap();
+        assert!(systems.iter().any(|message| message.kind == "system" && message.content.contains("部分文件")));
+        let _ = agents;
+    }
+
+    #[test]
+    fn waiting_message_abandons_the_old_instruction_with_the_new_one() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let old = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        conn.execute("UPDATE instructions SET status = 'waiting_user' WHERE id = ?1", [&old.id]).unwrap();
+        conn.execute(
+            "INSERT INTO instruction_inputs (id, instruction_id, message_id, kind, status, created_at) VALUES ('queued-old', ?1, ?2, 'supplement', 'queued', 1)",
+            rusqlite::params![old.id, old.source_message_id],
+        ).unwrap();
+        let new = begin_user_instruction(&conn, &project_id, "重新做登录校验").unwrap();
+        assert_eq!(instructions::get(&conn, &old.id).unwrap().status, "abandoned");
+        assert_eq!(new.status, "running");
+        assert_eq!(new.kind, "team");
+        assert_eq!(new.phase, "triage");
+        assert_ne!(new.id, old.id);
+        assert_eq!(instructions::active_instruction(&conn, &project_id).unwrap().unwrap().id, new.id);
+        let queued: String = conn.query_row("SELECT status FROM instruction_inputs WHERE id = 'queued-old'", [], |row| row.get(0)).unwrap();
+        assert_eq!(queued, "cancelled");
+        assert!(begin_user_instruction(&conn, &project_id, "不该再开一条").is_err());
+        assert_eq!(instructions::get(&conn, &new.id).unwrap().status, "running");
+    }
+
+    #[test]
+    fn resume_retries_replayable_phase_and_supplement_or_abandon() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let first = advance(&conn, &project_id).unwrap();
+        fail_launch(&conn, &first[0].run_id, "进程没有启动").unwrap();
+        stop_instruction(&conn, &project_id).unwrap();
+        let waiting = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        let turns = waiting.turn_count;
+        assert_eq!(waiting.phase, "triage");
+        let retried = resume_instruction(&conn, &waiting.id, "retry", None).unwrap();
+        assert_eq!(retried.status, "running");
+        assert_eq!(retried.turn_count, turns);
+        assert_eq!(retried.discuss_rounds, waiting.discuss_rounds);
+        conn.execute("UPDATE instructions SET status = 'waiting_user', turn_count = 30 WHERE id = ?1", [&waiting.id]).unwrap();
+        let capped = resume_instruction(&conn, &waiting.id, "retry", None).unwrap_err();
+        assert!(capped.to_string().contains("30") || capped.to_string().contains("重试"));
+        assert_eq!(instructions::get(&conn, &waiting.id).unwrap().turn_count, 30);
+        assert_eq!(instructions::get(&conn, &waiting.id).unwrap().status, "waiting_user");
+
+        conn.execute("UPDATE instructions SET phase = 'execute', status = 'waiting_user', turn_count = 4 WHERE id = ?1", [&waiting.id]).unwrap();
+        instructions::insert_batch(&conn, &waiting.id, Some(&agents[0].id), "旧决议", &[
+            NewTask { assignee_agent_id: agents[1].id.clone(), title: "已失败".into(), detail: "细节".into(), replaces_task_id: None },
+            NewTask { assignee_agent_id: agents[1].id.clone(), title: "被取消".into(), detail: "细节".into(), replaces_task_id: None },
+        ]).unwrap();
+        let tasks = instructions::list_tasks(&conn, &waiting.id).unwrap();
+        conn.execute("UPDATE tasks SET status = 'failed' WHERE id = ?1", [&tasks[0].id]).unwrap();
+        conn.execute("UPDATE tasks SET status = 'cancelled' WHERE id = ?1", [&tasks[1].id]).unwrap();
+        assert!(resume_instruction(&conn, &waiting.id, "retry", None).is_err());
+        assert!(resume_instruction(&conn, &waiting.id, "supplement", Some("   ")).is_err());
+        let supplemented = resume_instruction(&conn, &waiting.id, "supplement", Some("改用别的方案")).unwrap();
+        assert_eq!(supplemented.status, "running");
+        assert_eq!(supplemented.phase, "intervention");
+        assert_eq!(supplemented.turn_count, 4);
+        assert_eq!(instructions::get_task(&conn, &tasks[0].id).unwrap().status, "failed");
+        assert_eq!(instructions::get_task(&conn, &tasks[1].id).unwrap().status, "cancelled");
+        let prompt = advance(&conn, &project_id).unwrap();
+        assert!(prompt[0].prompt.contains("改用别的方案"));
+
+        conn.execute("UPDATE instructions SET status = 'waiting_user' WHERE id = ?1", [&waiting.id]).unwrap();
+        let abandoned = resume_instruction(&conn, &waiting.id, "abandon", None).unwrap();
+        assert_eq!(abandoned.status, "abandoned");
+        assert!(instructions::active_instruction(&conn, &project_id).unwrap().is_none());
+        assert_eq!(projects::get(&conn, &project_id).unwrap().status, "idle");
+        assert_eq!(instructions::get_task(&conn, &tasks[1].id).unwrap().status, "cancelled");
+    }
+
+    #[test]
+    fn idle_direct_completes_without_the_leader() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        let message = messages::insert(&conn, &project_id, "user", None, "chat", "@前端 改按钮文案").unwrap();
+        let instruction = open_direct_instruction(&conn, &project_id, message.id, &agents[1].id).unwrap();
+        assert_eq!(instruction.kind, "direct");
+        assert_eq!(instruction.phase, "direct");
+        assert_eq!(instruction.target_agent_id.as_deref(), Some(agents[1].id.as_str()));
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
+        let runs: i64 = conn.query_row("SELECT COUNT(*) FROM runs", [], |row| row.get(0)).unwrap();
+        assert_eq!(runs, 0);
+        finish_direct_instruction(&conn, &instruction.id, true).unwrap();
+        assert_eq!(instructions::get(&conn, &instruction.id).unwrap().status, "completed");
+        assert_eq!(projects::get(&conn, &project_id).unwrap().status, "idle");
+        assert!(instructions::active_instruction(&conn, &project_id).unwrap().is_none());
     }
 }
