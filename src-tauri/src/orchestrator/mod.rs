@@ -711,10 +711,12 @@ fn insert_run(conn: &Connection, agent_id: &str, mode: &str, instruction_id: &st
 }
 
 fn finish_run(conn: &Connection, run_id: &str, outcome: &RunOutcome, status: &str) -> AppResult<()> {
+    let usage = outcome.usage.as_ref().map(serde_json::to_string).transpose()
+        .map_err(|error| invalid(format!("用量序列化失败：{error}")))?;
     let changed = conn.execute(
-        "UPDATE runs SET status = ?1, ended_at = ?2, exit_code = ?3, error = ?4, session_id = COALESCE(?5, session_id) \
-         WHERE id = ?6 AND status = 'running'",
-        params![status, now_ms(), outcome.exit_code, outcome.error, outcome.session_id, run_id],
+        "UPDATE runs SET status = ?1, ended_at = ?2, exit_code = ?3, error = ?4, session_id = COALESCE(?5, session_id), \
+         usage_json = ?6 WHERE id = ?7 AND status = 'running'",
+        params![status, now_ms(), outcome.exit_code, outcome.error, outcome.session_id, usage, run_id],
     )?;
     if changed == 0 {
         return Err(invalid("运行已结束"));
@@ -1531,4 +1533,34 @@ mod tests {
         assert_eq!(projects::get(&conn, &project_id).unwrap().status, "idle");
         assert!(instructions::active_instruction(&conn, &project_id).unwrap().is_none());
     }
+    #[test]
+    fn team_turn_usage_is_stored_and_serves_as_the_next_baseline() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let specs = advance(&conn, &project_id).unwrap();
+        let mut outcome = ok_text(&fence("直接答复。", r#"{"action":"reply","message":"可以"}"#));
+        outcome.usage = Some(crate::adapters::Usage {
+            input_tokens: Some(12), output_tokens: Some(3),
+            raw_usage: Some(serde_json::json!({"input_tokens": 12, "output_tokens": 3})),
+            ..Default::default()
+        });
+        apply_outcome(&conn, &specs[0].run_id, &outcome).unwrap();
+        let run = crate::store::runs::get(&conn, &specs[0].run_id).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(run.usage_json.as_deref().expect("团队回合应保存用量")).unwrap();
+        assert_eq!(stored["inputTokens"], 12);
+        assert_eq!(stored["outputTokens"], 3);
+        assert!(stored["costUsd"].is_null());
+        let baseline = crate::store::runs::latest_usage(&conn, &agents[0].id, "session").unwrap().unwrap();
+        assert_eq!(baseline["rawUsage"]["output_tokens"], 3);
+    }
+
+    #[test]
+    fn team_turn_without_usage_leaves_the_column_empty() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let specs = advance(&conn, &project_id).unwrap();
+        apply_outcome(&conn, &specs[0].run_id, &ok_text(&fence("直接答复。", r#"{"action":"reply","message":"可以"}"#))).unwrap();
+        assert_eq!(crate::store::runs::get(&conn, &specs[0].run_id).unwrap().usage_json, None);
+    }
+
 }
