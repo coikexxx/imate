@@ -1,6 +1,18 @@
+import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ProxySettings,
+  ProxyState,
   Agent,
+  Message,
+  ProjectRuntime,
+  SendMessageResponse,
+  Instruction,
+  TaskItem,
+  ProjectEventMap,
+  DraftInput,
+  DraftResponse,
+  AssistantDelta,
   AgentInput,
   CliInfo,
   NewProjectInput,
@@ -13,7 +25,29 @@ import type {
 
 // 后端失败时 invoke 会 reject，值是一句中文说明；调用方用 String(e) 展示即可。
 export const api = {
+  getDshSettings: () => invoke<import("./types").DshSettings>("get_dsh_settings"),
+  saveDshSettings: (settings: import("./types").DshSettings) => invoke<import("./types").DshSettings>("save_dsh_settings", { settings }),
+  listDshModels: (profile: import("./types").DshProfile) => invoke<import("./types").DshCatalog>("list_dsh_models", { profile }),
+  getNetworkProxy: () => invoke<ProxyState>("get_network_proxy"),
+  saveNetworkProxy: (settings: ProxySettings) => invoke<ProxyState>("save_network_proxy", { settings }),
+  draftRules: (input: DraftInput) => invoke<DraftResponse>("draft_rules", { input }),
+  draftPersona: (input: DraftInput) => invoke<DraftResponse>("draft_persona", { input }),
+  cancelDraft: (draftId: string) => invoke<void>("cancel_draft", { draftId }),
+  listenAssistantEvent: (receive: (payload: AssistantDelta) => void) =>
+    listen<AssistantDelta>("assistant:delta", (event) => receive(event.payload)),
   listClis: () => invoke<CliInfo[]>("list_clis"),
+  listMessages: (projectId: string, beforeId: number | null = null, limit = 50) =>
+    invoke<Message[]>("list_messages", { projectId, beforeId, limit }),
+  sendMessage: (projectId: string, content: string) => invoke<SendMessageResponse>("send_message", { projectId, content }),
+  stopProject: (projectId: string) => invoke<void>("stop_project", { projectId }),
+  listInstructions: (projectId: string) => invoke<Instruction[]>("list_instructions", { projectId }),
+  resumeInstruction: (instructionId: string, action: "retry" | "supplement" | "abandon", note?: string | null) =>
+    invoke<Instruction>("resume_instruction", { instructionId, action, note: note ?? null }),
+  listTasks: (instructionId: string) => invoke<TaskItem[]>("list_tasks", { instructionId }),
+  getProjectRuntime: (projectId: string) => invoke<ProjectRuntime>("get_project_runtime", { projectId }),
+  confirmRuntimeCleanup: (runId: string) => invoke<void>("confirm_runtime_cleanup", { runId }),
+  listenProjectEvent: <K extends keyof ProjectEventMap>(name: K, receive: (payload: ProjectEventMap[K]) => void) =>
+    listen<ProjectEventMap[K]>(name, (event) => receive(event.payload)),
 
   listProjects: () => invoke<ProjectSummary[]>("list_projects"),
   createProject: (input: NewProjectInput) => invoke<Project>("create_project", { input }),

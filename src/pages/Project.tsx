@@ -1,9 +1,15 @@
+import { assistantAvailable } from "../lib/clis";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
+import { useStore } from "zustand";
+import { ChatPanel } from "../components/ChatPanel";
+import { projectStore } from "../stores/project";
 import { api } from "../api";
 import { AgentForm } from "../components/AgentForm";
 import { MemberList } from "../components/MemberList";
+import { ProxySettingsButton } from "../components/ProxySettings";
+import { DshSettingsButton } from "../components/DshSettings";
 import { RulesPanel } from "../components/RulesPanel";
 import { Button, Modal } from "../components/ui";
 import {
@@ -13,7 +19,10 @@ import {
   type CliInfo,
   type PersonaTemplate,
   type ProjectDetail,
+  type RuleDoc,
 } from "../types";
+
+const EMPTY_AGENT_STATUSES: Record<string, import("../types").AgentStatus> = {};
 
 type Editing = { kind: "new" } | { kind: "edit"; agent: Agent } | null;
 
@@ -31,13 +40,20 @@ export default function Project() {
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [clis, setClis] = useState<CliInfo[]>([]);
   const [templates, setTemplates] = useState<PersonaTemplate[]>([]);
+  const [projectRules, setProjectRules] = useState<RuleDoc[]>([]);
   const [editing, setEditing] = useState<Editing>(null);
   const [tab, setTab] = useState<"files" | "rules">("rules");
   const [error, setError] = useState<string | null>(null);
+  const [mention, setMention] = useState<string | undefined>();
+  const activeRunId = useStore(projectStore, (state) => state.projectId === id ? state.activeRunId : null);
+  const agentStatuses = useStore(projectStore, (state) => state.projectId === id ? state.agentStatuses : EMPTY_AGENT_STATUSES);
+  const consumeMention = useCallback(() => setMention(undefined), []);
 
   const reload = useCallback(async () => {
     setDetail(await api.getProject(id));
   }, [id]);
+
+  const refreshAfterRun = useCallback(() => { reload().catch((e) => setError(String(e))); }, [reload]);
 
   useEffect(() => {
     reload().catch((e) => setError(String(e)));
@@ -94,6 +110,11 @@ export default function Project() {
   }
 
   const editingAgent = editing?.kind === "edit" ? editing.agent : null;
+  const assistantReady = assistantAvailable(clis);
+  async function openAgentForm(target: Editing) {
+    try { setProjectRules(await api.listRules(id)); setEditing(target); }
+    catch (failure) { setError(String(failure)); }
+  }
 
   return (
     <div className="flex h-full flex-col">
@@ -103,11 +124,13 @@ export default function Project() {
         </Link>
         <h1 className="text-base font-semibold">{project.name}</h1>
         <span className="rounded bg-slate-800 px-2 py-0.5 text-xs">
-          {STATUS_LABELS[project.status]}
+          {activeRunId ? "执行中" : STATUS_LABELS[project.status]}
         </span>
-        <span className="truncate text-xs text-slate-500" title={project.folderPath}>
+        <span className="flex-1 truncate text-xs text-slate-500" title={project.folderPath}>
           {project.folderPath}
         </span>
+        <ProxySettingsButton />
+        <DshSettingsButton />
       </header>
 
       {!detail.folderExists && (
@@ -122,13 +145,15 @@ export default function Project() {
         <MemberList
           agents={agents}
           clis={clis}
-          onAdd={() => setEditing({ kind: "new" })}
-          onEdit={(agent) => setEditing({ kind: "edit", agent })}
+          statuses={agentStatuses}
+          onMention={(agent) => setMention(agent.name)}
+          onAdd={() => void openAgentForm({ kind: "new" })}
+          onEdit={(agent) => void openAgentForm({ kind: "edit", agent })}
         />
 
         <section className="grid min-h-0 grid-rows-[2fr_3fr] gap-3 p-3">
           <Pending title="像素办公室" stage="M4" />
-          <Pending title="群聊与指令" stage="M2" />
+          <ChatPanel projectId={id} agents={agents} folderExists={detail.folderExists} mention={mention} onMentionUsed={consumeMention} onFinished={refreshAfterRun} />
         </section>
 
         <aside className="flex min-h-0 flex-col border-l border-slate-800">
@@ -149,7 +174,7 @@ export default function Project() {
           <div className="min-h-0 flex-1 overflow-y-auto">
             {tab === "rules" ? (
               // 文件夹重新选定后路径会变，用 key 让规章面板重新读取，不必来回切页签
-              <RulesPanel key={`${detail.folderExists}:${project.folderPath}`} projectId={id} />
+              <RulesPanel key={`${detail.folderExists}:${project.folderPath}`} projectId={id} project={project} agents={agents} clis={clis} />
             ) : (
               <div className="h-full p-3">
                 <Pending title="文件树" stage="M4" />
@@ -174,6 +199,11 @@ export default function Project() {
             submitLabel={editingAgent ? "保存" : "添加"}
             onSubmit={saveAgent}
             onCancel={() => setEditing(null)}
+            draftContext={detail.folderExists && assistantReady ? {
+              folderPath: project.folderPath, projectName: project.name, description: project.description,
+              rules: projectRules, members: agents.map((agent) => ({ name: agent.name, role: agent.role, persona: agent.persona })),
+            } : undefined}
+            assistantUnavailableReason={!detail.folderExists ? "项目文件夹不存在，无法起草" : !assistantReady ? "没有已安装且已接入的 CLI" : undefined}
           />
           {editingAgent && !editingAgent.isLeader && (
             <div className="mt-4 border-t border-slate-800 pt-4">

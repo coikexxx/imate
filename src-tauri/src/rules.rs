@@ -76,6 +76,31 @@ pub fn delete(folder: &Path, filename: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// 规章变更后给现有会话看的通知。`current` 必须是变更后的 `list` 结果。
+/// 只生成文本，不改写已经发给 CLI 的提示词。
+pub fn change_notice(operation: &str, filename: &str, content: Option<&str>, current: &[RuleDoc]) -> String {
+    let version = if current.is_empty() {
+        "none".to_string()
+    } else {
+        current.iter().map(|rule| format!("{}:{}", rule.filename, rule.content.len())).collect::<Vec<_>>().join("|")
+    };
+    let files = if current.is_empty() {
+        "无".to_string()
+    } else {
+        current.iter().map(|rule| rule.filename.as_str()).collect::<Vec<_>>().join("、")
+    };
+    let mut notice = format!("规章版本：{version}\n操作：{operation}\n对象：{filename}\n有效文件：{files}\n");
+    if current.is_empty() {
+        notice.push_str("旧规章全部失效，当前暂无规章");
+    } else {
+        notice.push_str("此前的规章版本已失效。");
+    }
+    if let Some(content) = content {
+        notice.push_str(&format!("\n{filename} 全文：\n{content}"));
+    }
+    notice
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +179,36 @@ mod tests {
             delete(dir.path(), "协作规范.md"),
             Err(AppError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn change_notice_records_version_operation_full_text_and_invalidation() {
+        let dir = tempfile::tempdir().unwrap();
+        let added = "# 协作\n不得改已发出的提示词";
+        save(dir.path(), "协作规范.md", added).unwrap();
+        save(dir.path(), "开发规范.md", "开发正文").unwrap();
+        let current = list(dir.path()).unwrap();
+        let notice = change_notice("新增", "协作规范.md", Some(added), &current);
+        let version = format!(
+            "规章版本：{}:{}|{}:{}",
+            current[0].filename,
+            current[0].content.len(),
+            current[1].filename,
+            current[1].content.len()
+        );
+        assert!(notice.contains(&version), "{notice}");
+        assert!(notice.contains("操作：新增"), "{notice}");
+        assert!(notice.contains("协作规范.md"), "{notice}");
+        assert!(notice.contains("开发规范.md"), "{notice}");
+        assert!(notice.contains(added), "{notice}");
+        assert!(notice.contains("失效"), "{notice}");
+    }
+
+    #[test]
+    fn change_notice_for_clearing_the_last_rule_says_none_remain() {
+        let notice = change_notice("删除", "协作规范.md", None, &[]);
+        assert!(notice.contains("规章版本：none"), "{notice}");
+        assert!(notice.contains("操作：删除"), "{notice}");
+        assert!(notice.contains("旧规章全部失效，当前暂无规章"), "{notice}");
     }
 }

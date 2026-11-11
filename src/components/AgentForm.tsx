@@ -1,8 +1,12 @@
+import { DshModelSelect } from "./DshModelSelect";
 import { useState } from "react";
+import { api } from "../api";
 import { composePersona, emptyPersona, parsePersona } from "../lib/persona";
+import { normalizeName } from "../lib/mentions";
 import { validateAgent } from "../lib/wizard";
-import type { AgentInput, CliInfo, PersonaTemplate } from "../types";
+import type { AgentInput, CliInfo, DraftInput, PersonaTemplate } from "../types";
 import { PersonaEditor } from "./PersonaEditor";
+import { AssistantDraftDialog } from "./AssistantDraftDialog";
 import { Button, Field, inputClass } from "./ui";
 
 interface Props {
@@ -18,6 +22,8 @@ interface Props {
   /** 抛出的错误会显示在表单里 */
   onSubmit: (input: AgentInput) => void | Promise<void>;
   onCancel: () => void;
+  draftContext?: Omit<DraftInput, "draftId" | "currentText" | "feedback" | "memberName" | "role" | "targetFilename">;
+  assistantUnavailableReason?: string;
 }
 
 export function AgentForm({
@@ -29,15 +35,18 @@ export function AgentForm({
   submitLabel,
   onSubmit,
   onCancel,
+  draftContext,
+  assistantUnavailableReason,
 }: Props) {
   const [name, setName] = useState(initial?.name ?? "");
   const [role, setRole] = useState(initial?.role ?? "");
-  const [cli, setCli] = useState(initial?.cli ?? clis.find((c) => c.installed)?.id ?? "");
+  const [cli, setCli] = useState(initial?.cli ?? clis.find((c) => c.installed && c.supported)?.id ?? "");
   const [model, setModel] = useState(initial?.model ?? "");
   const [isLeader, setIsLeader] = useState(forceLeader || (initial?.isLeader ?? false));
   const [persona, setPersona] = useState(initial?.persona ?? composePersona(emptyPersona()));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [draftOpen, setDraftOpen] = useState(false);
 
   const template = templates.find((t) => t.role === role.trim());
 
@@ -58,7 +67,10 @@ export function AgentForm({
       model: model.trim() || null,
       isLeader,
     };
-    const problem = validateAgent(input, takenNames);
+    const selected = clis.find((c) => c.id === cli);
+    const duplicate = takenNames.some((other) => normalizeName(other) === normalizeName(input.name));
+    const problem = duplicate ? `成员名「${input.name}」已存在` :
+      !selected?.supported ? "该 CLI 尚未接入" : !selected.installed ? "请先安装所选 CLI" : validateAgent(input, takenNames);
     if (problem) {
       setError(problem);
       return;
@@ -100,20 +112,21 @@ export function AgentForm({
           </datalist>
         </Field>
         <Field label="CLI">
-          <select className={inputClass} value={cli} onChange={(e) => setCli(e.target.value)}>
+          <select className={inputClass} value={cli} onChange={(e) => { setCli(e.target.value); setModel(""); }}>
             <option value="" disabled>
               请选择
             </option>
             {clis.map((c) => (
-              <option key={c.id} value={c.id} disabled={!c.installed}>
+              <option key={c.id} value={c.id} disabled={!c.installed || !c.supported}>
                 {c.label}
-                {c.installed ? (c.version ? `（${c.version}）` : "") : "（未安装）"}
+                {!c.supported ? "（尚未接入）" : c.installed ? (c.version ? `（${c.version}）` : "") : "（未安装）"}
               </option>
             ))}
           </select>
         </Field>
-        <Field label="模型（可选，留空用 CLI 默认）">
-          <input className={inputClass} value={model} onChange={(e) => setModel(e.target.value)} />
+        <Field label={cli === "dsh" ? "模型（读取 Dsh 已配置的模型）" : "模型（可选，留空用 CLI 默认）"}>
+          {cli === "dsh" ? <DshModelSelect value={model} onChange={setModel} /> :
+            <input className={inputClass} value={model} onChange={(e) => setModel(e.target.value)} />}
         </Field>
       </div>
 
@@ -133,17 +146,21 @@ export function AgentForm({
       <div className="space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-sm font-medium">人设</span>
-          <Button disabled={!template} onClick={() => template && setPersona(template.persona)}>
-            套用「{role.trim() || "预设角色"}」模板
-          </Button>
+          <div className="flex gap-2">
+            <Button disabled={!draftContext} title={assistantUnavailableReason} onClick={() => setDraftOpen(true)}>让助理起草</Button>
+            <Button disabled={!template} onClick={() => template && setPersona(template.persona)}>
+              套用「{role.trim() || "预设角色"}」模板
+            </Button>
+          </div>
         </div>
         <PersonaEditor value={persona} onChange={setPersona} />
         <p className="text-xs text-slate-500">
-          边界是写给 Agent 看的软约束，应用不做硬性拦截；各 CLI 的沙箱强度也不相同。
+          人设边界属于提示词约束。执行模式会自动运行工具，可能写出项目目录；CLI 会继承自身的用户与项目配置。
         </p>
       </div>
 
       {error && <p className="text-sm text-red-400">{error}</p>}
+      {!draftContext && <p className="text-xs text-slate-500">{assistantUnavailableReason ?? "选择项目文件夹并检测到已接入的 CLI 后可起草"}</p>}
 
       <div className="flex justify-end gap-2">
         <Button onClick={onCancel}>取消</Button>
@@ -151,6 +168,11 @@ export function AgentForm({
           {submitLabel}
         </Button>
       </div>
+      {draftOpen && draftContext && <AssistantDraftDialog kind="persona" context={{ ...draftContext, memberName: name.trim() || null,
+        role: role.trim() || null, targetFilename: null }} initialDraft={persona} onGenerate={api.draftPersona}
+        onRewrite={(feedback, draftId, currentText) => api.draftPersona({ ...draftContext, memberName: name.trim() || null,
+          role: role.trim() || null, targetFilename: null, draftId, currentText, feedback })}
+        onAccept={(draft) => { if (typeof draft === "string") setPersona(draft); }} onCancel={() => setDraftOpen(false)} />}
     </div>
   );
 }

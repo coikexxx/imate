@@ -1,9 +1,20 @@
 // 与后端 DTO 一一对应，字段为 camelCase。
 
+export interface ProxySettings { mode: "system" | "manual" | "direct"; url: string }
+export interface ProxyState { settings: ProxySettings; detectedProxy: string; detectionError: string | null }
+export type DshProfile = "web" | "headless";
+export interface DshSettings { authentication: "headless" | "account"; profile: DshProfile }
+export interface DshCatalog {
+  profile: DshProfile;
+  groups: { id: string; name: string; models: { id: string; name: string }[] }[];
+  failures: { provider: string; message: string }[];
+}
+
 export interface CliInfo {
   id: string;
   label: string;
   installed: boolean;
+  supported: boolean;
   path: string | null;
   version: string | null;
 }
@@ -42,6 +53,8 @@ export interface Agent {
   cli: string;
   model: string | null;
   isLeader: boolean;
+  sessionId: string | null;
+  lastSeenMessageId: number | null;
   seatIndex: number;
   createdAt: number;
 }
@@ -79,3 +92,90 @@ export interface NewProjectInput {
   rules: RuleDoc[];
   agents: AgentInput[];
 }
+
+export interface Message {
+  id: number;
+  projectId: string;
+  senderType: string;
+  senderAgentId: string | null;
+  kind: string;
+  content: string;
+  round: number | null;
+  createdAt: number;
+}
+export type AgentStatus = "idle" | "thinking" | "talking" | "working" | "error";
+export interface MessageDelta { projectId: string; runId: string; seq: number; agentId: string; text: string }
+export interface MessageNew { projectId: string; runId: string | null; message: Message }
+export interface AgentStatusEvent { projectId: string; runId: string | null; agentId: string; status: AgentStatus }
+export interface RunFinished { projectId: string; runId: string; agentId: string; seq: number; status: "ok" | "failed" | "timeout" | "cancelled"; error: string | null }
+export interface RuntimeSnapshot { projectId: string; runId: string; agentId: string; status: AgentStatus; seq: number; partialText: string }
+export interface CleanupNotice { runId: string; projectId: string | null; folderPath: string }
+export interface ProjectRuntime { active: RuntimeSnapshot | null; cleanupRequired: CleanupNotice[] }
+export interface SendMessageResponse { runId: string; userMessage: Message; agentMessageId: number }
+
+export interface Instruction {
+  id: string;
+  projectId: string;
+  sourceMessageId: number;
+  kind: string;
+  targetAgentId: string | null;
+  phase: string;
+  status: string;
+  discussRounds: number;
+  turnCount: number;
+  currentBatch: string | null;
+  resumePhase: string | null;
+  contextSnapshotJson: string | null;
+  waitReason: string | null;
+  createdAt: number;
+  updatedAt: number;
+  finishedAt: number | null;
+}
+
+export interface TaskItem {
+  id: string;
+  projectId: string;
+  instructionMessageId: number | null;
+  assigneeAgentId: string | null;
+  title: string;
+  detail: string;
+  orderIndex: number;
+  status: string;
+  reworkCount: number;
+  reportMessageId: number | null;
+  createdAt: number;
+  finishedAt: number | null;
+  instructionId: string | null;
+  batchId: string | null;
+  supersededByTaskId: string | null;
+}
+export interface ProjectEventMap {
+  "message:delta": MessageDelta;
+  "message:new": MessageNew;
+  "agent:status": AgentStatusEvent;
+  "run:finished": RunFinished;
+}
+
+export interface DraftMember { name: string; role: string; persona: string }
+export interface DraftInput {
+  draftId: string;
+  folderPath: string;
+  projectName: string;
+  description: string;
+  rules: RuleDoc[];
+  members: DraftMember[];
+  memberName: string | null;
+  role: string | null;
+  currentText: string | null;
+  targetFilename: string | null;
+  feedback: string | null;
+}
+export interface DraftResponse {
+  draftId: string;
+  runId: string;
+  draft: RuleDoc[] | string | null;
+  rawText: string;
+  sessionId: string | null;
+  error: string | null;
+}
+export interface AssistantDelta { draftId: string; runId: string; seq: number; text: string }

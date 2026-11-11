@@ -1,6 +1,9 @@
 pub mod agents;
+pub mod instructions;
 pub mod migrations;
+pub mod messages;
 pub mod projects;
+pub mod runs;
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -58,7 +61,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["agents", "messages", "projects", "runs", "settings", "tasks"]
+            ["agents", "instruction_inputs", "instructions", "messages", "projects", "runs", "settings", "tasks"]
         );
     }
 
@@ -69,7 +72,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     #[test]
