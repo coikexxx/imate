@@ -87,6 +87,10 @@ struct RunRow {
     status: String,
     instruction_id: String,
     task_id: Option<String>,
+    /// 构建提示词时的最大消息 ID。成功后游标推进到这里。
+    message_bound: i64,
+    /// 构建提示词时的人设标记，用来判断回合进行中人设有没有被改过。
+    persona_mark: String,
 }
 
 /// 为当前指令准备下一批回合。已有运行中的 run 时不重复启动。
@@ -297,7 +301,7 @@ fn schedule_leader(conn: &Connection, instruction: &Instruction, stage: Stage) -
     }
     let leader = leader(conn, &instruction.project_id)?;
     let (prompt, bound) = compose_prompt(conn, instruction, &leader, stage, None, "")?;
-    let run_id = insert_run(conn, &leader.id, "discuss", &instruction.id, None)?;
+    let run_id = insert_run(conn, &leader, "discuss", &instruction.id, None, bound)?;
     set_project_status(conn, &instruction.project_id, "discussing")?;
     Ok(vec![spec(run_id, leader.id, &instruction.id, None, "discuss", prompt, bound)])
 }
@@ -322,7 +326,7 @@ fn schedule_discuss(conn: &Connection, instruction: &Instruction) -> AppResult<V
         let agent = roster.iter().find(|agent| agent.id == *agent_id).cloned()
             .ok_or_else(|| invalid(format!("成员 {agent_id} 不在花名册中")))?;
         let (prompt, prompt_bound) = compose_prompt(conn, instruction, &agent, Stage::Discuss, None, &topic)?;
-        let run_id = insert_run(conn, &agent.id, "discuss", &instruction.id, None)?;
+        let run_id = insert_run(conn, &agent, "discuss", &instruction.id, None, prompt_bound)?;
         specs.push(spec(run_id, agent.id, &instruction.id, None, "discuss", prompt, prompt_bound));
     }
     stored.pending = Some(StoredPending::Discuss { agent_ids, topic, launched: true });
@@ -350,9 +354,19 @@ fn schedule_execute(conn: &Connection, instruction: &Instruction) -> AppResult<V
     conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?1", [&task.id])?;
     let assignee = agents::get(conn, task.assignee_agent_id.as_deref().unwrap_or(""))?;
     let (prompt, bound) = compose_prompt(conn, instruction, &assignee, Stage::Execute, Some(&task), "")?;
-    let run_id = insert_run(conn, &assignee.id, "execute", &instruction.id, Some(&task.id))?;
+    let run_id = insert_run(conn, &assignee, "execute", &instruction.id, Some(&task.id), bound)?;
     set_project_status(conn, &instruction.project_id, "executing")?;
     Ok(vec![spec(run_id, assignee.id, &instruction.id, Some(task.id), "execute", prompt, bound)])
+}
+
+/// 运行中点名的提示词。会话重建时复用。
+fn mention_prompt(content: &str) -> String {
+    format!(
+        "# 直接执行\n用户点名你处理下面这件事。做完给出简短汇报，不要继续其他任务。\n\
+本次调用只是你的一次发言。说完就结束，不要等其他成员。\n\
+不得修改 .imates/。\n\n{}",
+        content.trim()
+    )
 }
 
 fn schedule_mention(conn: &Connection, instruction: &Instruction) -> AppResult<Vec<TurnSpec>> {
@@ -367,17 +381,12 @@ fn schedule_mention(conn: &Connection, instruction: &Instruction) -> AppResult<V
         return Ok(Vec::new());
     }
     let agent = agents::get(conn, &mention.agent_id)?;
-    let prompt = format!(
-        "# 直接执行\n用户点名你处理下面这件事。做完给出简短汇报，不要继续其他任务。\n\
-本次调用只是你的一次发言。说完就结束，不要等其他成员。\n\
-不得修改 .imates/。\n\n{}",
-        mention.content.trim()
-    );
-    let run_id = insert_run(conn, &agent.id, "execute", &instruction.id, None)?;
+    let prompt = mention_prompt(&mention.content);
+    let bound = message_bound(conn, &instruction.project_id)?;
+    let run_id = insert_run(conn, &agent, "execute", &instruction.id, None, bound)?;
     stored.mention = Some(StoredMention { launched: true, ..mention });
     save_snapshot(conn, &instruction.id, &stored)?;
     set_project_status(conn, &instruction.project_id, "executing")?;
-    let bound = message_bound(conn, &instruction.project_id)?;
     Ok(vec![spec(run_id, agent.id, &instruction.id, None, "execute", prompt, bound)])
 }
 
@@ -417,7 +426,7 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
             tx.execute("UPDATE instructions SET phase = 'execute', updated_at = ?1 WHERE id = ?2", params![now_ms(), instruction.id])?;
             set_project_status(&tx, &instruction.project_id, "executing")?;
             finish_run(&tx, &run.id, outcome, "ok")?;
-            remember_agent(&tx, agent, &instruction.project_id, outcome)?;
+            remember_agent(&tx, run, agent, outcome)?;
             tx.commit()?;
         }
         ActionKind::Reply { .. } => {
@@ -433,7 +442,7 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
             )?;
             set_project_status(&tx, &instruction.project_id, "idle")?;
             finish_run(&tx, &run.id, outcome, "ok")?;
-            remember_agent(&tx, agent, &instruction.project_id, outcome)?;
+            remember_agent(&tx, run, agent, outcome)?;
             tx.commit()?;
         }
         ActionKind::Discuss { to, topic } => {
@@ -449,7 +458,7 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
             )?;
             set_project_status(&tx, &instruction.project_id, "discussing")?;
             finish_run(&tx, &run.id, outcome, "ok")?;
-            remember_agent(&tx, agent, &instruction.project_id, outcome)?;
+            remember_agent(&tx, run, agent, outcome)?;
             tx.commit()?;
         }
         ActionKind::Rework { task_id, .. } => {
@@ -466,7 +475,7 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
             tx.execute("UPDATE instructions SET phase = 'execute', updated_at = ?1 WHERE id = ?2", params![now_ms(), instruction.id])?;
             set_project_status(&tx, &instruction.project_id, "executing")?;
             finish_run(&tx, &run.id, outcome, "ok")?;
-            remember_agent(&tx, agent, &instruction.project_id, outcome)?;
+            remember_agent(&tx, run, agent, outcome)?;
             tx.commit()?;
         }
     }
@@ -487,7 +496,7 @@ fn apply_execute(conn: &Connection, run: &RunRow, instruction: &Instruction, age
         instructions::finish_task(conn, &task_id, "failed", Some(report.id))?;
     }
     finish_run(conn, &run.id, outcome, if outcome.status == "ok" { "ok" } else { "failed" })?;
-    remember_agent(conn, agent, &instruction.project_id, outcome)?;
+    remember_agent(conn, run, agent, outcome)?;
     let pending: i64 = conn.query_row(
         "SELECT COUNT(*) FROM tasks WHERE instruction_id = ?1 AND batch_id = ?2 AND status IN ('pending', 'running')",
         params![instruction.id, instruction.current_batch],
@@ -512,7 +521,7 @@ fn apply_member_discuss(conn: &Connection, instruction: &Instruction, agent: &Ag
     messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "discussion", content)?;
     let run = load_run(conn, run_id)?;
     finish_run(conn, &run.id, outcome, if outcome.status == "ok" { "ok" } else { "failed" })?;
-    remember_agent(conn, agent, &instruction.project_id, outcome)?;
+    remember_agent(conn, &run, agent, outcome)?;
     if outcome.status != "ok" {
         return mark_waiting(conn, instruction, outcome.error.as_deref().unwrap_or("成员讨论失败"));
     }
@@ -653,13 +662,18 @@ fn save_speech(conn: &Connection, instruction: &Instruction, agent: &Agent, spee
     Ok(())
 }
 
-fn remember_agent(conn: &Connection, agent: &Agent, project_id: &str, outcome: &RunOutcome) -> AppResult<()> {
+fn remember_agent(conn: &Connection, run: &RunRow, agent: &Agent, outcome: &RunOutcome) -> AppResult<()> {
+    // 会话一旦建立就要记住，哪怕这个回合后来失败了。
     if let Some(session_id) = outcome.session_id.as_deref() {
         agents::set_session(conn, &agent.id, Some(session_id))?;
     }
-    let bound = message_bound(conn, project_id)?;
-    agents::finish_context(conn, &agent.id, &agent.persona, bound)?;
-    Ok(())
+    // 失败回合不推进游标，下一回合会重新带上这些消息。
+    if outcome.status != "ok" {
+        return Ok(());
+    }
+    // 人设在回合进行中被改过时传一个不可能相等的值：游标照常推进，待更新标记保留。
+    let applied = if persona_mark(&agent.persona) == run.persona_mark { agent.persona.as_str() } else { "\u{0}" };
+    agents::finish_context(conn, &agent.id, applied, run.message_bound)
 }
 
 fn mark_waiting(conn: &Connection, instruction: &Instruction, reason: &str) -> AppResult<()> {
@@ -699,13 +713,26 @@ fn next_pending(conn: &Connection, instruction_id: &str, batch_id: &str) -> AppR
     }
 }
 
-fn insert_run(conn: &Connection, agent_id: &str, mode: &str, instruction_id: &str, task_id: Option<&str>) -> AppResult<String> {
+/// 人设的长度加 64 位 FNV-1a。只用来比较「是不是同一版人设」。
+fn persona_mark(persona: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in persona.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{}:{hash:016x}", persona.len())
+}
+
+fn insert_run(conn: &Connection, agent: &Agent, mode: &str, instruction_id: &str, task_id: Option<&str>, bound: i64) -> AppResult<String> {
     let id = new_id();
-    let command = format!(r#"{{"source":"orchestrator","mode":"{mode}"}}"#);
+    // 不记录提示词本身，只记录回合结束时要用的两项事实。
+    let command = serde_json::json!({
+        "source": "orchestrator", "mode": mode, "messageBound": bound, "personaMark": persona_mark(&agent.persona),
+    }).to_string();
     conn.execute(
         "INSERT INTO runs (id, agent_id, mode, command, started_at, status, instruction_id, task_id) \
          VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7)",
-        params![id, agent_id, mode, command, now_ms(), instruction_id, task_id],
+        params![id, agent.id, mode, command, now_ms(), instruction_id, task_id],
     )?;
     Ok(id)
 }
@@ -726,9 +753,11 @@ fn finish_run(conn: &Connection, run_id: &str, outcome: &RunOutcome, status: &st
 
 fn load_run(conn: &Connection, run_id: &str) -> AppResult<RunRow> {
     conn.query_row(
-        "SELECT id, agent_id, mode, status, instruction_id, task_id FROM runs WHERE id = ?1",
+        "SELECT id, agent_id, mode, status, instruction_id, task_id, command FROM runs WHERE id = ?1",
         [run_id],
         |row| {
+            let command: Option<String> = row.get(6)?;
+            let facts: serde_json::Value = command.as_deref().and_then(|text| serde_json::from_str(text).ok()).unwrap_or_default();
             Ok(RunRow {
                 id: row.get(0)?,
                 agent_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -736,6 +765,9 @@ fn load_run(conn: &Connection, run_id: &str) -> AppResult<RunRow> {
                 status: row.get(3)?,
                 instruction_id: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 task_id: row.get(5)?,
+                // 旧记录没有这两项：上界按 0 处理（游标只增不减），人设标记留空（不会清除待更新标记）。
+                message_bound: facts["messageBound"].as_i64().unwrap_or(0),
+                persona_mark: facts["personaMark"].as_str().unwrap_or_default().to_string(),
             })
         },
     )
@@ -883,7 +915,7 @@ fn park_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agent
     let tx = conn.unchecked_transaction()?;
     save_speech(&tx, instruction, agent, speech_of(&outcome.final_text))?;
     finish_run(&tx, &run.id, outcome, "ok")?;
-    remember_agent(&tx, agent, &instruction.project_id, outcome)?;
+    remember_agent(&tx, run, agent, outcome)?;
     let mut snap = load_snapshot(&instructions::get(&tx, &instruction.id)?.context_snapshot_json)?;
     snap.stashed_text = Some(outcome.final_text.clone());
     snap.stashed_phase = Some(instruction.phase.clone());
@@ -905,7 +937,7 @@ fn apply_mention(conn: &Connection, run: &RunRow, instruction: &Instruction, age
     };
     messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "report", &content)?;
     finish_run(conn, &run.id, outcome, if outcome.status == "ok" { "ok" } else { "failed" })?;
-    remember_agent(conn, agent, &instruction.project_id, outcome)?;
+    remember_agent(conn, run, agent, outcome)?;
     let fresh = instructions::get(conn, &instruction.id)?;
     let mut snap = load_snapshot(&fresh.context_snapshot_json)?;
     snap.mention = None;
@@ -928,7 +960,7 @@ fn apply_intervention(
     let tx = conn.unchecked_transaction()?;
     save_speech(&tx, instruction, agent, &parsed.speech)?;
     finish_run(&tx, &run.id, outcome, "ok")?;
-    remember_agent(&tx, agent, &instruction.project_id, outcome)?;
+    remember_agent(&tx, run, agent, outcome)?;
     tx.commit()?;
     match (&parsed.action.kind, parsed.action.disposition) {
         (ActionKind::Reply { .. }, Some(protocol::Disposition::Continue)) => continue_instruction(conn, instruction),
@@ -1563,4 +1595,66 @@ mod tests {
         assert_eq!(crate::store::runs::get(&conn, &specs[0].run_id).unwrap().usage_json, None);
     }
 
+    fn next_team(conn: &rusqlite::Connection, project_id: &str, text: &str) {
+        let message = messages::insert(conn, project_id, "user", None, "instruction", text).unwrap();
+        instructions::insert_instruction(conn, project_id, message.id, "team", None, "triage").unwrap();
+    }
+
+    #[test]
+    fn failed_turn_keeps_the_cursor_and_success_uses_the_prompt_bound() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap();
+        let assign = fence("派工。", r#"{"action":"assign","decision":"做一步","tasks":[{"to":"前端","title":"第一步","detail":"做第一步"}]}"#);
+        apply_outcome(&conn, &leader[0].run_id, &ok_text(&assign)).unwrap();
+        let first = advance(&conn, &project_id).unwrap();
+        let before = agents::get(&conn, &agents[1].id).unwrap().last_seen_message_id;
+        apply_outcome(&conn, &first[0].run_id, &failed_text("做到一半")).unwrap();
+        let member = agents::get(&conn, &agents[1].id).unwrap();
+        assert_eq!(member.last_seen_message_id, before, "失败回合不推进游标");
+        assert_eq!(member.session_id.as_deref(), Some("session"), "已经建立的会话仍要记住");
+
+        let review = advance(&conn, &project_id).unwrap();
+        let task_id = instructions::list_tasks(&conn, &first[0].instruction_id).unwrap()[0].id.clone();
+        let rework = format!(r#"{{"action":"rework","task_id":"{task_id}","feedback":"重做"}}"#);
+        apply_outcome(&conn, &review[0].run_id, &ok_text(&fence("打回。", &rework))).unwrap();
+        let again = advance(&conn, &project_id).unwrap();
+        let late = messages::insert(&conn, &project_id, "user", None, "chat", "回合进行中才到的消息").unwrap();
+        apply_outcome(&conn, &again[0].run_id, &ok_text("做完了")).unwrap();
+        let cursor = agents::get(&conn, &agents[1].id).unwrap().last_seen_message_id.unwrap();
+        assert_eq!(cursor, again[0].message_bound, "游标取构建提示词时的上界");
+        assert!(cursor < late.id, "回合进行中到达的消息留给下一回合");
+    }
+
+    #[test]
+    fn edited_persona_reaches_an_existing_session_and_mid_run_edits_stay_pending() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        let reply = || ok_text(&fence("直接答复。", r#"{"action":"reply","message":"可以"}"#));
+        let edit = |text: &str| agents::update(&conn, &agents[0].id, &NewAgent {
+            name: "组长".into(), role: "管理".into(), persona: PERSONA.replace("本人风格", text),
+            cli: "claude".into(), model: None, is_leader: true,
+        }).unwrap();
+        start_team(&conn, &project_id);
+        let first = advance(&conn, &project_id).unwrap();
+        assert!(first[0].prompt.contains("# 本人完整人设"), "首个回合用开场");
+        apply_outcome(&conn, &first[0].run_id, &reply()).unwrap();
+        assert!(!agents::get(&conn, &agents[0].id).unwrap().persona_dirty);
+
+        edit("先问清楚再动手");
+        next_team(&conn, &project_id, "第二条指令");
+        let second = advance(&conn, &project_id).unwrap();
+        assert!(second[0].prompt.contains("已更新的人设") && second[0].prompt.contains("先问清楚再动手"));
+        assert!(!second[0].prompt.contains("# 本人完整人设"), "已有会话不重发开场");
+        edit("回合进行中又改了一次");
+        apply_outcome(&conn, &second[0].run_id, &reply()).unwrap();
+        assert!(agents::get(&conn, &agents[0].id).unwrap().persona_dirty, "回合进行中的修改不能被这次回合确认掉");
+
+        next_team(&conn, &project_id, "第三条指令");
+        let third = advance(&conn, &project_id).unwrap();
+        assert!(third[0].prompt.contains("回合进行中又改了一次"));
+        apply_outcome(&conn, &third[0].run_id, &reply()).unwrap();
+        assert!(!agents::get(&conn, &agents[0].id).unwrap().persona_dirty);
+        next_team(&conn, &project_id, "第四条指令");
+        assert!(!advance(&conn, &project_id).unwrap()[0].prompt.contains("已更新的人设"), "送达之后不再重复");
+    }
 }

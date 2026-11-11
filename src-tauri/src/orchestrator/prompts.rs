@@ -88,6 +88,12 @@ fn render(stage: Stage, snapshot: &TeamSnapshot<'_>) -> AppResult<String> {
     let mut sections = Vec::new();
     if snapshot.fresh_session {
         sections.push(build_opening(snapshot.project, snapshot.rules, snapshot.agent, snapshot.roster));
+    } else if snapshot.agent.persona_dirty {
+        // 已有会话不重发开场，只把新人设全文放在最前面。
+        sections.push(format!(
+            "# 已更新的人设（本回合立即生效，取代此前的人设）\n{}",
+            snapshot.agent.persona.trim()
+        ));
     }
     sections.push(format!(
         "# 本轮快照\n消息上界：{}\n规章版本：{}\n花名册版本：{}",
