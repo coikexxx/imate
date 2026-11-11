@@ -1,7 +1,7 @@
 # imates MVP 开发手册
 
 > 版本：2026-11-11（第 4 版，按 M2 多 Agent 评审校准权限、运行契约与 M3 前置规则）· 状态：M1 已完成；M2 实现已完成，实际验收未闭环。2026-11-11 决定暂不补测剩余三项。M3 实现已落地，2026-11-11 完成九项整改（自动测试通过，真实 CLI 团队讨论仍未执行）；M5 grok、dsh 与应用统一代理已接入，窗口部分验收通过，Dsh 认证与自定义 gpt-6.1-sol 已通过真实调用及窗口验收；Grok 跨模式、pi 与团队流程仍未闭环
-> 实施计划：[M0 CLI 实测](plans/2026-11-10-M0-CLI实测.md)、[M1 骨架](plans/2026-11-10-M1-骨架.md)、[M2 单 Agent 对话](plans/2026-11-10-M2-单Agent对话.md)、[M3 团队协作](plans/2026-11-11-M3-团队协作.md)、[M3 整改](plans/2026-11-11-M3-整改.md)、[M4 文件与动画](plans/2026-11-11-M4-文件与动画.md)（待确认）、[M5 其余适配器](plans/2026-11-11-M5-其余适配器.md)（实现完成，验收受阻，pi 待安装）
+> 实施计划：[M0 CLI 实测](plans/2026-11-10-M0-CLI实测.md)、[M1 骨架](plans/2026-11-10-M1-骨架.md)、[M2 单 Agent 对话](plans/2026-11-10-M2-单Agent对话.md)、[M3 团队协作](plans/2026-11-11-M3-团队协作.md)、[M3 整改](plans/2026-11-11-M3-整改.md)、[M4 文件与动画](plans/2026-11-11-M4-文件与动画.md)（已实现，窗口验收未执行）、[M5 其余适配器](plans/2026-11-11-M5-其余适配器.md)（实现完成，验收受阻，pi 待安装）
 > 设计依据：[参考项目调研](参考项目调研.md)
 
 ## 1. 产品定义
@@ -487,7 +487,7 @@ agents: name_key                             -- trim().to_lowercase()，项目�
 | 对话 | `list_messages`、`send_message`、`stop_project`、`get_project_runtime`、`confirm_runtime_cleanup` |
 | 指令（M3） | `list_instructions`、`resume_instruction`（显式 retry / supplement / abandon） |
 | 任务 | `list_tasks` |
-| 文件 | `list_files`、`open_file` |
+| 文件 | `list_files`、`open_file`、`watch_project` |
 | 设置 | `get_settings`、`update_settings` |
 
 `delete_project` 只删除应用内的记录，不动项目文件夹（包括其中的 `.imates/rules/`）；删除确认说明这些文件将保留。
@@ -503,7 +503,7 @@ agents: name_key                             -- trim().to_lowercase()，项目�
 | `agent:status` | `{ projectId, agentId, runId: string \| null, status }` | 成员列表与像素动画 |
 | `run:finished` | `{ projectId, runId, agentId, seq, status, error: string \| null }` | 项目回合终态：ok / failed / timeout / cancelled |
 | `task:updated` | `{ projectId, instructionId, task }` | M3 任务进度 |
-| `files:changed` | `{ projectId, paths }` | 文件树刷新与高亮 |
+| `files:changed` | `{ projectId, paths, changed }` | 文件树刷新与高亮；`changed` 是当前高亮全集，新指令开始时为空 |
 | `rules:changed` | `{ projectId, version }` | 规章面板刷新；M3 应用内、M4 外部变化 |
 | `assistant:delta` | `{ draftId, runId, seq, text }` | 助理草稿进度，不进入项目群聊 |
 
@@ -614,6 +614,8 @@ agents: name_key                             -- trim().to_lowercase()，项目�
 M2 当前已完成实现，macOS 实际 CLI/UI 验收部分通过。2026-11-11 在 Windows 11 10.0.26300 补了 runner 进程树自动化、跨进程恢复测试，以及 Claude Code 2.1.319 同一 session 的 plan → bypassPermissions → plan 工具事实和用量。同日决定暂不补测以下三项，它们保持未验收，M2 不标为完成：macOS Finder/Dock 启动 PATH、macOS Claude Code 2.1.322 的工具层拒写、应用窗口里的异常退出和“我已处理残留进程，解除阻塞”。
 
 M3 实现已落地。同日自动测试为后端 `cargo test` 144 passed、2 ignored，前端 `npm test` 29 passed，`npm run build` 通过。真实 CLI 团队讨论未执行，因此不把手册第 11 节“正常走完讨论到交付”记为已验收。上述 M2 三项不因 M3 测试通过而改为完成。
+
+M4 文件与动画（2026-11-11，`feat/m4-files-office`）：Task 1–9 已实现——文件树（只读、忽略 `.git`/`node_modules`/`.imates` 等、最多 2000 项）、`notify` 文件监听与 300 毫秒去抖、改动文件高亮（不区分修改者）、外部修改规章走与应用内相同的系统消息通知、Canvas 像素办公室（4×2 工位、每状态 2–4 帧动画）。自动测试：后端 `cargo test` 207 passed、2 ignored，前端 `npm test` 49 passed，Node 桥接 4 passed，`cargo build` 与 `npm run build` 通过。Task 9 Step 3 的 14 条窗口验收**均未执行（需用户验收）**，M4 不标为完成；监听去抖与规章外部变更只有单测和集成测试覆盖，实际窗口行为未验证。
 
 M3 整改（2026-11-11，`fix/m3-remediation`，Task 1–7 已实现）：代码审核发现九处与手册不符，已改回手册规定——游标只在回合成功时按提示词上界推进（A）、已有会话的下一回合注入修改后的人设（B）、提示词只带成员未读消息且最多 200 条（C）、组长协议出错发回重发一次（D）、讨论中失败的成员记为未发言（E）、启动阶段会话失效时重建一次（F）、被点名成员并行讨论（G）、整条指令期间一直占住项目和工作目录（H）、团队回合推送实时状态并保证终态事件（I）。自动测试：后端 `cargo test` 196 passed、2 ignored，前端 `npm test` 35 passed，Node 桥接 4 passed，`cargo build` 与 `npm run build` 通过。整改计划 Task 8 Step 2 的真实 CLI 团队讨论清单十条**均未执行（需用户在应用窗口中验收），因此仍不能写“已走完讨论到交付”**。
 

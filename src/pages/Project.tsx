@@ -11,6 +11,8 @@ import { MemberList } from "../components/MemberList";
 import { ProxySettingsButton } from "../components/ProxySettings";
 import { DshSettingsButton } from "../components/DshSettings";
 import { RulesPanel } from "../components/RulesPanel";
+import { FileTree } from "../components/FileTree";
+import { OfficeCanvas } from "../office/OfficeCanvas";
 import { Button, Modal } from "../components/ui";
 import {
   STATUS_LABELS,
@@ -23,17 +25,9 @@ import {
 } from "../types";
 
 const EMPTY_AGENT_STATUSES: Record<string, import("../types").AgentStatus> = {};
+const EMPTY_FILES: string[] = [];
 
 type Editing = { kind: "new" } | { kind: "edit"; agent: Agent } | null;
-
-/** 尚未实现的区域：说明它是什么、哪个阶段接入。 */
-function Pending({ title, stage }: { title: string; stage: string }) {
-  return (
-    <div className="flex h-full items-center justify-center rounded border border-dashed border-slate-700 text-sm text-slate-500">
-      {title}（{stage} 阶段接入）
-    </div>
-  );
-}
 
 export default function Project() {
   const { id = "" } = useParams();
@@ -47,6 +41,9 @@ export default function Project() {
   const [mention, setMention] = useState<string | undefined>();
   const activeRunId = useStore(projectStore, (state) => state.projectId === id ? state.activeRunId : null);
   const agentStatuses = useStore(projectStore, (state) => state.projectId === id ? state.agentStatuses : EMPTY_AGENT_STATUSES);
+  const changedFiles = useStore(projectStore, (state) => state.projectId === id ? state.changedFiles : EMPTY_FILES);
+  const filesTick = useStore(projectStore, (state) => state.projectId === id ? state.filesTick : 0);
+  const rulesTick = useStore(projectStore, (state) => state.projectId === id ? state.rulesTick : 0);
   const consumeMention = useCallback(() => setMention(undefined), []);
 
   const reload = useCallback(async () => {
@@ -60,6 +57,14 @@ export default function Project() {
     api.listClis().then(setClis);
     api.listPersonaTemplates().then(setTemplates);
   }, [reload]);
+
+  useEffect(() => {
+    let disposed = false;
+    api.watchProject(id)
+      .then((changed) => { if (!disposed) projectStore.getState().setChangedFiles(id, changed); })
+      .catch(() => { /* 文件夹不存在时由上方的红条提示，这里不重复报错 */ });
+    return () => { disposed = true; };
+  }, [id, detail?.project.folderPath]);
 
   if (error && !detail) {
     return (
@@ -152,7 +157,7 @@ export default function Project() {
         />
 
         <section className="grid min-h-0 grid-rows-[2fr_3fr] gap-3 p-3">
-          <Pending title="像素办公室" stage="M4" />
+          <OfficeCanvas agents={agents} statuses={agentStatuses} />
           <ChatPanel projectId={id} agents={agents} folderExists={detail.folderExists} mention={mention} onMentionUsed={consumeMention} onFinished={refreshAfterRun} />
         </section>
 
@@ -174,11 +179,11 @@ export default function Project() {
           <div className="min-h-0 flex-1 overflow-y-auto">
             {tab === "rules" ? (
               // 文件夹重新选定后路径会变，用 key 让规章面板重新读取，不必来回切页签
-              <RulesPanel key={`${detail.folderExists}:${project.folderPath}`} projectId={id} project={project} agents={agents} clis={clis} />
+              <RulesPanel key={`${detail.folderExists}:${project.folderPath}`} projectId={id} project={project} agents={agents} clis={clis} refreshTick={rulesTick} />
+            ) : detail.folderExists ? (
+              <FileTree key={project.folderPath} projectId={id} changed={changedFiles} tick={filesTick} />
             ) : (
-              <div className="h-full p-3">
-                <Pending title="文件树" stage="M4" />
-              </div>
+              <p className="p-3 text-sm text-slate-500">项目文件夹不存在，无法列出文件。</p>
             )}
           </div>
         </aside>
