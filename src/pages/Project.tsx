@@ -66,6 +66,17 @@ export default function Project() {
     return () => { disposed = true; };
   }, [id, detail?.project.folderPath]);
 
+  useEffect(() => {
+    function refreshProjectPage(event: KeyboardEvent) {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.isComposing
+        || event.key.toLowerCase() !== "r") return;
+      event.preventDefault();
+      if (!event.repeat) window.location.reload();
+    }
+    window.addEventListener("keydown", refreshProjectPage);
+    return () => window.removeEventListener("keydown", refreshProjectPage);
+  }, []);
+
   if (error && !detail) {
     return (
       <main className="p-8">
