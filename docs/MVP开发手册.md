@@ -1,6 +1,6 @@
 # imates MVP 开发手册
 
-> 版本：2026-11-11（第 4 版，按 M2 多 Agent 评审校准权限、运行契约与 M3 前置规则）· 状态：M1 已完成；M2 实现已完成，实际验收未闭环
+> 版本：2026-11-11（第 4 版，按 M2 多 Agent 评审校准权限、运行契约与 M3 前置规则）· 状态：M1 已完成；M2 实现已完成，实际验收未闭环。2026-11-11 决定暂不补测剩余三项，继续 M3
 > 实施计划：[M0 CLI 实测](plans/2026-11-10-M0-CLI实测.md)、[M1 骨架](plans/2026-11-10-M1-骨架.md)、[M2 单 Agent 对话](plans/2026-11-10-M2-单Agent对话.md)
 > 设计依据：[参考项目调研](参考项目调研.md)
 
@@ -609,7 +609,7 @@ agents: name_key                             -- trim().to_lowercase()，项目�
 | M5 其余适配器 | grok、dsh、pi | 五种 CLI 都能当成员参与讨论和执行 |
 | M6 打磨打包 | 设置页、报错文案、用量展示、Win 与 mac 安装包 | 在干净机器上可安装使用 |
 
-M2 当前已完成实现，macOS 实际 CLI/UI 验收部分通过。2026-11-11 在 Windows 11 10.0.26300 补了 runner 进程树自动化、跨进程恢复测试，以及 Claude Code 2.1.319 同一 session 的 plan → bypassPermissions → plan 工具事实和用量。Finder/Dock 启动 PATH、macOS 上的工具层拒写、应用窗口里的异常退出和清理确认仍未完成。按上述验收标准，M2 暂不标为完成。
+M2 当前已完成实现，macOS 实际 CLI/UI 验收部分通过。2026-11-11 在 Windows 11 10.0.26300 补了 runner 进程树自动化、跨进程恢复测试，以及 Claude Code 2.1.319 同一 session 的 plan → bypassPermissions → plan 工具事实和用量。同日决定暂不补测以下三项，它们保持未验收，M2 不标为完成：macOS Finder/Dock 启动 PATH、macOS Claude Code 2.1.322 的工具层拒写、应用窗口里的异常退出和“我已处理残留进程，解除阻塞”。后续开发进入 M3。
 
 依赖关系：M0 与 M1 互不依赖，可以并行；M2 同时依赖 M0 和 M1；M2 → M3 必须按序。M4 的文件树只依赖 M1，像素办公室依赖 M2 的状态事件；M5 依赖 M2。M4 和 M5 可以在 M3 之后以任意顺序进行。
 

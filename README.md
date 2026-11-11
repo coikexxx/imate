@@ -2,7 +2,7 @@
 
 像管理团队一样管理多个 AI Agent 的桌面应用。每个项目有一组分工不同的 Agent，围绕你下发的指令讨论、达成一致并落实工作。
 
-当前进度：M0 CLI 实测已完成（pi 顺延 M5），M1 骨架已完成。M2 单 Agent 对话的实现已完成，macOS 实际验收部分通过。2026-11-11 在 Windows 补了 runner 进程树、Claude 2.1.319 的跨模式工具事实与用量、跨进程恢复。macOS 工具层拒写、Finder/Dock PATH 和应用窗口手验仍未完成，因此 M2 尚未完成验收。详见 [M2 实施计划与验收记录](docs/plans/2026-11-10-M2-单Agent对话.md)。
+当前进度：M0 CLI 实测已完成（pi 顺延 M5），M1 骨架已完成。M2 实现已完成，验收未闭环。2026-11-11 决定暂不补测三项：macOS Claude 2.1.322 工具层拒写、Finder/Dock PATH、应用窗口里的异常退出与清理确认。下一步是 M3 团队协作，计划待确认。详见 [M2 实施计划与验收记录](docs/plans/2026-11-10-M2-单Agent对话.md) 和 [M3 团队协作计划](docs/plans/2026-11-11-M3-团队协作.md)。
 
 ## 开发
 
@@ -17,7 +17,7 @@ npm run tauri dev
 
 - [MVP 开发手册](docs/MVP开发手册.md)：产品定义、架构、协作流程、数据模型与里程碑
 - [CLI 实测记录](docs/CLI实测记录.md)：各 CLI 无头模式的调用参数、事件格式与行为
-- 实施计划：[M0 CLI 实测](docs/plans/2026-11-10-M0-CLI实测.md)、[M1 骨架](docs/plans/2026-11-10-M1-骨架.md)、[M2 单 Agent 对话](docs/plans/2026-11-10-M2-单Agent对话.md)
+- 实施计划：[M0 CLI 实测](docs/plans/2026-11-10-M0-CLI实测.md)、[M1 骨架](docs/plans/2026-11-10-M1-骨架.md)、[M2 单 Agent 对话](docs/plans/2026-11-10-M2-单Agent对话.md)、[M3 团队协作](docs/plans/2026-11-11-M3-团队协作.md)
 - [多设备开发指南](docs/多设备开发指南.md)：Windows / Intel Mac / Apple Silicon Mac 之间切换开发的环境清单与协作约定
 
 ## Recommended IDE Setup
