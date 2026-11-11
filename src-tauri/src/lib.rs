@@ -1,3 +1,4 @@
+mod fs_watch;
 mod files;
 mod proxy;
 mod dsh_config;
