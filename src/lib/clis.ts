@@ -4,8 +4,3 @@ import type { CliInfo } from "../types";
 export function assistantAvailable(clis: CliInfo[]): boolean {
   return clis.some((cli) => cli.installed && cli.supported);
 }
-
-/** dsh 的模型写在它自己的 profile 里，命令行上不能指定。 */
-export function modelIgnored(cliId: string): boolean {
-  return cliId === "dsh";
-}

@@ -47,7 +47,7 @@ impl CliAdapter for GrokAdapter {
             args.extend(["-m".into(), model.clone()]);
         }
         CommandSpec { program: self.program.clone(), args, path_env: self.path_env.clone(),
-            stdin: None, prompt_file: Some(prompt_file) }
+            stdin: None, prompt_file: Some(prompt_file), support_files: vec![] }
     }
     fn parse_line(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(v) = serde_json::from_str::<Value>(line) else { return vec![]; };

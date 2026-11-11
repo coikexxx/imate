@@ -4,6 +4,7 @@ import { Link } from "react-router";
 import { api } from "../api";
 import { ProjectCard } from "../components/ProjectCard";
 import { ProxySettingsButton } from "../components/ProxySettings";
+import { DshSettingsButton } from "../components/DshSettings";
 import type { ProjectSummary } from "../types";
 
 export default function Home() {
@@ -44,6 +45,7 @@ export default function Home() {
             {projects ? `${projects.length} 个项目 · ${agentTotal} 个 Agent` : "加载中…"}
           </p>
           <ProxySettingsButton />
+          <DshSettingsButton />
         </div>
       </header>
 

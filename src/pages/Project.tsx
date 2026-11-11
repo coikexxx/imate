@@ -9,6 +9,7 @@ import { api } from "../api";
 import { AgentForm } from "../components/AgentForm";
 import { MemberList } from "../components/MemberList";
 import { ProxySettingsButton } from "../components/ProxySettings";
+import { DshSettingsButton } from "../components/DshSettings";
 import { RulesPanel } from "../components/RulesPanel";
 import { Button, Modal } from "../components/ui";
 import {
@@ -129,6 +130,7 @@ export default function Project() {
           {project.folderPath}
         </span>
         <ProxySettingsButton />
+        <DshSettingsButton />
       </header>
 
       {!detail.folderExists && (

@@ -1,4 +1,4 @@
-import { modelIgnored } from "../lib/clis";
+import { DshModelSelect } from "./DshModelSelect";
 import { useState } from "react";
 import { api } from "../api";
 import { composePersona, emptyPersona, parsePersona } from "../lib/persona";
@@ -64,7 +64,7 @@ export function AgentForm({
       role: role.trim(),
       persona,
       cli,
-      model: modelIgnored(cli) ? null : model.trim() || null,
+      model: model.trim() || null,
       isLeader,
     };
     const selected = clis.find((c) => c.id === cli);
@@ -112,7 +112,7 @@ export function AgentForm({
           </datalist>
         </Field>
         <Field label="CLI">
-          <select className={inputClass} value={cli} onChange={(e) => setCli(e.target.value)}>
+          <select className={inputClass} value={cli} onChange={(e) => { setCli(e.target.value); setModel(""); }}>
             <option value="" disabled>
               请选择
             </option>
@@ -124,8 +124,9 @@ export function AgentForm({
             ))}
           </select>
         </Field>
-        <Field label={modelIgnored(cli) ? "模型（DeepSeek Harness 在自己的 profile 里配置，这里不生效）" : "模型（可选，留空用 CLI 默认）"}>
-          <input className={inputClass} value={modelIgnored(cli) ? "" : model} disabled={modelIgnored(cli)} onChange={(e) => setModel(e.target.value)} />
+        <Field label={cli === "dsh" ? "模型（读取 Dsh 已配置的模型）" : "模型（可选，留空用 CLI 默认）"}>
+          {cli === "dsh" ? <DshModelSelect value={model} onChange={setModel} /> :
+            <input className={inputClass} value={model} onChange={(e) => setModel(e.target.value)} />}
         </Field>
       </div>
 

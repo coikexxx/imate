@@ -83,6 +83,7 @@ fn normalize(input: &NewAgent) -> AppResult<(&str, &str, Option<&str>)> {
         .as_deref()
         .map(str::trim)
         .filter(|m| !m.is_empty());
+    if input.cli == "dsh" { crate::dsh_config::parse_selection(model)?; }
     Ok((name, role, model))
 }
 
@@ -250,6 +251,15 @@ pub fn delete(conn: &Connection, id: &str) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dsh_rejects_plain_model_names_and_preserves_structured_selection() {
+        let input = NewAgent { name: "成员".into(), role: "开发".into(), cli: "dsh".into(), model: Some("gpt-6".into()),
+            persona: "## 定位\n开发\n## 职责\n实现\n## 边界\n遵守规章\n## 工作风格\n务实".into(), is_leader: false };
+        assert!(normalize(&input).is_err());
+        let mut valid = input;
+        valid.model = Some(r#"{"profile":"web","provider":"gpt","model":"gpt-6"}"#.into());
+        assert_eq!(normalize(&valid).unwrap().2, valid.model.as_deref());
+    }
     use super::*;
     use crate::store::{open_in_memory, projects};
 

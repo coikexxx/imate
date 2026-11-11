@@ -1,4 +1,5 @@
 mod proxy;
+mod dsh_config;
 mod chat;
 mod orchestrator;
 mod assistant;
@@ -33,6 +34,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_network_proxy,
             commands::save_network_proxy,
+            commands::get_dsh_settings,
+            commands::save_dsh_settings,
+            commands::list_dsh_models,
             commands::draft_rules,
             commands::draft_persona,
             commands::cancel_draft,

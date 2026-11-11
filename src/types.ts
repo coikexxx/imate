@@ -2,6 +2,13 @@
 
 export interface ProxySettings { mode: "system" | "manual" | "direct"; url: string }
 export interface ProxyState { settings: ProxySettings; detectedProxy: string; detectionError: string | null }
+export type DshProfile = "web" | "headless";
+export interface DshSettings { authentication: "headless" | "account"; profile: DshProfile }
+export interface DshCatalog {
+  profile: DshProfile;
+  groups: { id: string; name: string; models: { id: string; name: string }[] }[];
+  failures: { provider: string; message: string }[];
+}
 
 export interface CliInfo {
   id: string;

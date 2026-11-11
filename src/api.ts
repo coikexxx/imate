@@ -25,6 +25,9 @@ import type {
 
 // 后端失败时 invoke 会 reject，值是一句中文说明；调用方用 String(e) 展示即可。
 export const api = {
+  getDshSettings: () => invoke<import("./types").DshSettings>("get_dsh_settings"),
+  saveDshSettings: (settings: import("./types").DshSettings) => invoke<import("./types").DshSettings>("save_dsh_settings", { settings }),
+  listDshModels: (profile: import("./types").DshProfile) => invoke<import("./types").DshCatalog>("list_dsh_models", { profile }),
   getNetworkProxy: () => invoke<ProxyState>("get_network_proxy"),
   saveNetworkProxy: (settings: ProxySettings) => invoke<ProxyState>("save_network_proxy", { settings }),
   draftRules: (input: DraftInput) => invoke<DraftResponse>("draft_rules", { input }),

@@ -1,0 +1,123 @@
+{
+  "type": "imates_dsh_catalog",
+  "profile": "web",
+  "groups": [
+    {
+      "id": "liberation",
+      "name": "deepseek-liberation",
+      "models": [
+        {
+          "id": "deepseek-v4-1-flash-261017",
+          "name": "deepseek-v4-1-flash-261017"
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "name": "deepseek-v4-pro"
+        }
+      ]
+    },
+    {
+      "id": "claude",
+      "name": "claude-liberation",
+      "models": [
+        {
+          "id": "claude-fable-5",
+          "name": "claude-fable-5"
+        },
+        {
+          "id": "claude-fable-5-1",
+          "name": "claude-fable-5-1"
+        },
+        {
+          "id": "claude-haiku-5-5",
+          "name": "claude-haiku-5-5"
+        },
+        {
+          "id": "claude-opus-5-5",
+          "name": "claude-opus-5-5"
+        },
+        {
+          "id": "claude-sonnet-5-5",
+          "name": "claude-sonnet-5-5"
+        },
+        {
+          "id": "claude-fable-5-2",
+          "name": "claude-fable-5-2"
+        },
+        {
+          "id": "claude-fable-5.2",
+          "name": "claude-fable-5.2"
+        }
+      ]
+    },
+    {
+      "id": "kimi",
+      "name": "kimi-liberation",
+      "models": [
+        {
+          "id": "kimi-k3.1-pro",
+          "name": "kimi-k3.1-pro"
+        }
+      ]
+    },
+    {
+      "id": "gpt",
+      "name": "gpt-liberation",
+      "models": [
+        {
+          "id": "codex-auto-review",
+          "name": "Codex Auto Review"
+        },
+        {
+          "id": "gpt-6",
+          "name": "GPT-6 (Astra)"
+        },
+        {
+          "id": "gpt-6-astra",
+          "name": "GPT-6 Astra"
+        },
+        {
+          "id": "gpt-6-sol",
+          "name": "GPT-6 Sol"
+        },
+        {
+          "id": "gpt-6.1-sol",
+          "name": "GPT-6.1 Sol"
+        },
+        {
+          "id": "gpt-6.1-terra",
+          "name": "GPT-6.1 Terra"
+        },
+        {
+          "id": "gpt-reserve",
+          "name": "gpt-reserve"
+        }
+      ]
+    },
+    {
+      "id": "deepseek-official",
+      "name": "DeepSeek",
+      "models": [
+        {
+          "id": "deepseek-flash",
+          "name": "deepseek-flash"
+        }
+      ]
+    },
+    {
+      "id": "deepseek-account",
+      "name": "DeepSeek Account",
+      "models": [
+        {
+          "id": "deepseek-flash",
+          "name": "DeepSeek-V4.1-Flash"
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "name": "DeepSeek-V4-Pro"
+        }
+      ]
+    }
+  ],
+  "failures": []
+}

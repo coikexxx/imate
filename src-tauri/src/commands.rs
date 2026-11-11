@@ -66,6 +66,40 @@ pub fn save_network_proxy(state: State<'_, AppState>, settings: crate::proxy::Pr
 }
 
 #[tauri::command]
+pub fn get_dsh_settings(state: State<'_, AppState>) -> AppResult<crate::dsh_config::DshSettings> {
+    let conn = lock(&state)?; crate::dsh_config::load(&conn)
+}
+
+#[tauri::command]
+pub fn save_dsh_settings(state: State<'_, AppState>, settings: crate::dsh_config::DshSettings) -> AppResult<crate::dsh_config::DshSettings> {
+    let conn = lock(&state)?; crate::dsh_config::save(&conn, &settings)?; Ok(settings)
+}
+
+#[tauri::command]
+pub async fn list_dsh_models(state: State<'_, AppState>, profile: crate::dsh_config::Profile) -> AppResult<crate::dsh_config::DshCatalog> {
+    let cli = cli_registry::resolve_cli("dsh")?;
+    let mut settings = { let conn = state.db_lock()?; crate::dsh_config::load(&conn)? };
+    settings.profile = profile;
+    let proxy = { let conn = state.db_lock()?; crate::proxy::load(&conn)? };
+    let environment = crate::proxy::resolve(&proxy)?.map(|proxy| crate::proxy::overrides(&proxy)).unwrap_or_default();
+    let capture: crate::dsh_config::CatalogCapture = std::sync::Arc::new(Mutex::new(None));
+    let adapter = crate::adapters::dsh::DshAdapter::new(cli.program.clone(), RunMode::Discuss).with_environment(&cli)
+        .with_settings(settings).for_catalog(capture.clone());
+    let adapter = crate::proxy::ProxyAdapter::new(Box::new(adapter), environment);
+    let id = format!("dsh-catalog:{}", uuid::Uuid::new_v4());
+    let cancellation = state.runtime_lock()?.reserve(&id, &id)?;
+    let request = crate::adapters::TurnRequest { prompt: "读取模型目录".into(), session_id: None, cwd: std::env::temp_dir(), mode: RunMode::Discuss, model: None };
+    let config = crate::runner::RunnerConfig { model_idle_timeout: Duration::from_secs(40), discuss_timeout: Duration::from_secs(45),
+        stdout_close_grace: Duration::from_secs(3), ..Default::default() };
+    let outcome = crate::runner::run_turn_managed(Box::new(adapter), request, cancellation, |_| {}, config, None, |_| Ok(())).await;
+    state.runtime_lock()?.remove(&id, &id);
+    if outcome.status != "ok" { return Err(AppError::Invalid("读取 Dsh 模型失败，请在 Dsh 中检查 profile、登录和网络后刷新".into())); }
+    let catalog = capture.lock().map_err(|_| AppError::Invalid("Dsh 模型目录暂不可用".into()))?.take()
+        .ok_or_else(|| AppError::Invalid("Dsh 没有返回可识别的模型目录".into()))?;
+    Ok(catalog)
+}
+
+#[tauri::command]
 pub fn list_projects(state: State<'_, AppState>) -> AppResult<Vec<ProjectSummary>> {
     let conn = lock(&state)?;
     projects::list(&conn)
@@ -614,7 +648,10 @@ pub fn make_adapter(cli: &crate::cli_registry::ResolvedCli, mode: RunMode, basel
 
 impl AppState {
     pub fn make_runtime_adapter(&self, cli: &crate::cli_registry::ResolvedCli, mode: RunMode, baseline: Option<Usage>) -> AppResult<Box<dyn CliAdapter>> {
-        let adapter = make_adapter(cli, mode, baseline)?;
+        let adapter = if cli.info.id == "dsh" {
+            let settings = { let conn = self.db_lock()?; crate::dsh_config::load(&conn)? };
+            Box::new(crate::adapters::dsh::DshAdapter::new(cli.program.clone(), mode).with_environment(cli).with_settings(settings)) as Box<dyn CliAdapter>
+        } else { make_adapter(cli, mode, baseline)? };
         let settings = { let conn = self.db_lock()?; crate::proxy::load(&conn)? };
         let environment = crate::proxy::resolve(&settings)?.map(|proxy| crate::proxy::overrides(&proxy)).unwrap_or_default();
         Ok(Box::new(crate::proxy::ProxyAdapter::new(adapter, environment)))
@@ -1527,6 +1564,35 @@ mod integration_tests {
             }
         }
     }
+    #[test]
+    fn dsh_runtime_settings_are_shared_but_existing_adapters_keep_their_snapshot() {
+        use crate::dsh_config::{self, Authentication, DshSettings, Profile};
+        let folder = tempfile::tempdir().unwrap();
+        let state = AppState::new(crate::store::open_in_memory().unwrap(), folder.path().into()).unwrap();
+        let cli = crate::cli_registry::ResolvedCli {
+            info: crate::cli_registry::CliInfo { id: "dsh".into(), label: "Dsh".into(), installed: true,
+                supported: true, path: Some("/bin/test".into()), version: None },
+            program: "/bin/test".into(), path_env: "/bin".into(),
+            environment_source: crate::cli_registry::EnvironmentSource::Process,
+        };
+        for mode in [RunMode::Discuss, RunMode::Execute] {
+            dsh_config::save(&state.db_lock().unwrap(), &DshSettings::default()).unwrap();
+            let request = crate::adapters::TurnRequest { prompt: "测试".into(), session_id: None,
+                cwd: folder.path().into(), mode, model: None };
+            let legacy = state.make_runtime_adapter(&cli, mode, None).unwrap();
+            dsh_config::save(&state.db_lock().unwrap(), &DshSettings { authentication: Authentication::Account, profile: Profile::Web }).unwrap();
+            let account = state.make_runtime_adapter(&cli, mode, None).unwrap();
+            assert!(legacy.build_command(&request).support_files.is_empty());
+            let spec = account.build_command(&request);
+            assert_eq!(spec.support_files.len(), 2);
+            let patch: Value = serde_json::from_str(&spec.support_files[1].content).unwrap();
+            assert!(patch.as_array().unwrap().iter().any(|row| row["id"] == "agent-default-model" && row["config"]["provider"] == "deepseek-account"));
+            dsh_config::save(&state.db_lock().unwrap(), &DshSettings::default()).unwrap();
+            assert_eq!(account.build_command(&request).support_files.len(), 2);
+            assert!(state.make_runtime_adapter(&cli, mode, None).unwrap().build_command(&request).support_files.is_empty());
+        }
+    }
+
     #[test]
     fn make_adapter_covers_every_supported_cli_and_rejects_pi() {
         use crate::adapters::RunMode;

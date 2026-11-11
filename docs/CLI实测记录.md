@@ -410,3 +410,13 @@ Dsh 仍为 QUOTA / 402，未再调用；Pi 未安装。完整团队讨论/执行
 inputTokens 随续接回合下降，支持逐回合归集而非会话累计；未重复累加 final。原始输出仅留仓库外临时目录。用户原有 Web 进程仍运行。
 
 结论：已登录账号可以完成模型调用和同会话跨模式切换；原先“需要充值”的判断已更正。现有 imates 仍调用原 headless 路径，未自动采用该补丁，应用内 Dsh 创建文件、团队流程及团队用量仍未验收。下一步需确定账号接入方式，不能把临时诊断成功写成应用修复完成。
+
+### Dsh 认证选项与已配置模型接入（Task 12，2026-11-11）
+
+用户已明确要求增加认证选项并使用现有自定义模型，替代此前“忽略 agents.model”的设计。应用新增全局 headless/account 认证与 Web/headless 目录来源；成员选择存 {profile, provider, model}，具体配置和凭据由 Dsh 自己读取。默认保留原 headless 行为；明确选择模型使用其供应商凭据。首页、项目页和成员表单均有入口。
+
+原生桥接在一次 headless 子进程内通过本机 app-boot 只读 API 组合来源配置，先准备凭据/授权/账号服务再开启 runner；目录模式禁用 runner。当前仅验证 Windows Dsh 0.2.2-rc.1。未改全局 profile，也未启动或关闭用户 Web。
+
+新桥接真实目录读取：Web 约 5.47 秒、headless 约 4.68 秒，均 exit=0，仅产生 imates_dsh_catalog 事件。Web 返回 liberation、claude、kimi、gpt、deepseek-official、deepseek-account；headless 无 kimi/gpt，模型亦有不同。样本位于 src-tauri/tests/fixtures/dsh/models.json，只保留目录 ID/显示名，无端点或凭据。账号和自定义模型生成、窗口验收将在 Task 13 单独记录，此时仍未验收。
+
+自动检查：后端串行 180 passed、2 ignored，前端 33 passed，Node 桥接 4 passed，cargo build/npm run build 均通过。

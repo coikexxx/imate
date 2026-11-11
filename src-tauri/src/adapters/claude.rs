@@ -42,7 +42,7 @@ impl CliAdapter for ClaudeAdapter {
             args.extend(["--model".into(), model.clone()]);
         }
         CommandSpec { program: self.program.clone(), args, path_env: self.path_env.clone(),
-            stdin: Some(req.prompt.clone()), prompt_file: None }
+            stdin: Some(req.prompt.clone()), prompt_file: None, support_files: vec![] }
     }
     fn parse_line(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(v) = serde_json::from_str::<Value>(line) else { return vec![]; };

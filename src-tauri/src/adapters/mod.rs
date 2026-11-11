@@ -27,7 +27,12 @@ pub struct CommandSpec {
     pub path_env: Option<OsString>,
     pub stdin: Option<String>,
     pub prompt_file: Option<PathBuf>,
+    pub support_files: Vec<SupportFile>,
 }
+
+/// runner 为本次调用创建并清理的辅助脚本或配置，不包含用户凭据。
+#[derive(Debug, Clone)]
+pub struct SupportFile { pub path: PathBuf, pub content: String }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,10 +80,10 @@ impl CliAdapter for FakeAdapter {
     fn build_command(&self, req: &TurnRequest) -> CommandSpec {
         if self.prompt_in_file {
             return CommandSpec { program: self.program.clone(), args: self.args.clone(), path_env: None,
-                stdin: None, prompt_file: Some(req.cwd.join("prompt-under-test.md")) };
+                stdin: None, prompt_file: Some(req.cwd.join("prompt-under-test.md")), support_files: vec![] };
         }
         CommandSpec { program: self.program.clone(), args: self.args.clone(), path_env: None,
-            stdin: Some(req.prompt.clone()), prompt_file: None }
+            stdin: Some(req.prompt.clone()), prompt_file: None, support_files: vec![] }
     }
     fn parse_line(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { return vec![]; };

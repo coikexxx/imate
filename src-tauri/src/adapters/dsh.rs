@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use super::{AgentEvent, CliAdapter, CommandSpec, RunMode, TurnRequest, Usage};
 use crate::cli_registry::{self, CliInfo, ResolvedCli};
+use crate::dsh_config::{self, CatalogCapture, DshSettings};
 
 /// dsh（DeepSeek Harness）的无头适配器。事件格式依据 Windows 0.2.2-rc.1 的 `--json` 样本。
 /// dsh 不回显权限模式，也没有 `--model`。
@@ -15,6 +16,8 @@ pub struct DshAdapter {
     had_text: bool,
     failed: bool,
     completed: bool,
+    settings: DshSettings,
+    catalog: Option<CatalogCapture>,
 }
 
 /// 回合没有正常完成时给用户看的说明。字段名来自实测记录。
@@ -31,13 +34,15 @@ fn reason_message(reason: &Value) -> String {
 impl DshAdapter {
     pub fn new(program: PathBuf, mode: RunMode) -> Self {
         Self { program, path_env: None, mode, active_tools: HashSet::new(), steps: Vec::new(),
-            had_text: false, failed: false, completed: false }
+            had_text: false, failed: false, completed: false, settings: DshSettings::default(), catalog: None }
     }
     pub fn with_environment(mut self, resolved: &ResolvedCli) -> Self {
         self.program = resolved.program.clone();
         self.path_env = Some(resolved.path_env.clone());
         self
     }
+    pub fn with_settings(mut self, settings: DshSettings) -> Self { self.settings = settings; self }
+    pub fn for_catalog(mut self, capture: CatalogCapture) -> Self { self.catalog = Some(capture); self }
     fn fail(&mut self, message: String) -> Vec<AgentEvent> {
         self.failed = true;
         vec![AgentEvent::Error { message }]
@@ -59,15 +64,25 @@ impl CliAdapter for DshAdapter {
         let permission = match self.mode { RunMode::Discuss => "read-only", RunMode::Execute => "workspace-write" };
         let mut args: Vec<String> = vec!["headless".into(), "--json".into()];
         if let Some(id) = &req.session_id { args.extend(["--session-id".into(), id.clone()]); }
-        // 模型写在 dsh 自己的 profile 里，这里有意不看 req.model。
         args.extend(["--permission-mode".into(), permission.into(), "--approval-policy".into(), "never".into(), "-".into()]);
-        CommandSpec { program: self.program.clone(), args, path_env: self.path_env.clone(),
-            stdin: Some(req.prompt.clone()), prompt_file: None }
+        let mut spec = CommandSpec { program: self.program.clone(), args, path_env: self.path_env.clone(),
+            stdin: Some(req.prompt.clone()), prompt_file: None, support_files: vec![] };
+        dsh_config::configure_command(&mut spec, req, &self.settings, self.catalog.is_some()); spec
     }
     fn parse_line(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(v) = serde_json::from_str::<Value>(line) else { return vec![]; };
         if self.failed || self.completed { return vec![]; }
         match v["type"].as_str() {
+            Some("imates_dsh_catalog") if self.catalog.is_some() => {
+                match dsh_config::DshCatalog::from_event(v) {
+                    Ok(catalog) => {
+                        if let Some(capture) = &self.catalog { if let Ok(mut captured) = capture.lock() { *captured = Some(catalog); } }
+                        self.completed = true;
+                        vec![AgentEvent::TurnCompleted { final_text: String::new(), usage: None }]
+                    },
+                    Err(error) => self.fail(error.to_string()),
+                }
+            }
             Some("session") => v["sessionId"].as_str()
                 .map(|id| vec![AgentEvent::SessionStarted { session_id: id.into() }]).unwrap_or_default(),
             Some("text") => {
@@ -123,6 +138,23 @@ mod tests {
         }).collect();
         assert_eq!(found.len(), 1, "应当恰好完成一次");
         found[0]
+    }
+
+    #[test]
+    fn real_catalog_is_captured_without_a_chat_session_or_usage() {
+        let capture = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut adapter = DshAdapter::new("dsh".into(), RunMode::Discuss).for_catalog(capture.clone());
+        let event = include_str!("../../tests/fixtures/dsh/models.json");
+        let events = adapter.parse_line(event);
+        assert_eq!(events, vec![AgentEvent::TurnCompleted { final_text: String::new(), usage: None }]);
+        let stored = capture.lock().unwrap();
+        let catalog = stored.as_ref().unwrap();
+        assert_eq!(catalog.profile, crate::dsh_config::Profile::Web);
+        let gpt = catalog.groups.iter().find(|group| group.id == "gpt").unwrap();
+        assert!(gpt.models.iter().any(|model| model.id == "gpt-6"));
+        assert!(catalog.groups.iter().any(|group| group.id == "deepseek-account"));
+        assert!(catalog.failures.is_empty());
+        assert!(adapter.parse_line(event).is_empty(), "目录只完成一次");
     }
 
     #[test]
@@ -205,14 +237,15 @@ mod tests {
     }
 
     #[test]
-    fn command_reads_the_prompt_from_stdin_and_ignores_the_model() {
+    fn default_command_preserves_headless_profile_and_reads_prompt_from_stdin() {
         let request = TurnRequest { prompt: "- 第一行\n第二行".into(), session_id: Some("session-1".into()),
-            cwd: "/tmp/项目".into(), mode: RunMode::Execute, model: Some("模型一".into()) };
+            cwd: "/tmp/项目".into(), mode: RunMode::Execute, model: None };
         let spec = DshAdapter::new("dsh".into(), RunMode::Execute).build_command(&request);
         assert_eq!(spec.args, ["headless", "--json", "--session-id", "session-1",
             "--permission-mode", "workspace-write", "--approval-policy", "never", "-"]);
         assert_eq!(spec.stdin.as_deref(), Some(request.prompt.as_str()));
         assert!(spec.prompt_file.is_none());
+        assert!(spec.support_files.is_empty());
         let spec = DshAdapter::new("dsh".into(), RunMode::Discuss).build_command(&TurnRequest { session_id: None, ..request });
         assert_eq!(spec.args, ["headless", "--json", "--permission-mode", "read-only", "--approval-policy", "never", "-"]);
     }

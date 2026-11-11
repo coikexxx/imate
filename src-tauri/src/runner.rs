@@ -115,6 +115,13 @@ pub async fn run_turn_managed(
 ) -> RunOutcome {
     if *cancellation.borrow() { let mut out = RunOutcome::failed("回合已停止".into()); out.status = "cancelled".into(); return out; }
     let spec = adapter.build_command(&request);
+    let mut _support_files = Vec::new();
+    for file in &spec.support_files {
+        if let Err(error) = write_prompt_file(&file.path, &file.content) {
+            return RunOutcome::failed(format!("无法准备 CLI 辅助文件：{error}"));
+        }
+        _support_files.push(PromptFile(Some(file.path.clone())));
+    }
     let _prompt_file = match &spec.prompt_file {
         Some(path) => match write_prompt_file(path, &request.prompt) {
             Ok(()) => PromptFile(Some(path.clone())),
@@ -541,6 +548,52 @@ mod tests {
         assert_eq!(outcome.status, "failed");
         assert!(outcome.error.unwrap().contains("无法写入提示词文件"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "别人的文件", "已存在的文件不覆盖也不删除");
+    }
+
+    struct SupportAdapter { inner: FakeAdapter, files: Vec<crate::adapters::SupportFile> }
+    impl CliAdapter for SupportAdapter {
+        fn id(&self) -> &'static str { "fake" }
+        fn detect(&self) -> Option<crate::cli_registry::CliInfo> { None }
+        fn build_command(&self, req: &TurnRequest) -> crate::adapters::CommandSpec {
+            let mut spec = self.inner.build_command(req); spec.support_files = self.files.clone(); spec
+        }
+        fn parse_line(&mut self, line: &str) -> Vec<AgentEvent> { self.inner.parse_line(line) }
+    }
+
+    #[tokio::test]
+    async fn support_files_exist_before_spawn_and_are_removed_on_every_exit() {
+        use crate::adapters::SupportFile;
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("bridge.mjs");
+        for scenario in ["echo", "silent", "cancel", "spawn_error"] {
+            let inner = FakeAdapter::new(if scenario == "spawn_error" { folder.path().join("不存在.exe") } else { std::env::current_exe().unwrap() },
+                vec!["--ignored".into(), "--exact".into(), "runner::tests::subprocess_helper".into(), "--nocapture".into()]);
+            let adapter = SupportAdapter { inner, files: vec![SupportFile { path: file.clone(), content: "应用辅助代码".into() }] };
+            let request = TurnRequest { prompt: if scenario == "echo" { "echo\n辅助文件测试".into() } else { "silent\n辅助文件测试".into() },
+                session_id: None, cwd: folder.path().into(), mode: RunMode::Execute, model: None };
+            let (sender, cancellation) = watch::channel(false);
+            if scenario == "cancel" { tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(80)).await; let _ = sender.send(true); }); }
+            let outcome = run_turn_managed(Box::new(adapter), request, cancellation, |_| {}, config(), None, |_| {
+                assert_eq!(std::fs::read_to_string(&file).unwrap(), "应用辅助代码"); Ok(())
+            }).await;
+            assert_eq!(outcome.status, match scenario { "echo" => "ok", "silent" => "timeout", "cancel" => "cancelled", _ => "failed" });
+            assert!(!file.exists(), "{scenario} 后应删除辅助文件");
+        }
+    }
+
+    #[tokio::test]
+    async fn support_file_preparation_failure_preserves_existing_files_and_cleans_owned_files() {
+        use crate::adapters::SupportFile;
+        let folder = tempfile::tempdir().unwrap();
+        let owned = folder.path().join("新文件"); let existing = folder.path().join("已存在");
+        std::fs::write(&existing, "原内容").unwrap();
+        let adapter = SupportAdapter { inner: FakeAdapter::new("不会启动".into(), vec![]), files: vec![
+            SupportFile { path: owned.clone(), content: "新内容".into() }, SupportFile { path: existing.clone(), content: "不能覆盖".into() }] };
+        let request = TurnRequest { prompt: "不会发送".into(), session_id: None, cwd: folder.path().into(), mode: RunMode::Discuss, model: None };
+        let (_sender, cancellation) = watch::channel(false);
+        let outcome = run_turn(Box::new(adapter), request, cancellation, |_| {}).await;
+        assert_eq!(outcome.status, "failed"); assert!(!owned.exists());
+        assert_eq!(std::fs::read_to_string(existing).unwrap(), "原内容");
     }
 
 }
