@@ -228,7 +228,7 @@ pub fn list_persona_templates() -> Vec<PersonaTemplate> {
 
 #[cfg(test)]
 mod runtime_tests {
-    use super::ActiveRuns;
+    use super::{finished_status, live_status, ActiveRuns, RuntimeSnapshot};
 
     #[test]
     fn reservation_is_per_project_and_old_finish_cannot_remove_new_run() {
@@ -257,6 +257,82 @@ mod runtime_tests {
         assert!(active.reserve_directory(dir, "运行三").is_err());
         active.remove("项目甲", "运行一");
         active.reserve_directory(dir, "运行三").unwrap();
+    }
+
+    fn snapshot(project: &str, run: &str, agent: &str) -> RuntimeSnapshot {
+        RuntimeSnapshot { project_id: project.into(), run_id: run.into(), agent_id: agent.into(),
+            status: "thinking".into(), seq: 0, partial_text: String::new() }
+    }
+
+    #[test]
+    fn team_hold_blocks_edits_between_turns_and_one_cancel_reaches_every_member() {
+        let mut active = ActiveRuns::default();
+        let hold = "hold:项目甲";
+        let first = active.reserve("项目甲", hold).unwrap();
+        let second = first.clone();
+        active.reserve_directory(std::path::Path::new("/临时项目"), hold).unwrap();
+        // 回合之间没有任何成员在跑，项目仍然算运行中。
+        assert!(active.ensure_project_idle("项目甲").is_err());
+        assert!(active.reserve("项目甲", "另一次发送").is_err());
+        assert!(active.active_snapshot("项目甲").is_none());
+
+        active.team_started("项目甲", snapshot("项目甲", "run-1", "成员一"));
+        active.team_started("项目甲", snapshot("项目甲", "run-2", "成员二"));
+        active.team_status("项目甲", "run-1", "talking");
+        assert_eq!(active.active_snapshot("项目甲").unwrap().run_id, "run-2", "返回最近启动的一个");
+        active.team_finished("项目甲", "run-2");
+        let left = active.active_snapshot("项目甲").unwrap();
+        assert_eq!((left.run_id.as_str(), left.status.as_str()), ("run-1", "talking"));
+
+        active.cancel("项目甲");
+        assert!(*first.borrow() && *second.borrow(), "同一批成员共用一个取消信号");
+        active.team_finished("项目甲", "run-1");
+        active.remove("项目甲", hold);
+        assert!(active.ensure_project_idle("项目甲").is_ok());
+        assert!(active.active_snapshot("项目甲").is_none());
+        active.reserve_directory(std::path::Path::new("/临时项目"), "下一次").unwrap();
+        // 预留号可以重复使用，取消信号是新的。
+        assert!(!*active.reserve("项目甲", hold).unwrap().borrow());
+    }
+
+    #[test]
+    fn unclean_member_cleanup_keeps_the_directory_blocked_after_the_hold_ends() {
+        let mut active = ActiveRuns::default();
+        let dir = std::path::PathBuf::from("/临时项目");
+        active.reserve("项目甲", "hold:项目甲").unwrap();
+        active.reserve_directory(&dir, "hold:项目甲").unwrap();
+        active.block_directory(dir.clone(), "run-残留");
+        active.remove("项目甲", "hold:项目甲");
+        assert!(active.reserve_directory(&dir, "下一次").is_err(), "残留未确认前目录仍然被占");
+    }
+
+    #[test]
+    fn live_status_follows_mode_and_keeps_errors() {
+        use crate::adapters::{AgentEvent, RunMode};
+        let text = AgentEvent::TextDelta { text: "发言".into() };
+        let tool = AgentEvent::ToolState { active: true };
+        let session = AgentEvent::SessionStarted { session_id: "s".into() };
+        let error = AgentEvent::Error { message: "失败".into() };
+        // 讨论：有文本才算发言，工具和会话事件不改变状态。
+        assert_eq!(live_status(RunMode::Discuss, &session, "thinking"), "thinking");
+        assert_eq!(live_status(RunMode::Discuss, &tool, "thinking"), "thinking");
+        assert_eq!(live_status(RunMode::Discuss, &text, "thinking"), "talking");
+        assert_eq!(live_status(RunMode::Discuss, &tool, "talking"), "talking");
+        // 执行：一有输出就是干活。
+        assert_eq!(live_status(RunMode::Execute, &session, "thinking"), "working");
+        assert_eq!(live_status(RunMode::Execute, &text, "working"), "working");
+        // 出错后不被后续事件改回。
+        assert_eq!(live_status(RunMode::Execute, &error, "working"), "error");
+        assert_eq!(live_status(RunMode::Discuss, &text, "error"), "error");
+    }
+
+    #[test]
+    fn finished_status_never_reports_ok_when_the_outcome_was_not_applied() {
+        assert_eq!(finished_status("ok", true), "ok");
+        assert_eq!(finished_status("ok", false), "failed");
+        assert_eq!(finished_status("cancelled", false), "cancelled");
+        assert_eq!(finished_status("timeout", false), "timeout");
+        assert_eq!(finished_status("failed", true), "failed");
     }
 }
 
@@ -321,6 +397,8 @@ pub struct ActiveRuns {
     directories: HashMap<PathBuf, String>,
     sessions: HashMap<String, String>,
     snapshots: HashMap<String, RuntimeSnapshot>,
+    /// 团队指令里正在运行的回合。并行讨论时不止一个。
+    team: HashMap<String, Vec<RuntimeSnapshot>>,
     generations: HashMap<String, u64>,
     pub shutting_down: bool,
 }
@@ -361,6 +439,7 @@ impl ActiveRuns {
         if self.current(key, run_id) {
             self.runs.remove(key); self.directories.retain(|_, id| id != run_id);
             self.sessions.retain(|_, id| id != run_id); self.snapshots.remove(key); self.generations.remove(run_id);
+            self.team.remove(key);
         }
     }
     pub fn ensure_project_idle(&self, project_id: &str) -> AppResult<()> {
@@ -372,6 +451,29 @@ impl ActiveRuns {
         for key in keys { self.cancel(&key); }
     }
     pub fn is_empty(&self) -> bool { self.runs.is_empty() }
+    pub fn team_started(&mut self, project_id: &str, snapshot: RuntimeSnapshot) {
+        self.team.entry(project_id.to_string()).or_default().push(snapshot);
+    }
+    pub fn team_status(&mut self, project_id: &str, run_id: &str, status: &str) {
+        if let Some(snapshot) = self.team.get_mut(project_id).and_then(|list| list.iter_mut().find(|item| item.run_id == run_id)) {
+            snapshot.status = status.to_string();
+        }
+    }
+    pub fn team_finished(&mut self, project_id: &str, run_id: &str) {
+        if let Some(list) = self.team.get_mut(project_id) {
+            list.retain(|item| item.run_id != run_id);
+            if list.is_empty() { self.team.remove(project_id); }
+        }
+    }
+    /// 给界面恢复用的运行快照：直接点名的回合优先，否则取团队里最近启动的一个。
+    pub fn active_snapshot(&self, project_id: &str) -> Option<RuntimeSnapshot> {
+        self.snapshots.get(project_id).cloned()
+            .or_else(|| self.team.get(project_id).and_then(|list| list.last().cloned()))
+    }
+    /// 进程树没清干净：目录改挂到这个 run 名下，直到用户确认。
+    pub fn block_directory(&mut self, canonical: PathBuf, run_id: &str) {
+        self.directories.insert(canonical, run_id.to_string());
+    }
     pub fn run_for(&self, key: &str) -> Option<String> { self.runs.get(key).map(|(id, _)| id.clone()) }
     pub fn replace_reservation(&mut self, key: &str, old_id: &str, run_id: &str) {
         if let Some((id, _)) = self.runs.get_mut(key) { *id = run_id.to_string(); }
@@ -503,8 +605,12 @@ impl AppState {
             nonce: crate::store::new_id(), instance: self.instance.clone(), started_at: crate::store::now_ms(), cleanup_required: false }
     }
     pub fn mark_started(&self, key: &str, run_id: &str, pid: u32) -> Result<(), String> {
+        self.mark_started_under(key, run_id, run_id, pid)
+    }
+    /// 团队回合挂在项目的整段预留之下：`holder` 是预留号，`run_id` 是这次回合。
+    pub fn mark_started_under(&self, key: &str, holder: &str, run_id: &str, pid: u32) -> Result<(), String> {
         let runtime = self.runtime_lock().map_err(|e| e.to_string())?;
-        if !runtime.current(key, run_id) { return Err("运行预留已失效".into()); }
+        if !runtime.current(key, holder) { return Err("运行预留已失效".into()); }
         let conn = self.db_lock().map_err(|e| e.to_string())?;
         let mut owner = load_owners(&conn).map_err(|e| e.to_string())?.into_iter().find(|o| o.run_id == run_id)
             .ok_or("缺少进程启动前运行记录")?;
@@ -619,7 +725,7 @@ impl AppState {
         let cleanup_required = load_owners(&conn)?.into_iter().filter(|owner| owner.cleanup_required &&
             (owner.project_id.as_deref() == Some(project_id) || Path::new(&owner.folder_path) == folder))
             .map(|owner| CleanupNotice { run_id: owner.run_id, project_id: owner.project_id, folder_path: owner.folder_path }).collect();
-        Ok(ProjectRuntime { active: runtime.snapshots.get(project_id).cloned(), cleanup_required })
+        Ok(ProjectRuntime { active: runtime.active_snapshot(project_id), cleanup_required })
     }
     pub fn confirm_cleanup(&self, run_id: &str) -> AppResult<()> {
         let mut runtime = self.runtime_lock()?; let conn = self.db_lock()?;
@@ -644,6 +750,23 @@ pub fn make_adapter(cli: &crate::cli_registry::ResolvedCli, mode: RunMode, basel
         "dsh" => Ok(Box::new(crate::adapters::dsh::DshAdapter::new(cli.program.clone(), mode).with_environment(cli))),
         id => Err(AppError::Invalid(format!("CLI {id} 尚未接入，计划在 M5 实现"))),
     }
+}
+
+/// 团队回合的展示状态。讨论有文本才算发言，执行一有输出就算干活，出错后不再改回。
+pub fn live_status(mode: RunMode, event: &AgentEvent, current: &'static str) -> &'static str {
+    if current == "error" || matches!(event, AgentEvent::Error { .. }) {
+        return "error";
+    }
+    match (mode, event) {
+        (RunMode::Execute, _) => "working",
+        (RunMode::Discuss, AgentEvent::TextDelta { .. }) => "talking",
+        (RunMode::Discuss, _) => current,
+    }
+}
+
+/// 结果没能落库（已停止等）时，不能把回合报成成功。
+pub fn finished_status(outcome_status: &str, applied: bool) -> &str {
+    if !applied && outcome_status == "ok" { "failed" } else { outcome_status }
 }
 
 impl AppState {
@@ -924,51 +1047,217 @@ async fn execute_project(app: tauri::AppHandle, mut started: StartedMessage, cli
     }
 }
 
-async fn drive_team(app: tauri::AppHandle, project_id: String, mut pending: Vec<crate::orchestrator::TurnSpec>) {
-    let hold = format!("hold:{project_id}");
-    let mut holding_directory = false;
-    loop {
-        if pending.is_empty() {
-            let state = app.state::<AppState>();
-            let Ok(conn) = state.db_lock() else { break };
-            let Ok(active) = crate::store::instructions::active_instruction(&conn, &project_id) else { break };
-            if active.as_ref().map(|item| item.status.as_str()) != Some("running") { break; }
-            pending = match crate::orchestrator::advance(&conn, &project_id) {
-                Ok(specs) => specs,
-                Err(_) => break,
-            };
-            if pending.is_empty() { break; }
-        }
-        let batch = std::mem::take(&mut pending);
-        for spec in batch {
-            if !instruction_running(&app, &spec.instruction_id) {
-                release_hold(&app, &project_id, &hold, holding_directory);
-                return;
-            }
-            match run_orchestrated(&app, &project_id, &spec, &hold, &mut holding_directory).await {
-                OrchestratedStep::Outcome(outcome) => {
-                    let state = app.state::<AppState>();
-                    let Ok(conn) = state.db_lock() else { return };
-                    let floor = max_message_id(&conn, &project_id).unwrap_or(0);
-                    if crate::orchestrator::apply_outcome(&conn, &spec.run_id, &outcome).is_err() {
-                        release_hold(&app, &project_id, &hold, holding_directory);
-                        return;
-                    }
-                    emit_messages_after(&app, &conn, &project_id, &spec, floor);
-                    emit_events(&app, vec![("run:finished", json!({"projectId": project_id, "runId": spec.run_id,
-                        "agentId": spec.agent_id, "seq": 1, "status": outcome.status, "error": outcome.error}))]);
-                }
-                OrchestratedStep::Stopped => {
-                    release_hold(&app, &project_id, &hold, holding_directory);
-                    return;
-                }
-            }
-        }
-    }
-    release_hold(&app, &project_id, &hold, holding_directory);
+enum StepResult { Outcome(crate::runner::RunOutcome), NotStarted(String) }
+
+fn emit_run_finished(app: &tauri::AppHandle, project_id: &str, spec: &crate::orchestrator::TurnSpec, status: &str, error: Option<String>) {
+    emit_events(app, vec![("run:finished", json!({"projectId": project_id, "runId": spec.run_id,
+        "agentId": spec.agent_id, "seq": 1, "status": status, "error": error}))]);
 }
 
-enum OrchestratedStep { Outcome(crate::runner::RunOutcome), Stopped }
+/// 占住项目和工作目录，直到这条指令的调度结束。回合之间也不放开。
+fn begin_team_hold(app: &tauri::AppHandle, project_id: &str, hold: &str) -> Result<watch::Receiver<bool>, String> {
+    let state = app.state::<AppState>();
+    let folder = {
+        let conn = state.db_lock().map_err(|e| e.to_string())?;
+        let project = projects::get(&conn, project_id).map_err(|e| e.to_string())?;
+        Path::new(&project.folder_path).canonicalize().map_err(|_| "项目目录不存在或无法读取".to_string())?
+    };
+    let mut runtime = state.runtime_lock().map_err(|e| e.to_string())?;
+    let receiver = runtime.reserve(project_id, hold).map_err(|e| e.to_string())?;
+    if let Err(error) = runtime.reserve_directory(&folder, hold) {
+        runtime.remove(project_id, hold);
+        return Err(error.to_string());
+    }
+    Ok(receiver)
+}
+
+fn end_team_hold(app: &tauri::AppHandle, project_id: &str, hold: &str) {
+    if let Ok(mut runtime) = app.state::<AppState>().runtime_lock() { runtime.remove(project_id, hold); }
+}
+
+/// 调度没能开始：已经预留的回合全部记为没有启动，指令等待用户。
+fn park_team(app: &tauri::AppHandle, project_id: &str, pending: &[crate::orchestrator::TurnSpec], reason: &str) {
+    if let Ok(conn) = app.state::<AppState>().db_lock() {
+        for spec in pending { let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, reason); }
+        let _ = wait_instruction(&conn, project_id, reason);
+    }
+    for spec in pending { emit_run_finished(app, project_id, spec, "failed", Some(reason.to_string())); }
+}
+
+async fn drive_team(app: tauri::AppHandle, project_id: String, mut pending: Vec<crate::orchestrator::TurnSpec>) {
+    let hold = format!("hold:{project_id}");
+    let cancellation = match begin_team_hold(&app, &project_id, &hold) {
+        Ok(receiver) => receiver,
+        Err(reason) => { park_team(&app, &project_id, &pending, &reason); return; }
+    };
+    loop {
+        if pending.is_empty() {
+            let next = {
+                let state = app.state::<AppState>();
+                let Ok(conn) = state.db_lock() else { break };
+                let Ok(active) = crate::store::instructions::active_instruction(&conn, &project_id) else { break };
+                if active.as_ref().map(|item| item.status.as_str()) != Some("running") { break; }
+                crate::orchestrator::advance(&conn, &project_id)
+            };
+            match next {
+                Ok(specs) if !specs.is_empty() => pending = specs,
+                _ => break,
+            }
+        }
+        let batch = std::mem::take(&mut pending);
+        if batch.iter().any(|spec| !instruction_running(&app, &spec.instruction_id)) { break; }
+        // 同一批（并行讨论）一起启动。执行和组长回合每批只有一个。
+        let handles: Vec<_> = batch.iter().cloned().map(|spec| {
+            let (app, project_id, hold, cancellation) = (app.clone(), project_id.clone(), hold.clone(), cancellation.clone());
+            tauri::async_runtime::spawn(async move { run_with_rebuild(&app, &project_id, spec, &hold, cancellation).await })
+        }).collect();
+        // 结果按批内顺序依次落库，消息顺序可预期。有回合出问题也要等完其余的。
+        let mut halted = false;
+        for (handle, original) in handles.into_iter().zip(batch.iter()) {
+            match handle.await {
+                Ok((spec, StepResult::Outcome(outcome))) => {
+                    let state = app.state::<AppState>();
+                    let Ok(conn) = state.db_lock() else { halted = true; continue };
+                    let floor = max_message_id(&conn, &project_id).unwrap_or(0);
+                    let applied = crate::orchestrator::apply_outcome(&conn, &spec.run_id, &outcome);
+                    emit_messages_after(&app, &conn, &project_id, &spec, floor);
+                    drop(conn);
+                    let error = match &applied {
+                        Ok(()) => outcome.error.clone(),
+                        Err(failure) => outcome.error.clone().or_else(|| Some(failure.to_string())),
+                    };
+                    emit_run_finished(&app, &project_id, &spec, finished_status(&outcome.status, applied.is_ok()), error);
+                    if applied.is_err() { halted = true; }
+                }
+                Ok((spec, StepResult::NotStarted(reason))) => {
+                    emit_run_finished(&app, &project_id, &spec, "failed", Some(reason));
+                    halted = true;
+                }
+                Err(_) => {
+                    let reason = "运行任务异常退出，请人工检查残留进程";
+                    if let Ok(conn) = app.state::<AppState>().db_lock() {
+                        let _ = crate::orchestrator::fail_launch(&conn, &original.run_id, reason);
+                        let _ = wait_instruction(&conn, &project_id, reason);
+                    }
+                    emit_run_finished(&app, &project_id, original, "failed", Some(reason.to_string()));
+                    halted = true;
+                }
+            }
+        }
+        if halted { break; }
+    }
+    end_team_hold(&app, &project_id, &hold);
+}
+
+/// 跑一个回合。会话在启动阶段被拒绝时重建一次再跑。
+async fn run_with_rebuild(
+    app: &tauri::AppHandle, project_id: &str, mut spec: crate::orchestrator::TurnSpec, hold: &str, cancellation: watch::Receiver<bool>,
+) -> (crate::orchestrator::TurnSpec, StepResult) {
+    loop {
+        let step = run_orchestrated(app, project_id, &spec, hold, cancellation.clone()).await;
+        let rebuilt = match &step {
+            StepResult::Outcome(outcome) => app.state::<AppState>().db_lock().ok()
+                .and_then(|conn| crate::orchestrator::rebuild_turn(&conn, &spec.run_id, outcome).ok().flatten()),
+            StepResult::NotStarted(_) => None,
+        };
+        match rebuilt {
+            // rebuild_turn 第二次一定返回 None，这个循环最多多跑一圈。
+            Some(next) => {
+                emit_run_finished(app, project_id, &spec, "failed", Some("旧会话不可用，已清空并重开一次".into()));
+                spec = next;
+            }
+            None => return (spec, step),
+        }
+    }
+}
+
+async fn run_orchestrated(
+    app: &tauri::AppHandle, project_id: &str, spec: &crate::orchestrator::TurnSpec, hold: &str, cancellation: watch::Receiver<bool>,
+) -> StepResult {
+    let state = app.state::<AppState>();
+    // 回合没能启动：结束这次 run，指令等待用户，并让同批已经在跑的成员停下。
+    // 调用它之前必须已经放开数据库锁。
+    let refuse = |reason: &str| -> StepResult {
+        if let Ok(conn) = state.db_lock() {
+            let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, reason);
+            let _ = wait_instruction(&conn, project_id, reason);
+        }
+        if let Ok(mut runtime) = state.runtime_lock() { runtime.cancel(project_id); }
+        StepResult::NotStarted(reason.to_string())
+    };
+    let prepared: Result<(Agent, PathBuf), &'static str> = (|| {
+        let conn = state.db_lock().map_err(|_| "数据库连接不可用")?;
+        let agent = agents::get(&conn, &spec.agent_id).map_err(|_| "成员不存在")?;
+        let project = projects::get(&conn, project_id).map_err(|_| "项目不存在")?;
+        let folder = Path::new(&project.folder_path).canonicalize().map_err(|_| "项目目录不存在或无法读取")?;
+        Ok((agent, folder))
+    })();
+    let (agent, folder) = match prepared {
+        Ok(value) => value,
+        Err(reason) => return refuse(reason),
+    };
+    let resolved = tauri::async_runtime::spawn_blocking({
+        let cli_id = agent.cli.clone();
+        move || cli_registry::resolve_cli(&cli_id)
+    }).await;
+    let cli = match resolved {
+        Ok(Ok(cli)) => cli,
+        _ => return refuse("CLI 不可用"),
+    };
+    let mode = if spec.mode == "discuss" { RunMode::Discuss } else { RunMode::Execute };
+    let baseline = state.db_lock().ok()
+        .and_then(|conn| agent.session_id.as_deref().and_then(|id| runs::latest_usage(&conn, &agent.id, id).ok().flatten()))
+        .and_then(|value| serde_json::from_value(value).ok());
+    // 与直接点名路径一致：带上代理环境和 Dsh 设置。它自己会拿数据库锁，调用时不能持有锁。
+    let adapter = match state.make_runtime_adapter(&cli, mode, baseline) {
+        Ok(adapter) => adapter,
+        Err(error) => return refuse(&error.to_string()),
+    };
+    let request = crate::adapters::TurnRequest { prompt: spec.prompt.clone(), session_id: agent.session_id.clone(),
+        cwd: folder.clone(), mode, model: agent.model.clone() };
+    let run_id = spec.run_id.clone();
+    let agent_id = spec.agent_id.clone();
+    let registered = match state.runtime_lock() {
+        Ok(mut runtime) => {
+            if runtime.current(project_id, hold) {
+                runtime.team_started(project_id, RuntimeSnapshot { project_id: project_id.to_string(), run_id: run_id.clone(),
+                    agent_id: agent_id.clone(), status: "thinking".into(), seq: 0, partial_text: String::new() });
+                true
+            } else { false }
+        }
+        Err(_) => false,
+    };
+    if !registered { return refuse("运行预留已失效"); }
+    if let Ok(conn) = state.db_lock() {
+        let _ = save_owner(&conn, &state.new_owner(&run_id, Some(project_id), None, &folder));
+    }
+    emit_events(app, vec![("agent:status", json!({"projectId": project_id, "runId": run_id, "agentId": agent_id, "status": "thinking"}))]);
+    let mut shown: &'static str = "thinking";
+    let outcome = crate::runner::run_turn_managed(adapter, request, cancellation, |event| {
+        let next = live_status(mode, &event, shown);
+        if next == shown { return; }
+        shown = next;
+        if let Ok(mut runtime) = app.state::<AppState>().runtime_lock() { runtime.team_status(project_id, &run_id, next); }
+        emit_events(app, vec![("agent:status", json!({"projectId": project_id, "runId": run_id, "agentId": agent_id, "status": next}))]);
+    }, crate::runner::RunnerConfig::default(),
+        Some(state.data_dir.join("runs").join(format!("{run_id}.log"))),
+        |pid| app.state::<AppState>().mark_started_under(project_id, hold, &run_id, pid)).await;
+    if let Ok(mut runtime) = state.runtime_lock() { runtime.team_finished(project_id, &run_id); }
+    // 两把锁分开拿，顺序与别处一致（先运行状态，后数据库），不嵌套。
+    if outcome.cleanup_complete {
+        if let Ok(conn) = state.db_lock() { let _ = remove_owner(&conn, &run_id); }
+    } else {
+        let marked = state.db_lock().ok().and_then(|conn| {
+            let mut owner = load_owners(&conn).ok()?.into_iter().find(|owner| owner.run_id == run_id)?;
+            owner.cleanup_required = true;
+            save_owner(&conn, &owner).ok()
+        }).is_some();
+        if marked {
+            if let Ok(mut runtime) = state.runtime_lock() { runtime.block_directory(folder, &run_id); }
+        }
+    }
+    StepResult::Outcome(outcome)
+}
 
 fn instruction_running(app: &tauri::AppHandle, instruction_id: &str) -> bool {
     app.state::<AppState>().db_lock().ok().and_then(|conn| {
@@ -992,119 +1281,6 @@ fn emit_messages_after(app: &tauri::AppHandle, conn: &Connection, project_id: &s
             emit_events(app, vec![("message:new", json!({"projectId": project_id, "runId": spec.run_id, "message": message}))]);
         }
     }
-}
-
-fn release_hold(app: &tauri::AppHandle, project_id: &str, hold: &str, holding: bool) {
-    if !holding { return; }
-    if let Ok(mut runtime) = app.state::<AppState>().runtime_lock() {
-        runtime.directories.retain(|_, id| id != hold);
-        if runtime.current(project_id, hold) { runtime.runs.remove(project_id); }
-    }
-}
-
-async fn run_orchestrated(
-    app: &tauri::AppHandle, project_id: &str, spec: &crate::orchestrator::TurnSpec, hold: &str, holding: &mut bool,
-) -> OrchestratedStep {
-    let state = app.state::<AppState>();
-    let (agent, folder) = {
-        let Ok(conn) = state.db_lock() else { return OrchestratedStep::Stopped };
-        let Ok(agent) = agents::get(&conn, &spec.agent_id) else {
-            let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, "成员不存在");
-            return OrchestratedStep::Stopped;
-        };
-        let Ok(project) = projects::get(&conn, project_id) else { return OrchestratedStep::Stopped };
-        let Ok(folder) = Path::new(&project.folder_path).canonicalize() else {
-            let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, "项目目录不存在或无法读取");
-            let _ = wait_instruction(&conn, project_id, "项目目录不存在或无法读取");
-            return OrchestratedStep::Stopped;
-        };
-        (agent, folder)
-    };
-    let cli = match tauri::async_runtime::spawn_blocking({
-        let cli_id = agent.cli.clone();
-        move || cli_registry::resolve_cli(&cli_id)
-    }).await {
-        Ok(Ok(cli)) => cli,
-        _ => {
-            if let Ok(conn) = state.db_lock() {
-                let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, "CLI 不可用");
-                let _ = wait_instruction(&conn, project_id, "CLI 不可用");
-            }
-            return OrchestratedStep::Stopped;
-        }
-    };
-    let mode = if spec.mode == "discuss" { RunMode::Discuss } else { RunMode::Execute };
-    let baseline = if let Ok(conn) = state.db_lock() {
-        agent.session_id.as_deref().and_then(|id| runs::latest_usage(&conn, &agent.id, id).ok().flatten())
-            .and_then(|value| serde_json::from_value(value).ok())
-    } else { None };
-    let adapter = match state.make_runtime_adapter(&cli, mode, baseline) {
-        Ok(adapter) => adapter,
-        Err(error) => {
-            if let Ok(conn) = state.db_lock() {
-                let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, &error.to_string());
-                let _ = wait_instruction(&conn, project_id, &error.to_string());
-            }
-            return OrchestratedStep::Stopped;
-        }
-    };
-    let request = crate::adapters::TurnRequest { prompt: spec.prompt.clone(), session_id: agent.session_id.clone(),
-        cwd: folder.clone(), mode, model: agent.model.clone() };
-    let cancellation = {
-        let Ok(mut runtime) = state.runtime_lock() else { return OrchestratedStep::Stopped };
-        if !*holding {
-            if let Err(error) = runtime.reserve_directory(&folder, hold) {
-                if let Ok(conn) = state.db_lock() {
-                    let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, &error.to_string());
-                    let _ = wait_instruction(&conn, project_id, &error.to_string());
-                }
-                return OrchestratedStep::Stopped;
-            }
-            *holding = true;
-        }
-        match runtime.reserve(project_id, &spec.run_id) {
-            Ok(receiver) => receiver,
-            Err(error) => {
-                if let Ok(conn) = state.db_lock() {
-                    let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, &error.to_string());
-                    let _ = wait_instruction(&conn, project_id, &error.to_string());
-                }
-                return OrchestratedStep::Stopped;
-            }
-        }
-    };
-    if let Ok(conn) = state.db_lock() {
-        let _ = save_owner(&conn, &state.new_owner(&spec.run_id, Some(project_id), None, &folder));
-    }
-    let run_id = spec.run_id.clone();
-    let agent_id = spec.agent_id.clone();
-    emit_events(app, vec![("agent:status", json!({"projectId": project_id, "runId": run_id, "agentId": agent_id, "status": "thinking"}))]);
-    let outcome = crate::runner::run_turn_managed(adapter, request, cancellation, |_| {}, crate::runner::RunnerConfig::default(),
-        Some(state.data_dir.join("runs").join(format!("{run_id}.log"))),
-        |pid| app.state::<AppState>().mark_started(project_id, &run_id, pid)).await;
-    if let Ok(mut runtime) = state.runtime_lock() {
-        if runtime.current(project_id, &run_id) {
-            runtime.runs.remove(project_id);
-            runtime.sessions.retain(|_, id| id != &run_id);
-            runtime.snapshots.remove(project_id);
-            runtime.generations.remove(&run_id);
-        }
-    }
-    if let Ok(conn) = state.db_lock() {
-        if outcome.cleanup_complete {
-            let _ = remove_owner(&conn, &run_id);
-        } else if let Ok(owners) = load_owners(&conn) {
-            if let Some(mut owner) = owners.into_iter().find(|owner| owner.run_id == run_id) {
-                owner.cleanup_required = true;
-                let _ = save_owner(&conn, &owner);
-                if let Ok(mut runtime) = state.runtime_lock() {
-                    runtime.directories.insert(folder, run_id.clone());
-                }
-                *holding = false;
-            }
-        }
-    }
-    OrchestratedStep::Outcome(outcome)
 }
 
 fn wait_instruction(conn: &Connection, project_id: &str, reason: &str) -> AppResult<()> {
