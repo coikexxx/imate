@@ -533,14 +533,18 @@ fn apply_execute(conn: &Connection, run: &RunRow, instruction: &Instruction, age
 }
 
 fn apply_member_discuss(conn: &Connection, instruction: &Instruction, agent: &Agent, run_id: &str, outcome: &RunOutcome) -> AppResult<()> {
-    let content = if outcome.final_text.trim().is_empty() { "（没有输出）" } else { outcome.final_text.trim() };
-    messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "discussion", content)?;
     let run = load_run(conn, run_id)?;
-    finish_run(conn, &run.id, outcome, if outcome.status == "ok" { "ok" } else { "failed" })?;
-    remember_agent(conn, &run, agent, outcome)?;
-    if outcome.status != "ok" {
-        return mark_waiting(conn, instruction, outcome.error.as_deref().unwrap_or("成员讨论失败"));
+    if outcome.status == "ok" {
+        let content = if outcome.final_text.trim().is_empty() { "（没有输出）" } else { outcome.final_text.trim() };
+        messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "discussion", content)?;
+        finish_run(conn, &run.id, outcome, "ok")?;
+    } else {
+        // 记为未发言，本轮照常继续。半截输出不当成发言。
+        let reason = outcome.error.as_deref().unwrap_or("回合没有完成");
+        messages::insert(conn, &instruction.project_id, "system", None, "system", &format!("{} 本轮未发言：{reason}", agent.name))?;
+        finish_run(conn, &run.id, outcome, "failed")?;
     }
+    remember_agent(conn, &run, agent, outcome)?;
     if running_count(conn, &instruction.id)? == 0 {
         if has_queued(conn, &instruction.id)? {
             ensure_resume_phase(conn, &instruction.id, "decide")?;
@@ -1816,5 +1820,45 @@ mod tests {
         assert!(!manual[0].prompt.contains("# 协议纠错"));
         apply_outcome(&conn, &manual[0].run_id, &ok_text("第三次没有指令块")).unwrap();
         assert_eq!(instructions::get(&conn, &waiting.id).unwrap().status, "running");
+    }
+
+    #[test]
+    fn failed_discussion_member_is_recorded_as_silent_and_the_round_continues() {
+        let (conn, project_id, agents) = setup(&["前端", "测试"]);
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap();
+        apply_outcome(&conn, &leader[0].run_id, &ok_text(&fence("讨论一下。", r#"{"action":"discuss","to":["前端","测试"],"topic":"登录校验"}"#))).unwrap();
+        let members = advance(&conn, &project_id).unwrap();
+        assert_eq!(members.len(), 2);
+        apply_outcome(&conn, &members[0].run_id, &failed_text("说到一半")).unwrap();
+        let active = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(active.status, "running", "一个成员失败不让整条指令停下");
+        assert_eq!(active.phase, "discuss", "还有成员没说完");
+        let stored = messages::list(&conn, &project_id, None, 20).unwrap();
+        assert!(stored.iter().any(|m| m.kind == "system" && m.content.contains("前端 本轮未发言") && m.content.contains("执行失败")));
+        assert!(stored.iter().all(|m| m.content != "说到一半"), "半截输出不当成发言");
+        assert_eq!(agents::get(&conn, &agents[1].id).unwrap().last_seen_message_id.unwrap_or(0), 0, "失败不推进游标");
+
+        apply_outcome(&conn, &members[1].run_id, &ok_text("我的看法")).unwrap();
+        assert_eq!(instructions::active_instruction(&conn, &project_id).unwrap().unwrap().phase, "decide");
+        let decide = advance(&conn, &project_id).unwrap();
+        assert_eq!(decide[0].agent_id, agents[0].id);
+        assert!(decide[0].prompt.contains("前端 本轮未发言") && decide[0].prompt.contains("我的看法"));
+    }
+
+    #[test]
+    fn a_round_where_everyone_fails_still_goes_to_the_leader() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap();
+        apply_outcome(&conn, &leader[0].run_id, &ok_text(&fence("讨论一下。", r#"{"action":"discuss","to":["前端"],"topic":"登录校验"}"#))).unwrap();
+        let members = advance(&conn, &project_id).unwrap();
+        let mut timeout = failed_text("");
+        timeout.status = "timeout".into();
+        timeout.error = Some("CLI 长时间没有输出，已停止".into());
+        apply_outcome(&conn, &members[0].run_id, &timeout).unwrap();
+        let active = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!((active.status.as_str(), active.phase.as_str()), ("running", "decide"));
+        assert!(advance(&conn, &project_id).unwrap()[0].prompt.contains("前端 本轮未发言：CLI 长时间没有输出"));
     }
 }
