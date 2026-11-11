@@ -65,4 +65,28 @@ describe("运行输出归并", () => {
     state.applyEvent("agent:status", { projectId: "乙", agentId: "a", runId: "x", status: "error" });
     expect(store.getState().agentStatuses.a).toBe("working");
   });
+  it("并行回合里一个结束时，其余还在运行就不清空运行状态", () => {
+    const store = createProjectStore(); const state = store.getState();
+    state.beginHydrate("甲");
+    state.hydrate("甲", [], { active: null, cleanupRequired: [] });
+    state.applyEvent("agent:status", { projectId: "甲", agentId: "a", runId: "r1", status: "thinking" });
+    state.applyEvent("agent:status", { projectId: "甲", agentId: "b", runId: "r2", status: "thinking" });
+    state.applyEvent("agent:status", { projectId: "甲", agentId: "a", runId: "r1", status: "talking" });
+    expect(store.getState().liveRuns).toEqual(["r2", "r1"]);
+    state.applyEvent("run:finished", { projectId: "甲", runId: "r1", agentId: "a", seq: 1, status: "ok", error: null });
+    expect(store.getState().activeRunId).toBe("r2");
+    expect(store.getState().agentStatuses).toMatchObject({ a: "idle", b: "thinking" });
+    state.applyEvent("run:finished", { projectId: "甲", runId: "r2", agentId: "b", seq: 1, status: "failed", error: "超时" });
+    expect(store.getState().activeRunId).toBeNull();
+    expect(store.getState().liveRuns).toEqual([]);
+    expect(store.getState().agentStatuses.b).toBe("error");
+  });
+  it("没有先收到状态事件的回合结束时，不影响别的回合", () => {
+    const store = createProjectStore(); const state = store.getState();
+    state.beginHydrate("甲");
+    state.hydrate("甲", [], { active: { projectId: "甲", runId: "r1", agentId: "a", status: "working", seq: 0, partialText: "" }, cleanupRequired: [] });
+    expect(store.getState().liveRuns).toEqual(["r1"]);
+    state.applyEvent("run:finished", { projectId: "甲", runId: "别的回合", agentId: "b", seq: 1, status: "failed", error: null });
+    expect(store.getState().activeRunId).toBe("r1");
+  });
 });

@@ -15,6 +15,8 @@ interface ProjectState {
   streams: Record<string, Stream>;
   agentStatuses: Record<string, AgentStatus>;
   activeRunId: string | null;
+  /** 正在运行的回合，按开始顺序。并行讨论时不止一个。 */
+  liveRuns: string[];
   cleanupRequired: ProjectRuntime["cleanupRequired"];
   error: string | null;
   sending: boolean;
@@ -36,11 +38,17 @@ function upsert(messages: Message[], incoming: Message[]): Message[] {
 function streamFor(projectId: string, runId: string, agentId: string): Stream {
   return { projectId, runId, seq: 0, text: "", agentId, messageId: null, finished: false, final: false };
 }
+function withRun(live: string[], runId: string): string[] {
+  return [...live.filter((id) => id !== runId), runId];
+}
+function latestRun(live: string[]): string | null {
+  return live.length > 0 ? live[live.length - 1] : null;
+}
 export function createProjectStore() {
   return createStore<ProjectState>((set, get) => ({
-    projectId: "", messages: [], streams: {}, agentStatuses: {}, activeRunId: null,
+    projectId: "", messages: [], streams: {}, agentStatuses: {}, activeRunId: null, liveRuns: [],
     cleanupRequired: [], error: null, sending: false, hydrating: false, buffered: [],
-    beginHydrate: (projectId) => set({ projectId, messages: [], streams: {}, agentStatuses: {}, activeRunId: null,
+    beginHydrate: (projectId) => set({ projectId, messages: [], streams: {}, agentStatuses: {}, activeRunId: null, liveRuns: [],
       cleanupRequired: [], error: null, sending: false, hydrating: true, buffered: [] }),
     mergeHistory: (projectId, messages) => {
       if (projectId !== get().projectId) return;
@@ -61,7 +69,7 @@ export function createProjectStore() {
           agentStatuses[active.agentId] = active.status;
         }
         return { messages: upsert(state.messages, history), streams, agentStatuses,
-          activeRunId: runtime.active?.runId ?? null, cleanupRequired: runtime.cleanupRequired, hydrating: false, buffered: [] };
+          activeRunId: runtime.active?.runId ?? null, liveRuns: runtime.active ? [runtime.active.runId] : [], cleanupRequired: runtime.cleanupRequired, hydrating: false, buffered: [] };
       });
       const deltas = buffered.filter((event) => event.name === "message:delta")
         .sort((a, b) => (a.payload as ProjectEventMap["message:delta"]).seq - (b.payload as ProjectEventMap["message:delta"]).seq);
@@ -71,8 +79,9 @@ export function createProjectStore() {
       if (projectId !== get().projectId) return;
       set((state) => {
         const stream = state.streams[runId] ?? streamFor(projectId, runId, agentId);
+        const liveRuns = stream.finished ? state.liveRuns : withRun(state.liveRuns, runId);
         return { streams: { ...state.streams, [runId]: { ...stream, messageId } },
-          activeRunId: stream.finished ? state.activeRunId : runId, hydrating: false };
+          liveRuns, activeRunId: stream.finished ? state.activeRunId : runId, hydrating: false };
       });
     },
     applyEvent: (name, payload) => {
@@ -90,7 +99,7 @@ export function createProjectStore() {
           if (previous.finished || previous.final) return {};
           streams[delta.runId] = { ...previous, ...applyDelta(previous, delta) };
           agentStatuses[delta.agentId] = "talking";
-          return { streams, agentStatuses, activeRunId: delta.runId };
+          return { streams, agentStatuses, liveRuns: withRun(state.liveRuns, delta.runId), activeRunId: delta.runId };
         }
         if (name === "message:new") {
           const event = payload as ProjectEventMap["message:new"];
@@ -105,14 +114,17 @@ export function createProjectStore() {
           if (event.runId && streams[event.runId]?.finished) return {};
           agentStatuses[event.agentId] = event.status;
           const active = ["thinking", "talking", "working"].includes(event.status);
-          return { agentStatuses, activeRunId: active ? event.runId : state.activeRunId };
+          if (!active || !event.runId) return { agentStatuses };
+          return { agentStatuses, liveRuns: withRun(state.liveRuns, event.runId), activeRunId: event.runId };
         }
         const event = payload as ProjectEventMap["run:finished"];
         const previous = streams[event.runId] ?? streamFor(event.projectId, event.runId, event.agentId);
         if (previous.finished) return {};
         streams[event.runId] = { ...previous, seq: Math.max(previous.seq, event.seq), finished: true };
         agentStatuses[event.agentId] = event.status === "ok" || event.status === "cancelled" ? "idle" : "error";
-        return { streams, agentStatuses, activeRunId: state.activeRunId === event.runId ? null : state.activeRunId,
+        const liveRuns = state.liveRuns.filter((id) => id !== event.runId);
+        return { streams, agentStatuses, liveRuns,
+          activeRunId: state.activeRunId === event.runId ? latestRun(liveRuns) : state.activeRunId,
           error: event.error ?? state.error, sending: false };
       });
     },
