@@ -57,16 +57,22 @@ pub trait CliAdapter: Send + Sync {
 
 /// 测试与故障演练使用显式进程，不经过 shell 拼接提示词。
 #[cfg(test)]
-pub struct FakeAdapter { program: PathBuf, args: Vec<String> }
+pub struct FakeAdapter { program: PathBuf, args: Vec<String>, prompt_in_file: bool }
 #[cfg(test)]
 impl FakeAdapter {
-    pub fn new(program: PathBuf, args: Vec<String>) -> Self { Self { program, args } }
+    pub fn new(program: PathBuf, args: Vec<String>) -> Self { Self { program, args, prompt_in_file: false } }
+    /// 提示词改为经 `<cwd>/prompt-under-test.md` 传入，用来测 runner 的文件通道。
+    pub fn with_prompt_file(mut self) -> Self { self.prompt_in_file = true; self }
 }
 #[cfg(test)]
 impl CliAdapter for FakeAdapter {
     fn id(&self) -> &'static str { "fake" }
     fn detect(&self) -> Option<CliInfo> { None }
     fn build_command(&self, req: &TurnRequest) -> CommandSpec {
+        if self.prompt_in_file {
+            return CommandSpec { program: self.program.clone(), args: self.args.clone(), path_env: None,
+                stdin: None, prompt_file: Some(req.cwd.join("prompt-under-test.md")) };
+        }
         CommandSpec { program: self.program.clone(), args: self.args.clone(), path_env: None,
             stdin: Some(req.prompt.clone()), prompt_file: None }
     }

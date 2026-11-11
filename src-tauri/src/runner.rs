@@ -72,6 +72,29 @@ fn log_diagnostic(path: Option<&PathBuf>, line: &[u8]) {
     if let Ok(mut file) = options.open(path) { let _ = writeln!(file, "未归一事件 type={kind} bytes={}", line.len()); }
 }
 
+/// 提示词文件随作用域删除，任何提前返回都不会把它留在磁盘上。
+struct PromptFile(Option<PathBuf>);
+impl Drop for PromptFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() { let _ = std::fs::remove_file(path); }
+    }
+}
+
+/// 只新建，不覆盖已有文件。Unix 下只有当前用户可读写。
+fn write_prompt_file(path: &std::path::Path, prompt: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+    let mut file = options.open(path)?;
+    let result = file.write_all(prompt.as_bytes()).and_then(|_| file.flush());
+    drop(file);
+    // 文件已新建但写入失败时，也要删掉不完整的提示词。
+    if result.is_err() { let _ = std::fs::remove_file(path); }
+    result
+}
+
 pub async fn run_turn(
     adapter: Box<dyn CliAdapter>, request: TurnRequest, cancellation: watch::Receiver<bool>,
     on_event: impl FnMut(AgentEvent),
@@ -92,6 +115,13 @@ pub async fn run_turn_managed(
 ) -> RunOutcome {
     if *cancellation.borrow() { let mut out = RunOutcome::failed("回合已停止".into()); out.status = "cancelled".into(); return out; }
     let spec = adapter.build_command(&request);
+    let _prompt_file = match &spec.prompt_file {
+        Some(path) => match write_prompt_file(path, &request.prompt) {
+            Ok(()) => PromptFile(Some(path.clone())),
+            Err(e) => return RunOutcome::failed(format!("无法写入提示词文件：{e}")),
+        },
+        None => PromptFile(None),
+    };
     let (program, args) = match platform::resolve_program(&spec.program, &spec.args, spec.path_env.as_deref()) {
         Ok(command) => command, Err(e) => return RunOutcome::failed(e),
     };
@@ -203,7 +233,6 @@ pub async fn run_turn_managed(
     out.cleanup_complete = if finished_cleanly { true } else { platform::terminate_tree(&mut child, pid).await };
     // 等待取消完成，确保不留下读写任务或持有管道的 future。
     for task in [stdout, stderr, stdin] { task.abort(); let _ = task.await; }
-    if let Some(path) = spec.prompt_file { let _ = std::fs::remove_file(path); }
     out.status = latched.unwrap_or(if completed && out.exit_code == Some(0) { "ok" } else { "failed" }).into();
     if !out.cleanup_complete {
         out.status = "failed".into();
@@ -228,6 +257,7 @@ mod tests {
         use std::io::{Read, Write};
         let mut input = String::new();
         std::io::stdin().read_to_string(&mut input).unwrap();
+        if input.is_empty() { input = std::fs::read_to_string("prompt-under-test.md").unwrap_or_default(); }
         let Some((scenario, text)) = input.split_once('\n') else { return; };
         let event = |kind: &str, text: &str| println!("{}", serde_json::json!({"type":kind,"text":text}));
         match scenario {
@@ -457,4 +487,30 @@ mod tests {
             assert!(state.trim().is_empty() || state.trim().starts_with('Z'), "后代仍在运行：{pid} {state}");
         }
     }
+    #[tokio::test]
+    async fn prompt_file_is_written_before_start_and_always_removed() {
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("prompt-under-test.md");
+        let helper = || FakeAdapter::new(std::env::current_exe().unwrap(), vec!["--ignored".into(), "--exact".into(), "runner::tests::subprocess_helper".into(), "--nocapture".into()]).with_prompt_file();
+        let request = |scenario: &str| TurnRequest { prompt: format!("{scenario}\n- 多行\n下一行"), session_id: None, cwd: folder.path().into(), mode: RunMode::Execute, model: None };
+
+        let (_sender, cancellation) = tokio::sync::watch::channel(false);
+        let outcome = run_turn_with_config(Box::new(helper()), request("echo"), cancellation, |_| {}, config()).await;
+        assert_eq!(outcome.status, "ok", "{:?}", outcome.error);
+        assert_eq!(outcome.partial_text, "- 多行\n下一行");
+        assert!(!file.exists(), "成功后要删除提示词文件");
+
+        let (_sender, cancellation) = tokio::sync::watch::channel(false);
+        let outcome = run_turn_with_config(Box::new(helper()), request("silent"), cancellation, |_| {}, config()).await;
+        assert_eq!(outcome.status, "timeout");
+        assert!(!file.exists(), "超时后也要删除提示词文件");
+
+        std::fs::write(&file, "别人的文件").unwrap();
+        let (_sender, cancellation) = tokio::sync::watch::channel(false);
+        let outcome = run_turn_with_config(Box::new(helper()), request("echo"), cancellation, |_| {}, config()).await;
+        assert_eq!(outcome.status, "failed");
+        assert!(outcome.error.unwrap().contains("无法写入提示词文件"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "别人的文件", "已存在的文件不覆盖也不删除");
+    }
+
 }
