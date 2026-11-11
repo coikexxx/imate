@@ -143,7 +143,7 @@ pub trait CliAdapter: Send + Sync {
 - 子进程的 `current_dir` 是应用的工作目录基准。适配器仅在 CLI 确实要求时再传对应目录参数；重复传入的 CLI 参数不是安全边界。M0 命令表记录的是当时实测的调用形式，不自动等同于适配器最终构造的命令。
 - 项目文件夹不保证是 git 仓库，适配器的参数要让 CLI 在非 git 目录里也能启动。
 - Windows 下启动进程加 `CREATE_NO_WINDOW`，避免闪黑窗。
-- 取消与超时都通过杀进程树实现：Windows 用 `taskkill /T /F`，macOS 用进程组。
+- 取消与超时都通过杀进程树实现：macOS 用进程组。Windows 使用 `taskkill /T /F`，并在系统允许时把进程放进带 `KILL_ON_JOB_CLOSE` 的 Job。父进程先退出后，`taskkill /T` 清不掉被过继的后代，因此再按进程创建时间清理已经观察到的后代。进程表快照放在独立线程，不占用 stdout/stderr 排空。
 - 子进程输出按 UTF-8 逐行读取；无法解析为 JSON 的行记入运行日志，不中断回合。
 - 回合成功的判据：收到 `TurnCompleted`、进程退出码为 0、没有致命 `Error`，且未取消、未超时。任何失败、取消或超时一旦成立，后续迟到的完成事件不能把回合改回成功。stdout 关闭后进程在宽限期内仍不退出就杀掉并按失败处理。失败回合里已输出的文本保留，随失败消息一起展示。
 - 权限证据按 CLI 分级记录：运行事件回显的实际模式、针对明确 CLI 版本实测通过的模式、尚未验证。不能要求 CLI 回显它没有提供的字段，也不能把参数已传入当成权限已生效。M0 已确认执行模式可写到工作目录之外；讨论模式也可能写入 CLI 自身目录，界面不得暗示 `Discuss` 是强隔离。
@@ -173,7 +173,7 @@ M0 确认：claude 的 `bypassPermissions`、codex 的 `workspace-write`、grok 
 
 | CLI | M0 权限证据 | 会话与模式切换 | 用量归一规则 | 接入阶段 |
 |---|---|---|---|---|
-| claude | `system/init.permissionMode` 可核对；Windows M0 有拒写样本，macOS 2.1.322 工具层拒写仍未验证；`plan` 会写自己的计划目录 | macOS 同会话 plan → bypassPermissions → plan 已验证模式回显和续接，不能据此声称工具层拒写 | macOS G3 对照了 `result.usage` 与 `model_usage_since_last_result`；后者提供本回合费用，`total_cost_usd` 为会话累计；不重复累加 assistant usage | M2 |
+| claude | `system/init.permissionMode` 可核对。Windows 2.1.319 在 2026-11-11 有一次工具层拒写：Write 被调用，plan 模式拒绝，目标文件不存在，未写计划目录。M0 另有写入计划目录的样本。macOS 2.1.322 仍无工具层证据。以上都不等于硬隔离 | macOS 同会话 plan → bypassPermissions → plan 已验证模式回显和续接；该证据只覆盖模式回显，不覆盖工具层拒写 | macOS G3 对照了 `result.usage` 与 `model_usage_since_last_result`；后者提供本回合费用，`total_cost_usd` 为会话累计；不重复累加 assistant usage | M2 |
 | codex | `thread.started` 无权限字段；Windows M0 有新会话样本，macOS 0.167.0 G1 已有工具和文件事实 | macOS 同模式续接与 Discuss → Execute → Discuss 已通过 G1；结果不外推其他版本/平台 | macOS G2 已证实 `turn.completed.usage` 为线程累计，同会话按可靠基线取差；缓存输入不重复计入 input | M2 |
 | grok | `system/init.permissionMode` 可核对；讨论模式仍写自己的会话目录 | 同模式续接已验证，跨模式切换未验证 | 存在 `result.usage`，本回合/累计语义待 M5 对照 | M5 |
 | dsh | `session` 不回显权限；Windows 沙箱行为已有样本 | 续接可传权限参数，但跨模式切换未验证 | 按 `step_end.usage` 的步级计数归集；必须验证不重复纳入 `final` 或累计字段 | M5 |
@@ -609,7 +609,7 @@ agents: name_key                             -- trim().to_lowercase()，项目�
 | M5 其余适配器 | grok、dsh、pi | 五种 CLI 都能当成员参与讨论和执行 |
 | M6 打磨打包 | 设置页、报错文案、用量展示、Win 与 mac 安装包 | 在干净机器上可安装使用 |
 
-M2 当前已完成实现和自动化检查，macOS 实际 CLI/UI 验收部分通过。Claude Discuss 的工具层拒写证据、Finder/Dock 启动 PATH、异常退出后的真实恢复流程仍未验收；Windows runner 平台测试也未执行。按上述验收标准，M2 暂不标为完成。
+M2 当前已完成实现，macOS 实际 CLI/UI 验收部分通过。2026-11-11 在 Windows 11 10.0.26300 补了 runner 进程树自动化、跨进程恢复测试，以及 Claude Code 2.1.319 的一次 plan 模式工具层拒写。Finder/Dock 启动 PATH、macOS 上的工具层拒写、应用窗口里的异常退出手验仍未完成。按上述验收标准，M2 暂不标为完成。
 
 依赖关系：M0 与 M1 互不依赖，可以并行；M2 同时依赖 M0 和 M1；M2 → M3 必须按序。M4 的文件树只依赖 M1，像素办公室依赖 M2 的状态事件；M5 依赖 M2。M4 和 M5 可以在 M3 之后以任意顺序进行。
 

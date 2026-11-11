@@ -2,7 +2,7 @@
 
 像管理团队一样管理多个 AI Agent 的桌面应用。每个项目有一组分工不同的 Agent，围绕你下发的指令讨论、达成一致并落实工作。
 
-当前进度：M0 CLI 实测已完成（pi 顺延 M5），M1 骨架已完成。M2 单 Agent 对话的实现已完成，macOS 实际验收部分通过；Claude Discuss 工具层拒写、异常恢复与 Finder/Dock PATH 尚未验收，因此 M2 尚未完成验收。详见 [M2 实施计划与验收记录](docs/plans/2026-11-10-M2-单Agent对话.md)。
+当前进度：M0 CLI 实测已完成（pi 顺延 M5），M1 骨架已完成。M2 单 Agent 对话的实现已完成，macOS 实际验收部分通过。2026-11-11 在 Windows 补了 runner 进程树、Claude 2.1.319 的一次工具层拒写和跨进程恢复。macOS 工具层拒写、Finder/Dock PATH 和应用窗口手验仍未完成，因此 M2 尚未完成验收。详见 [M2 实施计划与验收记录](docs/plans/2026-11-10-M2-单Agent对话.md)。
 
 ## 开发
 

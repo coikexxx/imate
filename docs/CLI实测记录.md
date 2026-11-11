@@ -9,10 +9,10 @@
 
 | 平台/CLI | 已有证据 | 待验证项 | 状态 |
 |---|---|---|---|
-| Windows / claude 2.1.319 | init 回显模式、同模式续接、plan 拒绝项目写入、执行可写上级目录 | 跨模式续接、result.usage/费用的本回合语义、新 runner 的进程树处理 | 未验证 |
+| Windows / claude 2.1.319 | init 回显模式、同模式续接、M0 的 plan 拒绝项目文件但写入计划目录；2026-11-11 另有一次 Write 工具层拒绝且未写计划目录 | 跨模式续接、result.usage/费用的本回合语义、应用内 Discuss 走查 | 部分通过 |
 | Windows / codex 0.167.0 | 新线程 read-only/workspace-write 行为、续接记忆；thread.started 不回显权限 | G1 resume 权限覆盖及 Discuss → Execute → Discuss；G2 累计/本回合语义；非 git cwd；新 runner 清理 | 未验证 |
 | Windows / grok 1.0.77、dsh 0.2.2-rc.1 | 下文已有场景；grok 回显模式，dsh 不回显 | M5 跨模式续接、用量归一、应用 current_dir 与进程行为 | 未验证 |
-| macOS / Claude Code 2.1.322、Codex 0.167.0 | G1/G2 CLI 基线；G3 Claude 模式回显和续接；M2 应用对话、点名、停止与草稿保存见后文 | Claude 工具层拒写；Finder/Dock PATH；异常退出后的实际恢复；Windows runner 独立验证 | 部分通过 |
+| macOS / Claude Code 2.1.322、Codex 0.167.0 | G1/G2 CLI 基线；G3 Claude 模式回显和续接；M2 应用对话、点名、停止与草稿保存见后文 | Claude 工具层拒写；Finder/Dock PATH；异常退出后的实际恢复 | 部分通过 |
 | pi | M0 未安装 | M5 安装登录后重新实测 | 未执行 |
 
 判定规则：权限回显只能证明回显内容，文件写入行为只对已记录的平台/CLI 版本/模式成立；能写上级目录只证明项目目录不是可靠边界，不能推断全盘写权限。用量字段存在不等于其语义已确认；第二回合数值变大不能证明累计，无法判定时归一值保持 None、保留 rawUsage。
@@ -239,7 +239,37 @@ G3 的 Finder/Dock 环境、runner 进程树取消/超时/正常退出、异常�
 - Claude 与 Codex 均完成文件创建、读取及同一 CLI 会话续接；`@成员` 消息实际路由到 Codex 成员。
 - UI Stop 后 run 记为 `cancelled`，运行所有权记录被清除。runner 自动化已覆盖真实测试子进程的 stdin、静默超时、工具超时、持续 stderr、长行、EOF 宽限、取消和 Unix 进程树清理；异常杀 app 后的真实残留与恢复没有手动测试。
 - 助理实际生成四段人设并用反馈续接同一会话，确认后才保存。规章草稿应用到编辑器不写磁盘，只有明确确认保存后才写入。取消向导和成员表单均未留下保存结果。
-- 代码测试覆盖启动恢复、interrupted 状态、运行所有权及同目录清理确认阻塞；app 异常退出后的实际重启和人工清理确认仍未手动验收。Windows runner 平台行为未验证。
+- 代码测试覆盖启动恢复、interrupted 状态、运行所有权及同目录清理确认阻塞；app 异常退出后的实际重启和人工清理确认仍未手动验收。本节没有 Windows runner 结果，见下一节。
 - Claude `system/init.permissionMode` 回显与续接已核对，但 Discuss 请求没有触发写工具，所以本机没有工具层拒写证据；该能力状态为“模式已核对、工具层拒写未验证”，不宣称硬隔离。
 
-以上仅适用于所记 macOS/CLI 版本和启动路径。Claude 工具层拒写、Finder/Dock PATH、异常恢复手验及 Windows runner 验收未完成，因此 M2 尚未达到手册中的全部验收标准。
+以上仅适用于所记 macOS/CLI 版本和启动路径。macOS 上的 Claude 工具层拒写、Finder/Dock PATH 和异常恢复手验仍未完成。Windows 补测见下一节，macOS 上的这些项仍以本节为准。
+
+## M2 Windows 验收补记（2026-11-11）
+
+环境为 Windows 11 10.0.26300，Claude Code 2.1.319。真实 CLI 在仓库外的临时目录运行，直接启动 npm 全局垫片所指向的 `claude.exe`。本机垫片的入口是 `bin/claude.exe`，不是旧的 `cli.js`；解析器两种都接受，且不经过 `cmd.exe`。参数与适配器首回合一致：`-p --output-format stream-json --verbose --permission-mode plan`，提示词经 stdin，工作目录由进程 cwd 设置，无 `-C`。原始输出留在临时目录，未提交。这次没有打开应用窗口。
+
+### Claude plan 模式
+
+两次请求的进程退出码都是 0，`permissionMode` 都是 `plan`，stderr 都为空，目标文件都不存在，输出里都没有计划目录。
+
+- 第一次模型没有调用工具。这条只记为文字拒绝。
+- 第二次模型调用了 `Write`，写入目标是临时目录中的 `blocked-tool.txt`，内容为 `denied-probe`。随后出现 `permission_denied`，`tool_name` 为 `Write`，`decision_reason_type` 为 `mode`。工具结果 `is_error` 为 true，权限决定为 `reject`。工具结果文本为：`Cannot write to <PATH>\blocked-tool.txt while in plan mode.` 回合最终 `subtype` 仍是 `success`，`result.is_error` 为 false。工具被拒绝时，整回合仍可能被 CLI 标成成功。
+
+这条证据只覆盖该 Windows 版本和这条启动路径上的一次工具层拒绝。没有做 Discuss → Execute → Discuss 续接，也没有在应用里点选 Discuss。M0 的另一条 plan 请求曾经把计划写进 Claude 自己的计划目录，因此讨论模式仍然不是文件系统隔离。macOS 2.1.322 仍然没有工具层证据。
+
+### runner 与异常恢复
+
+`cargo test --lib -- --test-threads=8` 在本机连续两次通过：112 项通过，2 项忽略。忽略项是隔离辅助进程，由对应测试实际拉起。`cargo build` 通过，仍有既有的 10 项 dead_code 警告。本次没有重跑 `npm test` 和 `npm run build`。
+
+Windows 用例覆盖了关闭 stdout 后的 EOF 宽限、父进程先退出并留下后代、取消后进程树消失，以及 10000 行 stderr 后状态仍为成功。父进程退出后，只对根进程执行 `taskkill /T` 清不掉被过继的 `cmd`。实现改为在独立线程记录后代，并用进程创建时间核对后再清理；系统允许时同时使用 `KILL_ON_JOB_CLOSE`。全表快照若放在读循环里，会把排空拖过测试用的 150 毫秒宽限，把已经退出码为 0 的成功回合误判为管道未结束。
+
+跨进程恢复测试通过：辅助进程写下 `running` 的 run 和运行所有权，并留下一个仍在运行的子进程；测试只杀掉辅助进程，然后重新构造应用状态。run 变为 `interrupted`，项目为 `waiting_user`，同目录新发送被拒绝，该子进程仍在。确认清理之后可以再发送，确认动作本身不杀掉该子进程。应用窗口中的退出、崩溃，以及“我已处理残留进程”的点击，都没有做。
+
+### 仍未验收
+
+- macOS Finder 或 Dock 脱离开发终端后的 PATH。
+- macOS Claude 2.1.322 的工具层拒写。
+- 应用窗口内的停止、草稿、异常退出和清理确认。本机没有重走 macOS 已做过的界面项。
+- Windows 上 Claude 的跨模式续接和用量语义。
+
+因此 M2 仍不标为完成。
