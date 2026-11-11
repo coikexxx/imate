@@ -1,25 +1,25 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { GrokProxySettings, GrokProxyState } from "../types";
+import type { ProxySettings, ProxyState } from "../types";
 import { Button, Field, inputClass, Modal } from "./ui";
 
 export function ProxySettingsButton() {
   const [open, setOpen] = useState(false);
   return <>
-    <Button className="shrink-0" onClick={() => setOpen(true)}>Grok 代理</Button>
+    <Button className="shrink-0" onClick={() => setOpen(true)}>网络代理</Button>
     {open && <ProxySettingsDialog onClose={() => setOpen(false)} />}
   </>;
 }
 
 function ProxySettingsDialog({ onClose }: { onClose: () => void }) {
-  const [settings, setSettings] = useState<GrokProxySettings>({ mode: "system", url: "" });
-  const [detected, setDetected] = useState<GrokProxyState | null>(null);
+  const [settings, setSettings] = useState<ProxySettings>({ mode: "system", url: "" });
+  const [detected, setDetected] = useState<ProxyState | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let disposed = false;
-    api.getGrokProxy().then((result) => {
+    api.getNetworkProxy().then((result) => {
       if (!disposed) { setSettings(result.settings); setDetected(result); }
     }).catch((failure) => { if (!disposed) setError(String(failure)); })
       .finally(() => { if (!disposed) setLoading(false); });
@@ -28,17 +28,17 @@ function ProxySettingsDialog({ onClose }: { onClose: () => void }) {
 
   async function save() {
     setSaving(true); setError(null);
-    try { await api.saveGrokProxy(settings); onClose(); }
+    try { await api.saveNetworkProxy(settings); onClose(); }
     catch (failure) { setError(String(failure)); }
     finally { setSaving(false); }
   }
 
-  return <Modal title="Grok 网络代理" onClose={onClose}>
+  return <Modal title="网络代理设置" onClose={onClose}>
     <div className="space-y-4">
-      <p className="text-sm text-slate-400">用于 Grok 成员和助理的新回合。保存后，正在进行的回合继续使用原来的代理。</p>
+      <p className="text-sm text-slate-400">所有项目成员和内置助理共用此设置，适用于 Claude、Codex、Grok、Dsh 等已接入的 CLI。保存后从新回合生效，正在进行的回合继续使用原来的代理。</p>
       <Field label="连接方式">
         <select className={inputClass} disabled={loading || saving} value={settings.mode}
-          onChange={(event) => setSettings({ ...settings, mode: event.target.value as GrokProxySettings["mode"] })}>
+          onChange={(event) => setSettings({ ...settings, mode: event.target.value as ProxySettings["mode"] })}>
           <option value="system">跟随本机代理</option>
           <option value="manual">手动代理</option>
           <option value="direct">直连</option>

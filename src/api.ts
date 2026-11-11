@@ -1,8 +1,8 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  GrokProxySettings,
-  GrokProxyState,
+  ProxySettings,
+  ProxyState,
   Agent,
   Message,
   ProjectRuntime,
@@ -25,8 +25,8 @@ import type {
 
 // 后端失败时 invoke 会 reject，值是一句中文说明；调用方用 String(e) 展示即可。
 export const api = {
-  getGrokProxy: () => invoke<GrokProxyState>("get_grok_proxy"),
-  saveGrokProxy: (settings: GrokProxySettings) => invoke<GrokProxyState>("save_grok_proxy", { settings }),
+  getNetworkProxy: () => invoke<ProxyState>("get_network_proxy"),
+  saveNetworkProxy: (settings: ProxySettings) => invoke<ProxyState>("save_network_proxy", { settings }),
   draftRules: (input: DraftInput) => invoke<DraftResponse>("draft_rules", { input }),
   draftPersona: (input: DraftInput) => invoke<DraftResponse>("draft_persona", { input }),
   cancelDraft: (draftId: string) => invoke<void>("cancel_draft", { draftId }),

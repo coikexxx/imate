@@ -53,13 +53,13 @@ pub fn list_clis() -> Vec<CliInfo> {
 }
 
 #[tauri::command]
-pub fn get_grok_proxy(state: State<'_, AppState>) -> AppResult<crate::proxy::ProxyState> {
+pub fn get_network_proxy(state: State<'_, AppState>) -> AppResult<crate::proxy::ProxyState> {
     let conn = lock(&state)?;
     Ok(crate::proxy::state(crate::proxy::load(&conn)?))
 }
 
 #[tauri::command]
-pub fn save_grok_proxy(state: State<'_, AppState>, settings: crate::proxy::ProxySettings) -> AppResult<crate::proxy::ProxyState> {
+pub fn save_network_proxy(state: State<'_, AppState>, settings: crate::proxy::ProxySettings) -> AppResult<crate::proxy::ProxyState> {
     let conn = lock(&state)?;
     crate::proxy::save(&conn, &settings)?;
     Ok(crate::proxy::state(crate::proxy::load(&conn)?))
@@ -615,7 +615,6 @@ pub fn make_adapter(cli: &crate::cli_registry::ResolvedCli, mode: RunMode, basel
 impl AppState {
     pub fn make_runtime_adapter(&self, cli: &crate::cli_registry::ResolvedCli, mode: RunMode, baseline: Option<Usage>) -> AppResult<Box<dyn CliAdapter>> {
         let adapter = make_adapter(cli, mode, baseline)?;
-        if cli.info.id != "grok" { return Ok(adapter); }
         let settings = { let conn = self.db_lock()?; crate::proxy::load(&conn)? };
         let environment = crate::proxy::resolve(&settings)?.map(|proxy| crate::proxy::overrides(&proxy)).unwrap_or_default();
         Ok(Box::new(crate::proxy::ProxyAdapter::new(adapter, environment)))
@@ -1495,7 +1494,7 @@ mod integration_tests {
         }
     }
     #[test]
-    fn proxy_runtime_settings_apply_to_grok_and_leave_other_clis_inherited() {
+    fn proxy_runtime_settings_apply_to_all_clis_and_only_future_adapters() {
         let folder = tempfile::tempdir().unwrap();
         let state = AppState::new(crate::store::open_in_memory().unwrap(), folder.path().into()).unwrap();
         crate::proxy::save(&state.db_lock().unwrap(), &crate::proxy::ProxySettings {
@@ -1508,11 +1507,24 @@ mod integration_tests {
                 program: "/bin/test".into(), path_env: "/bin".into(),
                 environment_source: crate::cli_registry::EnvironmentSource::Process,
             };
-            let adapter = state.make_runtime_adapter(&cli, RunMode::Execute, None).unwrap();
-            let environment = adapter.environment();
-            if id == "grok" {
-                assert!(environment.contains(&("HTTPS_PROXY".into(), Some("http://127.0.0.1:7890".into()))));
-            } else { assert!(environment.is_empty()); }
+            for mode in [RunMode::Discuss, RunMode::Execute] {
+                let adapter = state.make_runtime_adapter(&cli, mode, None).unwrap();
+                let environment = adapter.environment();
+                for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] {
+                    assert!(environment.contains(&(key.into(), Some("http://127.0.0.1:7890".into()))), "{id}: {key}");
+                }
+                crate::proxy::save(&state.db_lock().unwrap(), &crate::proxy::ProxySettings {
+                    mode: crate::proxy::ProxyMode::Direct, url: String::new(),
+                }).unwrap();
+                assert_eq!(adapter.environment(), environment);
+                let direct = state.make_runtime_adapter(&cli, mode, None).unwrap().environment();
+                for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] {
+                    assert!(direct.contains(&(key.into(), None)), "{id}: {key}");
+                }
+                crate::proxy::save(&state.db_lock().unwrap(), &crate::proxy::ProxySettings {
+                    mode: crate::proxy::ProxyMode::Manual, url: "http://127.0.0.1:7890".into(),
+                }).unwrap();
+            }
         }
     }
     #[test]

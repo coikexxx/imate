@@ -31,8 +31,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::get_grok_proxy,
-            commands::save_grok_proxy,
+            commands::get_network_proxy,
+            commands::save_network_proxy,
             commands::draft_rules,
             commands::draft_persona,
             commands::cancel_draft,

@@ -45,15 +45,22 @@ fn validate_url(raw: &str) -> AppResult<String> {
 }
 
 pub fn load(conn: &Connection) -> AppResult<ProxySettings> {
-    let stored: Option<String> = conn.query_row("SELECT value FROM settings WHERE key='grok_proxy'", [], |r| r.get(0)).optional()?;
-    stored.map(|value| serde_json::from_str::<ProxySettings>(&value)
-        .map_err(|_| invalid("Grok 代理设置无法读取，请重新保存"))?.normalize()).unwrap_or_else(|| Ok(ProxySettings::default()))
+    let current: Option<String> = conn.query_row("SELECT value FROM settings WHERE key='network_proxy'", [], |r| r.get(0)).optional()?;
+    let legacy: Option<String> = conn.query_row("SELECT value FROM settings WHERE key='grok_proxy'", [], |r| r.get(0)).optional()?;
+    let settings = current.or_else(|| legacy.clone()).map(|value| serde_json::from_str::<ProxySettings>(&value)
+        .map_err(|_| invalid("网络代理设置无法读取，请重新保存"))?.normalize()).transpose()?.unwrap_or_default();
+    // 优先保留统一配置；校验通过后再原子迁移，失败时旧配置仍可恢复。
+    if legacy.is_some() { save(conn, &settings)?; }
+    Ok(settings)
 }
 
 pub fn save(conn: &Connection, settings: &ProxySettings) -> AppResult<()> {
     let normalized = settings.normalize()?;
-    let json = serde_json::to_string(&normalized).map_err(|_| invalid("无法保存 Grok 代理设置"))?;
-    conn.execute("INSERT INTO settings(key,value) VALUES('grok_proxy',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [json])?;
+    let json = serde_json::to_string(&normalized).map_err(|_| invalid("无法保存网络代理设置"))?;
+    let transaction = conn.unchecked_transaction()?;
+    transaction.execute("INSERT INTO settings(key,value) VALUES('network_proxy',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [json])?;
+    transaction.execute("DELETE FROM settings WHERE key='grok_proxy'", [])?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -102,7 +109,7 @@ pub fn overrides(proxy: &ProxyEnvironment) -> Vec<(String, Option<String>)> {
 #[serde(rename_all = "camelCase")]
 pub struct ProxyState { pub settings: ProxySettings, pub detected_proxy: String, pub detection_error: Option<String> }
 
-/// 返回 None 表示沿用进程环境；Some 则仅覆盖 Grok 子进程。
+/// 返回 None 表示沿用进程环境；Some 则仅覆盖本次 CLI 子进程。
 pub fn resolve(settings: &ProxySettings) -> AppResult<Option<ProxyEnvironment>> {
     match settings.mode {
         ProxyMode::Direct => Ok(Some(ProxyEnvironment::default())),
@@ -196,6 +203,60 @@ mod tests {
         let invalid = ProxySettings { mode: ProxyMode::Manual, url: "ftp://localhost:21".into() };
         assert!(save(&conn, &invalid).is_err());
         assert_eq!(load(&conn).unwrap().url, "http://127.0.0.1:7890");
+    }
+
+    fn stored(conn: &Connection, key: &str) -> Option<String> {
+        conn.query_row("SELECT value FROM settings WHERE key=?1", [key], |row| row.get(0)).optional().unwrap()
+    }
+
+    #[test]
+    fn proxy_migrates_legacy_grok_settings_without_losing_the_address() {
+        let conn = crate::store::open_in_memory().unwrap();
+        let settings = ProxySettings { mode: ProxyMode::Manual, url: "http://127.0.0.1:7890".into() };
+        let json = serde_json::to_string(&settings).unwrap();
+        conn.execute("INSERT INTO settings(key,value) VALUES('grok_proxy',?1)", [&json]).unwrap();
+        assert_eq!(load(&conn).unwrap(), settings);
+        assert_eq!(stored(&conn, "network_proxy"), Some(json));
+        assert_eq!(stored(&conn, "grok_proxy"), None);
+        assert_eq!(load(&conn).unwrap(), settings);
+    }
+
+    #[test]
+    fn proxy_migration_keeps_existing_network_settings_in_preference_to_legacy() {
+        let conn = crate::store::open_in_memory().unwrap();
+        let current = ProxySettings { mode: ProxyMode::Direct, url: String::new() };
+        let json = serde_json::to_string(&current).unwrap();
+        conn.execute("INSERT INTO settings(key,value) VALUES('network_proxy',?1)", [&json]).unwrap();
+        conn.execute("INSERT INTO settings(key,value) VALUES('grok_proxy',?1)", ["旧版损坏的值"]).unwrap();
+        assert_eq!(load(&conn).unwrap(), current);
+        assert_eq!(stored(&conn, "network_proxy"), Some(json));
+        assert_eq!(stored(&conn, "grok_proxy"), None);
+    }
+
+    #[test]
+    fn proxy_invalid_legacy_is_preserved_until_a_valid_setting_is_saved() {
+        let conn = crate::store::open_in_memory().unwrap();
+        let invalid = r#"{"mode":"manual","url":"ftp://localhost:21"}"#;
+        conn.execute("INSERT INTO settings(key,value) VALUES('grok_proxy',?1)", [invalid]).unwrap();
+        assert!(load(&conn).is_err());
+        assert_eq!(stored(&conn, "network_proxy"), None);
+        assert_eq!(stored(&conn, "grok_proxy").as_deref(), Some(invalid));
+        save(&conn, &ProxySettings::default()).unwrap();
+        assert_eq!(load(&conn).unwrap(), ProxySettings::default());
+        assert!(stored(&conn, "network_proxy").is_some());
+        assert_eq!(stored(&conn, "grok_proxy"), None);
+    }
+
+    #[test]
+    fn proxy_failed_migration_rolls_back_the_new_setting() {
+        let conn = crate::store::open_in_memory().unwrap();
+        let json = serde_json::to_string(&ProxySettings::default()).unwrap();
+        conn.execute("INSERT INTO settings(key,value) VALUES('grok_proxy',?1)", [&json]).unwrap();
+        conn.execute_batch("CREATE TRIGGER block_legacy_delete BEFORE DELETE ON settings
+            WHEN OLD.key='grok_proxy' BEGIN SELECT RAISE(ABORT, '模拟迁移失败'); END;").unwrap();
+        assert!(load(&conn).is_err());
+        assert_eq!(stored(&conn, "network_proxy"), None);
+        assert_eq!(stored(&conn, "grok_proxy"), Some(json));
     }
 
     #[test]
