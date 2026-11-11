@@ -400,11 +400,7 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
     let limits = LimitContext { discuss_rounds: instruction.discuss_rounds.max(0) as u32, task };
     let parsed = match parse_final(&outcome.final_text, protocol_phase(&instruction.phase), &roster, &limits) {
         Ok(parsed) => parsed,
-        Err(error) => {
-            finish_run(conn, &run.id, outcome, "failed")?;
-            mark_waiting(conn, instruction, &error.to_string())?;
-            return Err(error);
-        }
+        Err(error) => return protocol_failed(conn, run, instruction, agent, outcome, &error.to_string()),
     };
     if instruction.phase != "intervention" && has_queued(conn, &instruction.id)? {
         return park_leader(conn, run, instruction, agent, outcome);
@@ -479,6 +475,26 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
             tx.commit()?;
         }
     }
+    Ok(())
+}
+
+/// 组长的回复不符合指令协议。第一次把具体错误发回去重发；补救额度用过之后展示原文并等待用户。
+fn protocol_failed(conn: &Connection, run: &RunRow, instruction: &Instruction, agent: &Agent, outcome: &RunOutcome, reason: &str) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    let used = previous_remedy(&tx, &instruction.id, &agent.id, Some(&run.id))?.is_some();
+    // CLI 回合本身是成功的，组长已经在会话里看过这些消息，游标照常推进。
+    remember_agent(&tx, run, agent, outcome)?;
+    if !used {
+        finish_run_with(&tx, &run.id, outcome, "failed", &format!("{PROTOCOL_REMEDY}{reason}"))?;
+        tx.commit()?;
+        return Ok(());
+    }
+    finish_run_with(&tx, &run.id, outcome, "failed", &format!("协议错误：{reason}"))?;
+    save_speech(&tx, instruction, agent, &outcome.final_text)?;
+    let notice = format!("组长的回复在重发后仍然不符合指令协议：{reason}\n原文已作为普通发言保留。可以重试、补充说明或放弃。");
+    messages::insert(&tx, &instruction.project_id, "system", None, "system", &notice)?;
+    mark_waiting(&tx, instruction, &format!("指令协议错误：{reason}"))?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -618,6 +634,17 @@ fn compose_prompt(
         Stage::Discuss | Stage::Execute => prompts::build_member_prompt(stage, &snapshot)?,
         _ => prompts::build_leader_prompt(stage, &snapshot)?,
     };
+    let mut prompt = prompt;
+    // 只有组长回合会留下协议纠错的标记。
+    if let Some(error) = previous_remedy(conn, &instruction.id, &agent.id, None)? {
+        if let Some(reason) = error.strip_prefix(PROTOCOL_REMEDY) {
+            prompt.push_str(&format!(
+                "\n\n# 协议纠错\n你上一条回复没有被执行，原因：{reason}\n\
+请重新给出完整的回复：先写发言，末尾带且只带一个闭合的 imates 代码块，内容是当前阶段允许的一个 JSON 指令。\n\
+这是唯一一次重发机会。"
+            ));
+        }
+    }
     Ok((prompt, bound))
 }
 
@@ -751,6 +778,29 @@ fn finish_run(conn: &Connection, run_id: &str, outcome: &RunOutcome, status: &st
         return Err(invalid("运行已结束"));
     }
     Ok(())
+}
+
+/// 自动补救过的 run 用这个前缀标在 error 里。额度是否用过从上一条 run 判断，不另存状态。
+const REMEDY_PREFIX: &str = "自动补救：";
+const PROTOCOL_REMEDY: &str = "自动补救：协议错误：";
+
+/// 用指定的说明结束一个 run，其余字段取自回合结果。
+fn finish_run_with(conn: &Connection, run_id: &str, outcome: &RunOutcome, status: &str, error: &str) -> AppResult<()> {
+    let mut noted = outcome.clone();
+    noted.error = Some(error.to_string());
+    finish_run(conn, run_id, &noted, status)
+}
+
+/// 这个成员在这条指令里最近一条已结束的 run 如果是一次自动补救，返回它的说明。
+/// 返回 Some 表示当前这个逻辑回合的补救额度已经用掉。
+fn previous_remedy(conn: &Connection, instruction_id: &str, agent_id: &str, except_run: Option<&str>) -> AppResult<Option<String>> {
+    let error: Option<Option<String>> = conn.query_row(
+        "SELECT error FROM runs WHERE instruction_id = ?1 AND agent_id = ?2 AND status <> 'running' \
+         AND (?3 IS NULL OR id <> ?3) ORDER BY rowid DESC LIMIT 1",
+        params![instruction_id, agent_id, except_run],
+        |row| row.get(0),
+    ).optional()?;
+    Ok(error.flatten().filter(|text| text.starts_with(REMEDY_PREFIX)))
 }
 
 fn load_run(conn: &Connection, run_id: &str) -> AppResult<RunRow> {
@@ -1712,5 +1762,59 @@ mod tests {
         assert_eq!(unread[199].content, "消息204");
         assert!(unread.windows(2).all(|pair| pair[0].id < pair[1].id));
         assert!(unread_for(&conn, &project_id, &agents[0], 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn protocol_error_is_sent_back_once_and_a_corrected_reply_proceeds() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let first = advance(&conn, &project_id).unwrap();
+        apply_outcome(&conn, &first[0].run_id, &ok_text("我觉得可以直接做，但忘了写指令块")).unwrap();
+        let active = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!((active.status.as_str(), active.phase.as_str(), active.turn_count), ("running", "triage", 1));
+        let (status, error): (String, String) = conn.query_row("SELECT status, error FROM runs WHERE id = ?1", [&first[0].run_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(status, "failed");
+        assert!(error.starts_with("自动补救：协议错误："), "{error}");
+        assert!(messages::list(&conn, &project_id, None, 20).unwrap().iter().all(|m| !m.content.contains("忘了写指令块")), "第一次出错的原文不进群聊");
+
+        let retry = advance(&conn, &project_id).unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(turn_count(&conn, &project_id), 2, "纠错回合计入回合总数");
+        assert!(retry[0].prompt.contains("# 协议纠错") && retry[0].prompt.contains(error.trim_start_matches("自动补救：协议错误：")));
+        apply_outcome(&conn, &retry[0].run_id, &ok_text(&fence("补上了。", r#"{"action":"reply","message":"可以"}"#))).unwrap();
+        assert!(instructions::active_instruction(&conn, &project_id).unwrap().is_none());
+
+        // 下一条指令重新有一次纠错额度。
+        next_team(&conn, &project_id, "第二条指令");
+        let again = advance(&conn, &project_id).unwrap();
+        assert!(!again[0].prompt.contains("# 协议纠错"));
+        apply_outcome(&conn, &again[0].run_id, &ok_text("又忘了")).unwrap();
+        assert_eq!(instructions::active_instruction(&conn, &project_id).unwrap().unwrap().status, "running");
+    }
+
+    #[test]
+    fn second_protocol_error_shows_the_raw_text_and_waits_for_the_user() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let first = advance(&conn, &project_id).unwrap();
+        apply_outcome(&conn, &first[0].run_id, &ok_text("第一次没有指令块")).unwrap();
+        let retry = advance(&conn, &project_id).unwrap();
+        apply_outcome(&conn, &retry[0].run_id, &ok_text("第二次还是没有指令块")).unwrap();
+        let waiting = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(waiting.status, "waiting_user");
+        assert!(waiting.wait_reason.unwrap_or_default().contains("协议"));
+        assert_eq!(projects::get(&conn, &project_id).unwrap().status, "waiting_user");
+        let stored = messages::list(&conn, &project_id, None, 20).unwrap();
+        assert!(stored.iter().any(|m| m.sender_agent_id.as_deref() == Some(agents[0].id.as_str()) && m.content == "第二次还是没有指令块"), "重发后仍错，原文作为普通发言展示");
+        assert!(stored.iter().any(|m| m.kind == "system" && m.content.contains("重发后仍然不符合指令协议")));
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
+
+        // 用户点重试是新的逻辑回合，重新有一次纠错额度。
+        let retried = resume_instruction(&conn, &waiting.id, "retry", None).unwrap();
+        assert_eq!(retried.status, "running");
+        let manual = advance(&conn, &project_id).unwrap();
+        assert!(!manual[0].prompt.contains("# 协议纠错"));
+        apply_outcome(&conn, &manual[0].run_id, &ok_text("第三次没有指令块")).unwrap();
+        assert_eq!(instructions::get(&conn, &waiting.id).unwrap().status, "running");
     }
 }
