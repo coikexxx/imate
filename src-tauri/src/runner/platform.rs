@@ -2,6 +2,24 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::{Child, Command};
 
+/// 直接调用 node 的启动器：某一行正好是 `"<node.exe 绝对路径>" "<入口 .js 绝对路径>" %*`。
+/// 2026-11-11 在 Windows 的 dsh 0.2.2-rc.1 上看到这种格式。两个文件都必须存在。
+fn direct_node_shim(shim: &str) -> Option<(PathBuf, PathBuf)> {
+    shim.lines().map(str::trim).find_map(|line| {
+        let rest = line.strip_prefix('"')?;
+        let (node, rest) = rest.split_once('"')?;
+        let rest = rest.trim_start().strip_prefix('"')?;
+        let (script, tail) = rest.split_once('"')?;
+        if tail.trim() != "%*" { return None; }
+        let (node, script) = (PathBuf::from(node), PathBuf::from(script));
+        let node_ok = node.is_absolute() && node.is_file()
+            && node.file_name().is_some_and(|name| name.eq_ignore_ascii_case("node.exe"));
+        let script_ok = script.is_absolute() && script.is_file()
+            && script.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("js"));
+        (node_ok && script_ok).then_some((node, script))
+    })
+}
+
 /// 只接受可核对的 npm 标准入口。`.js` 入口把参数作为 argv 传给 node；
 /// 原生 `.exe` 入口直接启动。两种都不经过 cmd.exe。
 pub fn resolve_program(program: &Path, args: &[String], path_env: Option<&std::ffi::OsStr>) -> Result<(PathBuf, Vec<String>), String> {
@@ -9,6 +27,14 @@ pub fn resolve_program(program: &Path, args: &[String], path_env: Option<&std::f
         return Ok((program.to_path_buf(), args.to_vec()));
     }
     let parent = program.parent().ok_or("CLI 启动器没有父目录")?;
+    if program.file_stem().and_then(|stem| stem.to_str()).is_some_and(|stem| stem.eq_ignore_ascii_case("dsh")) {
+        let shim = std::fs::read_to_string(program).map_err(|_| "无法读取 CLI 启动器")?;
+        let (node, script) = direct_node_shim(&shim)
+            .ok_or("dsh 启动器不是已核对的格式（应为一行 \"node.exe\" \"入口.js\" %*），请检查安装方式")?;
+        let mut node_args = vec![script.to_string_lossy().into_owned()];
+        node_args.extend_from_slice(args);
+        return Ok((node, node_args));
+    }
     let candidates: &[&str] = match program.file_stem().and_then(|s| s.to_str()) {
         Some("claude") => &[
             "node_modules/@anthropic-ai/claude-code/bin/claude.exe",
@@ -323,4 +349,36 @@ mod tests {
         assert_eq!(argv[0], legacy.to_string_lossy());
         assert_eq!(&argv[1..], args);
     }
+    #[test]
+    fn dsh_direct_node_shim_is_parsed_without_a_shell() {
+        let temp = tempfile::tempdir().unwrap();
+        let node = temp.path().join("node.exe");
+        let script = temp.path().join("apps").join("cli").join("lib").join("bin.js");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&node, "").unwrap();
+        std::fs::write(&script, "").unwrap();
+        let shim = temp.path().join("dsh.cmd");
+        let line = format!("\"{}\" \"{}\" %*", node.display(), script.display());
+        std::fs::write(&shim, format!("@echo off\r\n{line}\r\n")).unwrap();
+        let args = vec!["headless".to_string(), "a & echo secret".to_string()];
+        let (program, argv) = resolve_program(&shim, &args, None).unwrap();
+        assert_eq!(program, node);
+        assert_eq!(argv[0], script.to_string_lossy());
+        assert_eq!(&argv[1..], args);
+
+        let other = temp.path().join("python.exe");
+        std::fs::write(&other, "").unwrap();
+        for bad in [
+            format!("{line} & calc.exe"),
+            format!("\"{}\" \"{}\" %*", node.display(), temp.path().join("不存在.js").display()),
+            format!("\"{}\" \"{}\" %*", other.display(), script.display()),
+            "\"node.exe\" \"bin.js\" %*".to_string(),
+            format!("{} {} %*", node.display(), script.display()),
+            "echo 不认识的脚本".to_string(),
+        ] {
+            std::fs::write(&shim, format!("@echo off\r\n{bad}\r\n")).unwrap();
+            assert!(resolve_program(&shim, &args, None).is_err(), "应拒绝：{bad}");
+        }
+    }
+
 }

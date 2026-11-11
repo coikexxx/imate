@@ -238,11 +238,15 @@ pub fn detect_all() -> Vec<CliInfo> {
     }).collect()
 }
 
+/// 取版本号时实际启动的程序。`.cmd` 启动器先解析成真实入口，不经过 cmd.exe；解析不了就不取版本。
+fn version_command(program: &Path, path_env: &OsString) -> Option<(PathBuf, Vec<String>)> {
+    crate::runner::platform::resolve_program(program, &["--version".to_string()], Some(path_env.as_os_str())).ok()
+}
+
 fn run_version(program: &Path, path_env: &OsString) -> Option<String> {
-    // .cmd 启动器由 runner 的平台层解析；探测不把路径拼入 cmd.exe。
-    if program.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("cmd")) { return None; }
+    let (program, args) = version_command(program, path_env)?;
     let mut command = Command::new(program);
-    command.arg("--version").env("PATH", path_env);
+    command.args(args).env("PATH", path_env);
     parse_version(&probe_output(command, Duration::from_secs(3))?)
 }
 
@@ -382,6 +386,25 @@ mod tests {
         command.args(["-c", "sleep 10 & printf '0.1.2'"]);
         assert_eq!(probe_output(command, Duration::from_secs(1)).as_deref(), Some("0.1.2"));
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn version_probe_resolves_cmd_shims_instead_of_skipping_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_env = OsString::from(dir.path());
+        let plain = dir.path().join("grok.exe");
+        assert_eq!(version_command(&plain, &path_env), Some((plain.clone(), vec!["--version".to_string()])));
+
+        let node = dir.path().join("node.exe");
+        let script = dir.path().join("bin.js");
+        std::fs::write(&node, "").unwrap();
+        std::fs::write(&script, "").unwrap();
+        let shim = dir.path().join("dsh.cmd");
+        std::fs::write(&shim, format!("@echo off\r\n\"{}\" \"{}\" %*\r\n", node.display(), script.display())).unwrap();
+        assert_eq!(version_command(&shim, &path_env), Some((node, vec![script.to_string_lossy().into_owned(), "--version".to_string()])));
+
+        std::fs::write(&shim, "echo 不认识的脚本").unwrap();
+        assert_eq!(version_command(&shim, &path_env), None);
     }
 
 }
