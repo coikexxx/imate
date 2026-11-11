@@ -102,6 +102,43 @@ export interface RuntimeSnapshot { projectId: string; runId: string; agentId: st
 export interface CleanupNotice { runId: string; projectId: string | null; folderPath: string }
 export interface ProjectRuntime { active: RuntimeSnapshot | null; cleanupRequired: CleanupNotice[] }
 export interface SendMessageResponse { runId: string; userMessage: Message; agentMessageId: number }
+
+export interface Instruction {
+  id: string;
+  projectId: string;
+  sourceMessageId: number;
+  kind: string;
+  targetAgentId: string | null;
+  phase: string;
+  status: string;
+  discussRounds: number;
+  turnCount: number;
+  currentBatch: string | null;
+  resumePhase: string | null;
+  contextSnapshotJson: string | null;
+  waitReason: string | null;
+  createdAt: number;
+  updatedAt: number;
+  finishedAt: number | null;
+}
+
+export interface TaskItem {
+  id: string;
+  projectId: string;
+  instructionMessageId: number | null;
+  assigneeAgentId: string | null;
+  title: string;
+  detail: string;
+  orderIndex: number;
+  status: string;
+  reworkCount: number;
+  reportMessageId: number | null;
+  createdAt: number;
+  finishedAt: number | null;
+  instructionId: string | null;
+  batchId: string | null;
+  supersededByTaskId: string | null;
+}
 export interface ProjectEventMap {
   "message:delta": MessageDelta;
   "message:new": MessageNew;

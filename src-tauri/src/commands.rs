@@ -1057,6 +1057,49 @@ fn wait_instruction(conn: &Connection, project_id: &str, reason: &str) -> AppRes
 }
 
 #[tauri::command]
+pub fn list_instructions(state: State<'_, AppState>, project_id: String) -> AppResult<Vec<crate::store::instructions::Instruction>> {
+    let conn = state.db_lock()?;
+    Ok(crate::store::instructions::active_instruction(&conn, &project_id)?.into_iter().collect())
+}
+
+#[tauri::command]
+pub fn list_tasks(state: State<'_, AppState>, instruction_id: String) -> AppResult<Vec<crate::store::instructions::TaskRecord>> {
+    let conn = state.db_lock()?;
+    crate::store::instructions::list_tasks(&conn, &instruction_id)
+}
+
+#[tauri::command]
+pub async fn resume_instruction(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    instruction_id: String,
+    action: String,
+    note: Option<String>,
+) -> AppResult<crate::store::instructions::Instruction> {
+    let instruction = {
+        let conn = state.db_lock()?;
+        crate::orchestrator::resume_instruction(&conn, &instruction_id, &action, note.as_deref())?
+    };
+    if instruction.status != "running" {
+        return Ok(instruction);
+    }
+    let project_id = instruction.project_id.clone();
+    let specs = {
+        let conn = state.db_lock()?;
+        match crate::orchestrator::advance(&conn, &project_id) {
+            Ok(specs) => specs,
+            Err(error) => {
+                let _ = crate::orchestrator::stop_instruction(&conn, &project_id);
+                return Err(error);
+            }
+        }
+    };
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn(async move { drive_team(worker_app, project_id, specs).await; });
+    Ok(instruction)
+}
+
+#[tauri::command]
 pub async fn stop_project(state: State<'_, AppState>, project_id: String) -> AppResult<()> {
     let run_id = { let mut runtime = state.runtime_lock()?;
         let id = runtime.runs.get(&project_id).map(|(id, _)| id.clone()); runtime.cancel(&project_id); id };

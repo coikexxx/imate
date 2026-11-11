@@ -4,7 +4,8 @@ import { useStore } from "zustand";
 import { api } from "../api";
 import { mentionCandidates, parseMention, shouldSendOnEnter } from "../lib/mentions";
 import { attachProjectEvents, projectStore } from "../stores/project";
-import type { Agent } from "../types";
+import type { Agent, Instruction, ProjectStatus, TaskItem } from "../types";
+import { InstructionBar } from "./InstructionBar";
 import { Button, inputClass } from "./ui";
 
 interface Props { projectId: string; agents: Agent[]; folderExists: boolean; mention?: string; onMentionUsed?: () => void; onFinished?: () => void }
@@ -15,6 +16,11 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
   const [hasMore, setHasMore] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [ready, setReady] = useState(false);
+  const [projectStatus, setProjectStatus] = useState<ProjectStatus>("idle");
+  const [instruction, setInstruction] = useState<Instruction | null>(null);
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [supplement, setSupplement] = useState("");
+  const [acting, setActing] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const tail = useRef<HTMLDivElement>(null);
 
@@ -26,15 +32,31 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       projectStore.getState().applyEvent(name, payload);
       if (name === "run:finished" && payload.projectId === projectId) {
         onFinished?.();
-        api.getProjectRuntime(projectId).then((runtime) => {
-          if (!disposed && projectStore.getState().projectId === projectId) projectStore.setState({ cleanupRequired: runtime.cleanupRequired });
+        Promise.all([api.getProjectRuntime(projectId), api.getProject(projectId), api.listInstructions(projectId)]).then(async ([runtime, detail, found]) => {
+          if (disposed || projectStore.getState().projectId !== projectId) return;
+          projectStore.setState({ cleanupRequired: runtime.cleanupRequired });
+          const current = found[0] ?? null;
+          const taskPage = current ? await api.listTasks(current.id) : [];
+          if (disposed || projectStore.getState().projectId !== projectId) return;
+          setProjectStatus(detail.project.status);
+          setInstruction(current);
+          setTasks(taskPage);
         }).catch((error) => { if (!disposed) projectStore.getState().setError(String(error)); });
       }
     });
     subscription.ready.then(async () => {
-      const [history, runtime] = await Promise.all([api.listMessages(projectId), api.getProjectRuntime(projectId)]);
+      const [history, runtime, detail, found] = await Promise.all([
+        api.listMessages(projectId), api.getProjectRuntime(projectId), api.getProject(projectId), api.listInstructions(projectId),
+      ]);
       if (disposed) return;
-      projectStore.getState().hydrate(projectId, history, runtime); setHasMore(history.length === 50); setReady(true);
+      const current = found[0] ?? null;
+      const taskPage = current ? await api.listTasks(current.id) : [];
+      if (disposed) return;
+      projectStore.getState().hydrate(projectId, history, runtime); setHasMore(history.length === 50);
+      setProjectStatus(detail.project.status);
+      setInstruction(current);
+      setTasks(taskPage);
+      setReady(true);
     }).catch((error) => { if (!disposed) { projectStore.getState().setError(String(error)); setReady(false); } });
     return () => { disposed = true; subscription.dispose(); };
   }, [projectId, onFinished]);
@@ -57,16 +79,19 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       const result = await api.sendMessage(projectId, content);
       if (projectStore.getState().projectId !== projectId) return;
       projectStore.getState().applyEvent("message:new", { projectId, runId: result.runId, message: result.userMessage });
-      projectStore.getState().mergeHistory(projectId, [{ id: result.agentMessageId, projectId, senderType: "assistant",
-        senderAgentId: recipient.agent.id, kind: "chat", content: "", round: null, createdAt: Date.now() }]);
-      projectStore.getState().registerRun(projectId, result.runId, recipient.agent.id, result.agentMessageId);
+      if (result.agentMessageId > 0) {
+        projectStore.getState().mergeHistory(projectId, [{ id: result.agentMessageId, projectId, senderType: "assistant",
+          senderAgentId: recipient.agent.id, kind: "chat", content: "", round: null, createdAt: Date.now() }]);
+        projectStore.getState().registerRun(projectId, result.runId, recipient.agent.id, result.agentMessageId);
+      }
       setInput("");
+      await refreshTeam();
     } catch (error) { if (projectStore.getState().projectId === projectId) state.setError(String(error)); }
     finally { if (projectStore.getState().projectId === projectId) state.setSending(false); }
   }
   async function stop() {
     setStopping(true);
-    try { await api.stopProject(projectId); }
+    try { await api.stopProject(projectId); await refreshTeam(); onFinished?.(); }
     catch (error) { state.setError(String(error)); }
     finally { setStopping(false); }
   }
@@ -78,6 +103,31 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       state.mergeHistory(projectId, page); setHasMore(page.length === 50);
     } catch (error) { state.setError(String(error)); }
     finally { setLoadingHistory(false); }
+  }
+  async function refreshTeam() {
+    const [detail, found] = await Promise.all([api.getProject(projectId), api.listInstructions(projectId)]);
+    if (projectStore.getState().projectId !== projectId) return;
+    const current = found[0] ?? null;
+    const taskPage = current ? await api.listTasks(current.id) : [];
+    if (projectStore.getState().projectId !== projectId) return;
+    setProjectStatus(detail.project.status);
+    setInstruction(current);
+    setTasks(taskPage);
+    const history = await api.listMessages(projectId);
+    if (projectStore.getState().projectId === projectId) projectStore.getState().mergeHistory(projectId, history);
+  }
+  async function resume(action: "retry" | "supplement" | "abandon", note?: string) {
+    if (!instruction || acting) return;
+    if (action === "supplement" && !note?.trim()) return;
+    setActing(true);
+    state.setError(null);
+    try {
+      await api.resumeInstruction(instruction.id, action, note ?? null);
+      if (action === "supplement") setSupplement("");
+      await refreshTeam();
+      onFinished?.();
+    } catch (error) { if (projectStore.getState().projectId === projectId) state.setError(String(error)); }
+    finally { if (projectStore.getState().projectId === projectId) setActing(false); }
   }
   async function cleanup(runId: string) {
     const accepted = await confirm("请先在终端或活动监视器中确认该目录相关的残留 CLI 及子进程已停止，并检查文件修改。确认后解除此运行的目录阻塞。", {
@@ -118,6 +168,9 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       <Button className="mt-2" onClick={() => cleanup(notice.runId)}>我已处理残留进程，解除阻塞</Button>
     </div>)}
     {projectMatches && state.error && <p role="alert" className="px-3 py-2 text-xs text-red-300">{state.error}</p>}
+    {projectMatches && <InstructionBar projectStatus={projectStatus} instruction={instruction} tasks={tasks} agents={agents}
+      supplement={supplement} busy={acting || busy} onSupplementChange={setSupplement}
+      onRetry={() => void resume("retry")} onSupplement={() => void resume("supplement", supplement)} onAbandon={() => void resume("abandon")} />}
     <div className="border-t border-slate-800 p-3">
       {candidates.length > 0 && <div className="mb-2 flex flex-wrap gap-1">{candidates.map((agent) => <Button key={agent.id} onClick={() => { setInput(`@${agent.name} `); textarea.current?.focus(); }}>@{agent.name}</Button>)}</div>}
       <textarea ref={textarea} className={`${inputClass} resize-none`} rows={3} aria-label="消息内容" placeholder="给组长下发任务，或 @成员 发言；Shift+Enter 换行" value={input}
