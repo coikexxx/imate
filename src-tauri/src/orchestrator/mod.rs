@@ -586,7 +586,9 @@ fn compose_prompt(
     });
     let decision = latest_decision(conn, &instruction.project_id)?;
     let bound = message_bound(conn, &instruction.project_id)?;
-    let unread = project_messages(conn, &instruction.project_id)?;
+    let unread = unread_for(conn, &instruction.project_id, agent, bound)?;
+    // 只在新会话里作为恢复包之后的补充展示。
+    let recent = messages::list(conn, &instruction.project_id, Some(bound + 1), 20)?;
     let rules_version = rules_version(&rules);
     let roster_version = roster_version(&roster);
     let fresh = agent.session_id.is_none();
@@ -596,7 +598,7 @@ fn compose_prompt(
         rules_version: &rules_version,
         roster_version: &roster_version,
         unread: &unread,
-        recent: &unread,
+        recent: &recent,
         project: &project,
         rules: &rules,
         agent,
@@ -791,8 +793,21 @@ fn message_bound(conn: &Connection, project_id: &str) -> AppResult<i64> {
     )?)
 }
 
-fn project_messages(conn: &Connection, project_id: &str) -> AppResult<Vec<Message>> {
-    messages::list(conn, project_id, None, 200)
+/// 一次带入提示词的未读消息上限。超过时只带最新的这些。
+const UNREAD_LIMIT: i64 = 200;
+
+/// 这个成员还没读过的消息：游标之后、上界以内、不是本人发的。按 ID 升序。
+fn unread_for(conn: &Connection, project_id: &str, agent: &Agent, bound: i64) -> AppResult<Vec<Message>> {
+    let cursor = agent.last_seen_message_id.unwrap_or(0);
+    let mut statement = conn.prepare(
+        "SELECT id FROM messages WHERE project_id = ?1 AND id > ?2 AND id <= ?3 \
+         AND (sender_agent_id IS NULL OR sender_agent_id <> ?4) ORDER BY id DESC LIMIT ?5",
+    )?;
+    let mut ids = statement
+        .query_map(params![project_id, cursor, bound, agent.id, UNREAD_LIMIT], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.reverse();
+    ids.into_iter().map(|id| messages::get(conn, id)).collect()
 }
 
 fn latest_decision(conn: &Connection, project_id: &str) -> AppResult<Option<String>> {
@@ -1656,5 +1671,46 @@ mod tests {
         assert!(!agents::get(&conn, &agents[0].id).unwrap().persona_dirty);
         next_team(&conn, &project_id, "第四条指令");
         assert!(!advance(&conn, &project_id).unwrap()[0].prompt.contains("已更新的人设"), "送达之后不再重复");
+    }
+
+    #[test]
+    fn prompts_carry_only_messages_after_the_agents_cursor() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        messages::insert(&conn, &project_id, "user", None, "chat", "很早的旧消息").unwrap();
+        start_team(&conn, &project_id);
+        let first = advance(&conn, &project_id).unwrap();
+        assert!(first[0].prompt.contains("很早的旧消息"), "游标为空的首个回合能看到历史");
+        apply_outcome(&conn, &first[0].run_id, &ok_text(&fence("直接答复。", r#"{"action":"reply","message":"可以"}"#))).unwrap();
+
+        messages::insert(&conn, &project_id, "user", None, "chat", "两条指令之间的新消息").unwrap();
+        next_team(&conn, &project_id, "第二条指令");
+        let second = advance(&conn, &project_id).unwrap();
+        assert!(second[0].prompt.contains("第二条指令"));
+        assert!(second[0].prompt.contains("两条指令之间的新消息"));
+        assert!(!second[0].prompt.contains("很早的旧消息"), "读过的消息不重复灌入");
+        assert!(!second[0].prompt.contains("给登录加上校验"), "上一条指令的原文也已经读过");
+        assert!(!second[0].prompt.contains("直接答复。"), "本人发的消息不回灌");
+
+        // 另一位成员还没有参与过，游标为空：第一次参与时看到全部未读，不受组长游标影响。
+        let discuss = fence("讨论一下。", r#"{"action":"discuss","to":["前端"],"topic":"怎么做"}"#);
+        apply_outcome(&conn, &second[0].run_id, &ok_text(&discuss)).unwrap();
+        let member = advance(&conn, &project_id).unwrap();
+        assert_eq!(member[0].agent_id, agents[1].id);
+        assert!(member[0].prompt.contains("很早的旧消息") && member[0].prompt.contains("讨论一下。"));
+    }
+
+    #[test]
+    fn unread_is_capped_to_the_newest_two_hundred() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        for index in 0..205 {
+            messages::insert(&conn, &project_id, "user", None, "chat", &format!("消息{index:03}")).unwrap();
+        }
+        let bound: i64 = conn.query_row("SELECT MAX(id) FROM messages", [], |row| row.get(0)).unwrap();
+        let unread = unread_for(&conn, &project_id, &agents[0], bound).unwrap();
+        assert_eq!(unread.len(), 200);
+        assert_eq!(unread[0].content, "消息005");
+        assert_eq!(unread[199].content, "消息204");
+        assert!(unread.windows(2).all(|pair| pair[0].id < pair[1].id));
+        assert!(unread_for(&conn, &project_id, &agents[0], 0).unwrap().is_empty());
     }
 }
