@@ -157,8 +157,7 @@ pub fn save_rule(
     filename: String,
     content: String,
 ) -> AppResult<()> {
-    let folder = project_folder(&state, &project_id)?;
-    rules::save(Path::new(&folder), &filename, &content)
+    state.save_rule_for_project(&project_id, &filename, &content)
 }
 
 #[tauri::command]
@@ -167,8 +166,7 @@ pub fn delete_rule(
     project_id: String,
     filename: String,
 ) -> AppResult<()> {
-    let folder = project_folder(&state, &project_id)?;
-    rules::delete(Path::new(&folder), &filename)
+    state.delete_rule_for_project(&project_id, &filename)
 }
 
 #[tauri::command]
@@ -361,6 +359,38 @@ impl AppState {
     pub fn runtime_lock(&self) -> AppResult<MutexGuard<'_, ActiveRuns>> {
         self.runtime.lock().map_err(|_| AppError::Invalid("运行状态不可用，请重启应用".into()))
     }
+    pub fn save_rule_for_project(&self, project_id: &str, filename: &str, content: &str) -> AppResult<()> {
+        let folder = {
+            let conn = self.db_lock()?;
+            projects::get(&conn, project_id)?.folder_path
+        };
+        rules::validate_filename(filename)?;
+        let path = Path::new(&folder);
+        let existed = rules::rules_dir(path).join(filename).is_file();
+        rules::save(path, filename, content)?;
+        let operation = if existed { "替换" } else { "新增" };
+        self.record_rule_notice(project_id, path, operation, filename, Some(content))
+    }
+
+    pub fn delete_rule_for_project(&self, project_id: &str, filename: &str) -> AppResult<()> {
+        let folder = {
+            let conn = self.db_lock()?;
+            projects::get(&conn, project_id)?.folder_path
+        };
+        rules::validate_filename(filename)?;
+        let path = Path::new(&folder);
+        rules::delete(path, filename)?;
+        self.record_rule_notice(project_id, path, "删除", filename, None)
+    }
+
+    fn record_rule_notice(&self, project_id: &str, folder: &Path, operation: &str, filename: &str, content: Option<&str>) -> AppResult<()> {
+        let current = rules::list(folder)?;
+        let notice = rules::change_notice(operation, filename, content, &current);
+        let conn = self.db_lock()?;
+        messages::insert(&conn, project_id, "system", None, "system", &notice)?;
+        Ok(())
+    }
+
     fn recover(&self) -> AppResult<()> {
         let mut runtime = self.runtime_lock()?;
         let conn = self.db_lock()?;
@@ -389,6 +419,35 @@ impl AppState {
             }
             runtime.directories.entry(PathBuf::from(&owner.folder_path)).or_insert_with(|| owner.run_id.clone());
         }
+        // 不调用 runner，也不按 PID 杀进程。只解释中断前的任务和队列，不改写已发出的提示词。
+        let now = crate::store::now_ms();
+        let reason = "应用已重启，运行中断。执行中的任务记为失败，未自动重跑。部分文件可能已改动。";
+        tx.execute(
+            "UPDATE tasks SET status = 'failed', finished_at = ?1 WHERE status = 'running'",
+            [now],
+        )?;
+        tx.execute(
+            "UPDATE tasks SET status = 'cancelled', finished_at = ?1 \
+             WHERE status = 'pending' AND instruction_id IN \
+               (SELECT id FROM instructions WHERE status IN ('running', 'waiting_user'))",
+            [now],
+        )?;
+        tx.execute(
+            "UPDATE instruction_inputs SET status = 'cancelled', finished_at = ?1 \
+             WHERE status = 'queued' AND instruction_id IN \
+               (SELECT id FROM instructions WHERE status IN ('running', 'waiting_user'))",
+            [now],
+        )?;
+        tx.execute(
+            "UPDATE projects SET status = 'waiting_user', updated_at = ?1 \
+             WHERE id IN (SELECT project_id FROM instructions WHERE status = 'running')",
+            [now],
+        )?;
+        tx.execute(
+            "UPDATE instructions SET status = 'waiting_user', wait_reason = ?1, updated_at = ?2 \
+             WHERE status = 'running'",
+            rusqlite::params![reason, now],
+        )?;
         tx.commit()?; Ok(())
     }
     pub fn new_owner(&self, run_id: &str, project_id: Option<&str>, draft_id: Option<&str>, folder: &Path) -> RuntimeOwner {
@@ -1148,6 +1207,96 @@ mod integration_tests {
         assert!(state.finish_project(&started, outcome("failed")).unwrap().is_empty());
         assert_eq!(state.runtime_snapshot(&first).unwrap().active.unwrap().run_id, new.run_id);
     }
+    #[test]
+    fn recover_fails_in_progress_tasks_and_does_not_rewrite_sent_prompts() {
+        let (state, _folder, first, second, cli) = setup();
+        let started = state.prepare_send(&first, "开始执行", &cli).unwrap();
+        state.mark_started(&first, &started.run_id, 424242).unwrap();
+        let (instruction_id, running_task, pending_task, done_task, queued_id, done_input, prompt) = {
+            let conn = state.db_lock().unwrap();
+            let prompt = runs::get(&conn, &started.run_id).unwrap().command;
+            let agent = agents::list(&conn, &first).unwrap().remove(0);
+            let source = messages::insert(&conn, &first, "user", None, "instruction", "做首页").unwrap();
+            let instruction = crate::store::instructions::insert_instruction(&conn, &first, source.id, "team", None, "execute").unwrap();
+            let batch = crate::store::instructions::insert_batch(
+                &conn,
+                &instruction.id,
+                Some(&agent.id),
+                "先做三步",
+                &[
+                    crate::store::instructions::NewTask { assignee_agent_id: agent.id.clone(), title: "正在写".into(), detail: "执行中".into(), replaces_task_id: None },
+                    crate::store::instructions::NewTask { assignee_agent_id: agent.id.clone(), title: "还没开始".into(), detail: "未启动".into(), replaces_task_id: None },
+                    crate::store::instructions::NewTask { assignee_agent_id: agent.id.clone(), title: "已经做完".into(), detail: "保持完成".into(), replaces_task_id: None },
+                ],
+            ).unwrap();
+            conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?1", [&batch.tasks[0].id]).unwrap();
+            conn.execute("UPDATE tasks SET status = 'done', finished_at = 1 WHERE id = ?1", [&batch.tasks[2].id]).unwrap();
+            conn.execute("UPDATE instructions SET turn_count = 4 WHERE id = ?1", [&instruction.id]).unwrap();
+            let queued_message = messages::insert(&conn, &first, "user", None, "chat", "排队的补充").unwrap();
+            let queued = crate::store::instructions::enqueue_input(&conn, &instruction.id, queued_message.id, "supplement", None).unwrap();
+            let done_message = messages::insert(&conn, &first, "user", None, "chat", "已经入队并处理").unwrap();
+            let done_input = crate::store::instructions::enqueue_input(&conn, &instruction.id, done_message.id, "supplement", None).unwrap();
+            conn.execute("UPDATE instruction_inputs SET status = 'done' WHERE id = ?1", [&done_input.id]).unwrap();
+            (instruction.id, batch.tasks[0].id.clone(), batch.tasks[1].id.clone(), batch.tasks[2].id.clone(), queued.id, done_input.id, prompt)
+        };
+        state.recover().unwrap();
+        let conn = state.db_lock().unwrap();
+        assert_eq!(crate::store::instructions::get_task(&conn, &running_task).unwrap().status, "failed");
+        assert_eq!(crate::store::instructions::get_task(&conn, &pending_task).unwrap().status, "cancelled");
+        assert_eq!(crate::store::instructions::get_task(&conn, &done_task).unwrap().status, "done");
+        assert_eq!(crate::store::instructions::list_inputs(&conn, &instruction_id).unwrap().iter().find(|input| input.id == queued_id).unwrap().status, "cancelled");
+        assert_eq!(crate::store::instructions::list_inputs(&conn, &instruction_id).unwrap().iter().find(|input| input.id == done_input).unwrap().status, "done");
+        let instruction = crate::store::instructions::get(&conn, &instruction_id).unwrap();
+        assert_eq!(instruction.status, "waiting_user");
+        assert_eq!(instruction.phase, "execute");
+        assert_eq!(instruction.turn_count, 4);
+        assert!(instruction.wait_reason.unwrap_or_default().contains("未自动重跑"));
+        let run = runs::get(&conn, &started.run_id).unwrap();
+        assert_eq!(run.status, "interrupted");
+        assert_eq!(run.command, prompt);
+        assert_eq!(projects::get(&conn, &first).unwrap().status, "waiting_user");
+        let owner = load_owners(&conn).unwrap().into_iter().find(|owner| owner.run_id == started.run_id).unwrap();
+        assert_eq!(owner.pid, Some(424242));
+        assert!(owner.cleanup_required);
+        drop(conn);
+        state.runtime_lock().unwrap().runs.clear();
+        state.runtime_lock().unwrap().snapshots.clear();
+        assert!(state.prepare_send(&second, "必须阻塞", &cli).is_err());
+    }
+
+    #[test]
+    fn rule_changes_append_a_folded_notice_without_rewriting_sent_prompts() {
+        let (state, _folder, first, _second, _cli) = setup();
+        let (run_id, sent_id) = {
+            let conn = state.db_lock().unwrap();
+            let agent = agents::list(&conn, &first).unwrap().remove(0);
+            let run = runs::insert_running(&conn, Some(&agent.id), "execute", "已发出的提示词标记", None).unwrap();
+            let sent = messages::insert(&conn, &first, "agent", Some(&agent.id), "chat", "已发出的提示词标记").unwrap();
+            (run.id, sent.id)
+        };
+        let added = "# 协作\n这是新增全文";
+        state.save_rule_for_project(&first, "协作规范.md", added).unwrap();
+        state.save_rule_for_project(&first, "协作规范.md", "# 协作\n这是替换全文").unwrap();
+        state.save_rule_for_project(&first, "开发规范.md", "开发正文").unwrap();
+        state.delete_rule_for_project(&first, "开发规范.md").unwrap();
+        state.delete_rule_for_project(&first, "协作规范.md").unwrap();
+        assert!(state.save_rule_for_project(&first, "../逃逸.md", "x").is_err());
+        let conn = state.db_lock().unwrap();
+        assert_eq!(runs::get(&conn, &run_id).unwrap().command, "已发出的提示词标记");
+        assert_eq!(runs::get(&conn, &run_id).unwrap().status, "running");
+        assert_eq!(messages::get(&conn, sent_id).unwrap().content, "已发出的提示词标记");
+        let notices: Vec<_> = messages::list(&conn, &first, None, 20).unwrap().into_iter().filter(|message| message.kind == "system" && message.sender_type == "system").collect();
+        assert_eq!(notices.len(), 5);
+        assert!(notices[0].content.contains("操作：新增") && notices[0].content.contains(added) && notices[0].content.contains("失效"));
+        assert!(notices[1].content.contains("操作：替换") && notices[1].content.contains("这是替换全文"));
+        assert!(notices[2].content.contains("操作：新增") && notices[2].content.contains("开发规范.md") && notices[2].content.contains("协作规范.md"));
+        assert!(notices[3].content.contains("操作：删除") && notices[3].content.contains("协作规范.md") && !notices[3].content.contains("开发正文"));
+        assert!(notices[4].content.contains("旧规章全部失效，当前暂无规章"), "{}", notices[4].content);
+        assert!(notices[4].content.contains("规章版本：none"), "{}", notices[4].content);
+        let replaced_version = format!("规章版本：协作规范.md:{}", "# 协作\n这是替换全文".len());
+        assert!(notices[1].content.contains(&replaced_version), "{}", notices[1].content);
+    }
+
     #[test]
     fn restart_and_uncertain_cleanup_block_directory_until_explicit_confirmation() {
         let (state, _folder, first, second, cli) = setup(); let started = state.prepare_send(&first, "开始", &cli).unwrap();
