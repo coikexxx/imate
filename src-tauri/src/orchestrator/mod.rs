@@ -282,6 +282,64 @@ pub fn fail_launch(conn: &Connection, run_id: &str, error: &str) -> AppResult<()
     Ok(())
 }
 
+/// 会话在启动阶段被 CLI 明确拒绝时，清空会话并用开场加恢复包重开同一个回合，最多一次。
+/// 返回 None 表示不满足条件，旧 run 原样保留，调用方照常记录结果。
+pub fn rebuild_turn(conn: &Connection, run_id: &str, outcome: &RunOutcome) -> AppResult<Option<TurnSpec>> {
+    let run = load_run(conn, run_id)?;
+    if run.status != "running" {
+        return Ok(None);
+    }
+    let instruction = instructions::get(conn, &run.instruction_id)?;
+    if instruction.status != "running" {
+        return Ok(None);
+    }
+    let agent = agents::get(conn, &run.agent_id)?;
+    if !crate::chat::should_rebuild_session(outcome, agent.session_id.is_some(), false)
+        || previous_remedy(conn, &instruction.id, &agent.id, Some(run_id))?.is_some()
+    {
+        return Ok(None);
+    }
+    let tx = conn.unchecked_transaction()?;
+    // 到了回合上限时 reserve 会把指令置为等待用户；这时不重建，让调用方按普通失败记录。
+    if !reserve(&tx, &instruction, 1)? {
+        tx.commit()?;
+        return Ok(None);
+    }
+    finish_run_with(&tx, run_id, outcome, "failed", &format!("{REMEDY_PREFIX}会话不可用，已清空并重开一次"))?;
+    agents::set_session(&tx, &agent.id, None)?;
+    let agent = agents::get(&tx, &agent.id)?;
+    let (prompt, bound) = if run.mode == "execute" {
+        match run.task_id.as_deref() {
+            Some(task_id) => {
+                let task = instructions::get_task(&tx, task_id)?;
+                compose_prompt(&tx, &instruction, &agent, Stage::Execute, Some(&task), "")?
+            }
+            None => {
+                let content = load_snapshot(&instruction.context_snapshot_json)?.mention
+                    .map(|mention| mention.content).ok_or_else(|| invalid("点名内容已经不在了"))?;
+                (mention_prompt(&content), message_bound(&tx, &instruction.project_id)?)
+            }
+        }
+    } else if agent.is_leader {
+        let stage = match instruction.phase.as_str() {
+            "decide" => Stage::Decide,
+            "review" => Stage::Review,
+            "intervention" => Stage::Intervention,
+            _ => Stage::Triage,
+        };
+        compose_prompt(&tx, &instruction, &agent, stage, None, "")?
+    } else {
+        let topic = match load_snapshot(&instruction.context_snapshot_json)?.pending {
+            Some(StoredPending::Discuss { topic, .. }) => topic,
+            None => return Err(invalid("讨论阶段缺少议题")),
+        };
+        compose_prompt(&tx, &instruction, &agent, Stage::Discuss, None, &topic)?
+    };
+    let new_run = insert_run(&tx, &agent, &run.mode, &instruction.id, run.task_id.as_deref(), bound)?;
+    tx.commit()?;
+    Ok(Some(spec(new_run, agent.id, &instruction.id, run.task_id, &run.mode, prompt, bound)))
+}
+
 fn dispatch(conn: &Connection, instruction: &Instruction) -> AppResult<Vec<TurnSpec>> {
     match instruction.phase.as_str() {
         "triage" => schedule_leader(conn, instruction, Stage::Triage),
@@ -1860,5 +1918,67 @@ mod tests {
         let active = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
         assert_eq!((active.status.as_str(), active.phase.as_str()), ("running", "decide"));
         assert!(advance(&conn, &project_id).unwrap()[0].prompt.contains("前端 本轮未发言：CLI 长时间没有输出"));
+    }
+
+    fn dead_session(session: &str) -> RunOutcome {
+        RunOutcome {
+            status: "failed".into(), session_id: Some(session.into()), final_text: String::new(),
+            partial_text: String::new(), usage: None, exit_code: Some(1),
+            error: Some(format!("No conversation found with session ID: {session}")),
+            tool_seen: false, cleanup_complete: true,
+        }
+    }
+
+    #[test]
+    fn dead_session_is_rebuilt_once_with_a_fresh_opening() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        agents::set_session(&conn, &agents[0].id, Some("old-session")).unwrap();
+        start_team(&conn, &project_id);
+        let first = advance(&conn, &project_id).unwrap();
+        assert!(!first[0].prompt.contains("# 本人完整人设"), "已有会话的回合不带开场");
+
+        let rebuilt = rebuild_turn(&conn, &first[0].run_id, &dead_session("old-session")).unwrap().expect("应当重建");
+        assert_eq!(rebuilt.agent_id, agents[0].id);
+        assert_eq!((rebuilt.mode.as_str(), rebuilt.task_id.as_deref()), ("discuss", None));
+        assert_ne!(rebuilt.run_id, first[0].run_id);
+        assert!(rebuilt.prompt.contains("# 本人完整人设") && rebuilt.prompt.contains("# 恢复包") && rebuilt.prompt.contains("组长研判"));
+        assert_eq!(agents::get(&conn, &agents[0].id).unwrap().session_id, None);
+        assert_eq!(turn_count(&conn, &project_id), 2, "重建的回合计入回合总数");
+        let (status, error): (String, String) = conn.query_row("SELECT status, error FROM runs WHERE id = ?1", [&first[0].run_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(status, "failed");
+        assert!(error.starts_with("自动补救："), "{error}");
+
+        // 同一逻辑回合只补救一次：再失败就按普通失败处理，协议出错也不再重发。
+        assert!(rebuild_turn(&conn, &rebuilt.run_id, &dead_session("old-session")).unwrap().is_none());
+        apply_outcome(&conn, &rebuilt.run_id, &ok_text("重建之后忘了指令块")).unwrap();
+        assert_eq!(instructions::active_instruction(&conn, &project_id).unwrap().unwrap().status, "waiting_user");
+    }
+
+    #[test]
+    fn rebuild_keeps_the_running_task_and_refuses_ordinary_failures() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap();
+        let assign = fence("派工。", r#"{"action":"assign","decision":"做一步","tasks":[{"to":"前端","title":"第一步","detail":"做第一步"}]}"#);
+        apply_outcome(&conn, &leader[0].run_id, &ok_text(&assign)).unwrap();
+        agents::set_session(&conn, &agents[1].id, Some("member-session")).unwrap();
+        let first = advance(&conn, &project_id).unwrap();
+        let task_id = first[0].task_id.clone().unwrap();
+
+        let mut wrote = dead_session("member-session");
+        wrote.tool_seen = true;
+        assert!(rebuild_turn(&conn, &first[0].run_id, &wrote).unwrap().is_none(), "有过工具调用就不重建");
+        let mut other = dead_session("member-session");
+        other.error = Some("模型不存在".into());
+        assert!(rebuild_turn(&conn, &first[0].run_id, &other).unwrap().is_none(), "不是会话错误就不重建");
+        assert!(rebuild_turn(&conn, &first[0].run_id, &ok_text("成功")).unwrap().is_none());
+
+        let rebuilt = rebuild_turn(&conn, &first[0].run_id, &dead_session("member-session")).unwrap().expect("应当重建");
+        assert_eq!((rebuilt.mode.as_str(), rebuilt.task_id.as_deref()), ("execute", Some(task_id.as_str())));
+        assert!(rebuilt.prompt.contains("第一步") && rebuilt.prompt.contains("# 恢复包"));
+        assert_eq!(instructions::get_task(&conn, &task_id).unwrap().status, "running", "任务没有被重复创建或改状态");
+        apply_outcome(&conn, &rebuilt.run_id, &ok_text("第一步完成")).unwrap();
+        assert_eq!(instructions::get_task(&conn, &task_id).unwrap().status, "done");
+        assert!(rebuild_turn(&conn, &rebuilt.run_id, &dead_session("member-session")).unwrap().is_none(), "已结束的 run 不重建");
     }
 }
