@@ -155,6 +155,18 @@ pub fn interrupt_running_in_transaction(tx: &Connection) -> AppResult<Vec<Run>> 
     Ok(runs)
 }
 
+/// Grok 只续接明确在当前模式下成功过、且没有混用模式的会话。
+pub fn resumable_session<'a>(conn: &Connection, agent: &'a super::agents::Agent, mode: &str) -> AppResult<Option<&'a str>> {
+    let session = agent.session_id.as_deref();
+    let Some(id) = session.filter(|_| agent.cli == "grok") else { return Ok(session); };
+    let previous: Option<String> = conn.query_row(
+        "SELECT CASE WHEN COUNT(DISTINCT mode) = 1 THEN MIN(mode) END FROM runs \
+         WHERE agent_id = ?1 AND session_id = ?2 AND status = 'ok'",
+        params![agent.id, id], |row| row.get(0),
+    )?;
+    Ok(session.filter(|_| previous.as_deref() == Some(mode)))
+}
+
 /// 读取同成员、同 CLI 会话最近一次保存的 Usage JSON，包含累计 rawUsage。
 pub fn latest_usage(conn: &Connection, agent_id: &str, session_id: &str) -> AppResult<Option<Value>> {
     let usage_json: Option<String> = conn

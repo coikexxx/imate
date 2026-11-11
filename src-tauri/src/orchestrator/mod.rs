@@ -294,7 +294,8 @@ pub fn rebuild_turn(conn: &Connection, run_id: &str, outcome: &RunOutcome) -> Ap
         return Ok(None);
     }
     let agent = agents::get(conn, &run.agent_id)?;
-    if !crate::chat::should_rebuild_session(outcome, agent.session_id.is_some(), false)
+    let had_session = crate::store::runs::resumable_session(conn, &agent, &run.mode)?.is_some();
+    if !crate::chat::should_rebuild_session(outcome, had_session, false)
         || previous_remedy(conn, &instruction.id, &agent.id, Some(run_id))?.is_some()
     {
         return Ok(None);
@@ -317,7 +318,7 @@ pub fn rebuild_turn(conn: &Connection, run_id: &str, outcome: &RunOutcome) -> Ap
             None => {
                 let content = load_snapshot(&instruction.context_snapshot_json)?.mention
                     .map(|mention| mention.content).ok_or_else(|| invalid("点名内容已经不在了"))?;
-                (mention_prompt(&content), message_bound(&tx, &instruction.project_id)?)
+                compose_mention(&tx, &instruction, &agent, &content)?
             }
         }
     } else if agent.is_leader {
@@ -427,6 +428,24 @@ fn mention_prompt(content: &str) -> String {
     )
 }
 
+fn compose_mention(conn: &Connection, instruction: &Instruction, agent: &Agent, content: &str) -> AppResult<(String, i64)> {
+    let bound = message_bound(conn, &instruction.project_id)?;
+    let prompt = mention_prompt(content);
+    if agent.cli != "grok" || crate::store::runs::resumable_session(conn, agent, "execute")?.is_some() {
+        return Ok((prompt, bound));
+    }
+    let project = projects::get(conn, &instruction.project_id)?;
+    let roster = agents::list(conn, &instruction.project_id)?;
+    let rules = rules::list(Path::new(&project.folder_path))?;
+    let opening = crate::prompts::build_opening(&project, &rules, agent, &roster);
+    let goal = messages::get(conn, instruction.source_message_id)?;
+    let decision = latest_decision(conn, &instruction.project_id)?;
+    let tasks = instructions::list_tasks(conn, &instruction.id)?;
+    let task_statuses = tasks.iter().map(|task| format!("- {}：{}", task.title, task.status)).collect::<Vec<_>>().join("\n");
+    Ok((format!("{opening}\n\n# 恢复包\n原指令：{}\n有效决议：{}\n任务状态：\n{task_statuses}\n\n{prompt}",
+        goal.content, decision.as_deref().unwrap_or("尚无有效决议")), bound))
+}
+
 fn schedule_mention(conn: &Connection, instruction: &Instruction) -> AppResult<Vec<TurnSpec>> {
     let mut stored = load_snapshot(&instruction.context_snapshot_json)?;
     let Some(mention) = stored.mention.clone() else {
@@ -439,8 +458,7 @@ fn schedule_mention(conn: &Connection, instruction: &Instruction) -> AppResult<V
         return Ok(Vec::new());
     }
     let agent = agents::get(conn, &mention.agent_id)?;
-    let prompt = mention_prompt(&mention.content);
-    let bound = message_bound(conn, &instruction.project_id)?;
+    let (prompt, bound) = compose_mention(conn, instruction, &agent, &mention.content)?;
     let run_id = insert_run(conn, &agent, "execute", &instruction.id, None, bound)?;
     stored.mention = Some(StoredMention { launched: true, ..mention });
     save_snapshot(conn, &instruction.id, &stored)?;
@@ -669,7 +687,8 @@ fn compose_prompt(
     let recent = messages::list(conn, &instruction.project_id, Some(bound + 1), 20)?;
     let rules_version = rules_version(&rules);
     let roster_version = roster_version(&roster);
-    let fresh = agent.session_id.is_none();
+    let mode = if stage == Stage::Execute { "execute" } else { "discuss" };
+    let fresh = crate::store::runs::resumable_session(conn, agent, mode)?.is_none();
     let rounds = instruction.discuss_rounds.max(0) as u32;
     let snapshot = TeamSnapshot {
         message_bound: bound,
@@ -1336,6 +1355,30 @@ mod tests {
     fn start_team(conn: &rusqlite::Connection, project_id: &str) {
         let message = messages::insert(conn, project_id, "user", None, "instruction", "给登录加上校验").unwrap();
         instructions::insert_instruction(conn, project_id, message.id, "team", None, "triage").unwrap();
+    }
+
+    #[test]
+    fn grok_team_discuss_uses_recovery_when_last_session_was_execute() {
+        let (conn, project_id, members) = setup(&["开发"]);
+        let leader_id = &members[0].id;
+        conn.execute("UPDATE agents SET cli='grok',session_id='旧执行会话' WHERE id=?1", [leader_id]).unwrap();
+        let old = crate::store::runs::insert_running(&conn, Some(leader_id), "execute", "{}", Some("旧执行会话")).unwrap();
+        crate::store::runs::finish(&conn, &old.id, "ok", Some(0), None, None).unwrap();
+        start_team(&conn, &project_id);
+        let turns = advance(&conn, &project_id).unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].mode, "discuss");
+        assert!(turns[0].prompt.contains("# 恢复包"));
+        assert!(turns[0].prompt.contains("给登录加上校验"));
+        let leader = agents::get(&conn, leader_id).unwrap();
+        assert_eq!(crate::store::runs::resumable_session(&conn, &leader, "discuss").unwrap(), None);
+        assert_eq!(crate::store::runs::resumable_session(&conn, &leader, "execute").unwrap(), Some("旧执行会话"));
+        let mixed = crate::store::runs::insert_running(&conn, Some(leader_id), "discuss", "{}", Some("旧执行会话")).unwrap();
+        crate::store::runs::finish(&conn, &mixed.id, "ok", Some(0), None, None).unwrap();
+        assert_eq!(crate::store::runs::resumable_session(&conn, &leader, "execute").unwrap(), None);
+        agents::set_session(&conn, leader_id, Some("没有运行记录的会话")).unwrap();
+        let leader = agents::get(&conn, leader_id).unwrap();
+        assert_eq!(crate::store::runs::resumable_session(&conn, &leader, "execute").unwrap(), None);
     }
 
     fn ok_text(text: &str) -> RunOutcome {

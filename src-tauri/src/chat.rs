@@ -63,6 +63,8 @@ impl ChatService {
         if !crate::cli_registry::is_supported(&agent.cli) {
             return Err(AppError::Invalid(format!("CLI {} 尚未接入，计划在 M5 实现", agent.cli)));
         }
+        let recovery = recovery || (agent.session_id.is_some()
+            && crate::store::runs::resumable_session(conn, agent, "execute")?.is_none());
         let rules = crate::rules::list(std::path::Path::new(&project.folder_path))?;
         let mut unread = Vec::new();
         let mut page_before = Some(user_message_id);
@@ -196,6 +198,23 @@ mod tests {
         let prepared = ChatService::send(&conn, &project_id, user.id, true).unwrap();
         assert!(prepared.prompt.contains("# 项目花名册"));
         assert_eq!(ChatService::request(&prepared, "/tmp/项目".into()).session_id, None);
+    }
+    #[test]
+    fn grok_direct_execute_starts_fresh_after_discuss_but_resumes_execute() {
+        let (conn, project_id, roster) = setup();
+        let agent_id = &roster[0].id;
+        conn.execute("UPDATE agents SET cli='grok',session_id='讨论会话' WHERE id=?1", [agent_id]).unwrap();
+        let first = crate::store::runs::insert_running(&conn, Some(agent_id), "discuss", "{}", Some("讨论会话")).unwrap();
+        crate::store::runs::finish(&conn, &first.id, "ok", Some(0), None, None).unwrap();
+        let user = messages::insert(&conn, &project_id, "user", None, "chat", "请处理任务").unwrap();
+        let switched = ChatService::send(&conn, &project_id, user.id, false).unwrap();
+        assert!(switched.prompt.contains("# 项目花名册"));
+        assert!(ChatService::request(&switched, "/tmp/项目".into()).session_id.is_none());
+        agents::set_session(&conn, agent_id, Some("执行会话")).unwrap();
+        let second = crate::store::runs::insert_running(&conn, Some(agent_id), "execute", "{}", Some("执行会话")).unwrap();
+        crate::store::runs::finish(&conn, &second.id, "ok", Some(0), None, None).unwrap();
+        let resumed = ChatService::send(&conn, &project_id, user.id, false).unwrap();
+        assert_eq!(ChatService::request(&resumed, "/tmp/项目".into()).session_id.as_deref(), Some("执行会话"));
     }
     #[test]
     fn send_rejects_project_marked_as_running() {

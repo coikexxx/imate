@@ -768,8 +768,7 @@ impl AppState {
         if cli.info.id != agent.cli || !cli.info.supported { return Err(AppError::Invalid("成员 CLI 在发送前已改变，请重新发送".into())); }
         let reservation = crate::store::new_id();
         let cancellation = runtime.reserve(project_id, &reservation)?;
-        if let Err(error) = runtime.reserve_directory(&folder, &reservation)
-            .and_then(|_| runtime.reserve_session(&agent.cli, agent.session_id.as_deref(), &reservation)) {
+        if let Err(error) = runtime.reserve_directory(&folder, &reservation) {
             runtime.remove(project_id, &reservation); return Err(error);
         }
         let prepared = (|| {
@@ -777,7 +776,8 @@ impl AppState {
             let user = messages::insert(&tx, project_id, "user", None, "chat", content.trim())?;
             let prepared = ChatService::send(&tx, project_id, user.id, false)?;
             let request = ChatService::request(&prepared, folder.clone());
-            let baseline = prepared.agent.session_id.as_deref().map(|id| runs::latest_usage(&tx, &prepared.agent.id, id)).transpose()?.flatten()
+            runtime.reserve_session(&prepared.agent.cli, request.session_id.as_deref(), &reservation)?;
+            let baseline = request.session_id.as_deref().map(|id| runs::latest_usage(&tx, &prepared.agent.id, id)).transpose()?.flatten()
                 .and_then(|value| serde_json::from_value(value).ok());
             let adapter = make_adapter(cli, RunMode::Execute, baseline.clone())?;
             let spec = adapter.build_command(&request);
@@ -823,8 +823,7 @@ impl AppState {
         if cli.info.id != agent.cli || !cli.info.supported { return Err(AppError::Invalid("成员 CLI 在发送前已改变，请重新发送".into())); }
         let reservation = crate::store::new_id();
         let cancellation = runtime.reserve(project_id, &reservation)?;
-        if let Err(error) = runtime.reserve_directory(&folder, &reservation)
-            .and_then(|_| runtime.reserve_session(&agent.cli, agent.session_id.as_deref(), &reservation)) {
+        if let Err(error) = runtime.reserve_directory(&folder, &reservation) {
             runtime.remove(project_id, &reservation);
             return Err(error);
         }
@@ -832,7 +831,8 @@ impl AppState {
             let tx = conn.unchecked_transaction()?;
             let prepared = ChatService::send(&tx, project_id, user_message_id, false)?;
             let request = ChatService::request(&prepared, folder.clone());
-            let baseline = prepared.agent.session_id.as_deref().map(|id| runs::latest_usage(&tx, &prepared.agent.id, id)).transpose()?.flatten()
+            runtime.reserve_session(&prepared.agent.cli, request.session_id.as_deref(), &reservation)?;
+            let baseline = request.session_id.as_deref().map(|id| runs::latest_usage(&tx, &prepared.agent.id, id)).transpose()?.flatten()
                 .and_then(|value| serde_json::from_value(value).ok());
             let adapter = make_adapter(cli, RunMode::Execute, baseline.clone())?;
             let spec = adapter.build_command(&request);
@@ -1325,14 +1325,16 @@ async fn run_orchestrated(
         if let Ok(mut runtime) = state.runtime_lock() { runtime.cancel(project_id); }
         StepResult::NotStarted(reason.to_string())
     };
-    let prepared: Result<(Agent, PathBuf), &'static str> = (|| {
+    let prepared: Result<(Agent, PathBuf, Option<String>), &'static str> = (|| {
         let conn = state.db_lock().map_err(|_| "数据库连接不可用")?;
         let agent = agents::get(&conn, &spec.agent_id).map_err(|_| "成员不存在")?;
         let project = projects::get(&conn, project_id).map_err(|_| "项目不存在")?;
         let folder = Path::new(&project.folder_path).canonicalize().map_err(|_| "项目目录不存在或无法读取")?;
-        Ok((agent, folder))
+        let session = runs::resumable_session(&conn, &agent, &spec.mode)
+            .map_err(|_| "无法读取会话的运行模式")?.map(str::to_owned);
+        Ok((agent, folder, session))
     })();
-    let (agent, folder) = match prepared {
+    let (agent, folder, session) = match prepared {
         Ok(value) => value,
         Err(reason) => return refuse(reason),
     };
@@ -1346,14 +1348,14 @@ async fn run_orchestrated(
     };
     let mode = if spec.mode == "discuss" { RunMode::Discuss } else { RunMode::Execute };
     let baseline = state.db_lock().ok()
-        .and_then(|conn| agent.session_id.as_deref().and_then(|id| runs::latest_usage(&conn, &agent.id, id).ok().flatten()))
+        .and_then(|conn| session.as_deref().and_then(|id| runs::latest_usage(&conn, &agent.id, id).ok().flatten()))
         .and_then(|value| serde_json::from_value(value).ok());
     // 与直接点名路径一致：带上代理环境和 Dsh 设置。它自己会拿数据库锁，调用时不能持有锁。
     let adapter = match state.make_runtime_adapter(&cli, mode, baseline) {
         Ok(adapter) => adapter,
         Err(error) => return refuse(&error.to_string()),
     };
-    let request = crate::adapters::TurnRequest { prompt: spec.prompt.clone(), session_id: agent.session_id.clone(),
+    let request = crate::adapters::TurnRequest { prompt: spec.prompt.clone(), session_id: session,
         cwd: folder.clone(), mode, model: agent.model.clone() };
     let run_id = spec.run_id.clone();
     let agent_id = spec.agent_id.clone();
