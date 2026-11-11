@@ -113,6 +113,12 @@ export interface CleanupNotice { runId: string; projectId: string | null; folder
 export interface ProjectRuntime { active: RuntimeSnapshot | null; cleanupRequired: CleanupNotice[] }
 export interface SendMessageResponse { runId: string; userMessage: Message; agentMessageId: number }
 
+export interface FileEntry { path: string; name: string; isDir: boolean }
+export interface FileListing { entries: FileEntry[]; truncated: boolean }
+/** paths 是这一批改动；changed 是当前高亮的全集，新指令开始时为空。 */
+export interface FilesChanged { projectId: string; paths: string[]; changed: string[] }
+export interface RulesChanged { projectId: string; version: string }
+
 export interface Instruction {
   id: string;
   projectId: string;
@@ -154,6 +160,8 @@ export interface ProjectEventMap {
   "message:new": MessageNew;
   "agent:status": AgentStatusEvent;
   "run:finished": RunFinished;
+  "files:changed": FilesChanged;
+  "rules:changed": RulesChanged;
 }
 
 export interface DraftMember { name: string; role: string; persona: string }

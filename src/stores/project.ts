@@ -17,6 +17,10 @@ interface ProjectState {
   activeRunId: string | null;
   /** 正在运行的回合，按开始顺序。并行讨论时不止一个。 */
   liveRuns: string[];
+  changedFiles: string[];
+  filesTick: number;
+  rulesTick: number;
+  setChangedFiles: (projectId: string, paths: string[]) => void;
   cleanupRequired: ProjectRuntime["cleanupRequired"];
   error: string | null;
   sending: boolean;
@@ -48,8 +52,10 @@ export function createProjectStore() {
   return createStore<ProjectState>((set, get) => ({
     projectId: "", messages: [], streams: {}, agentStatuses: {}, activeRunId: null, liveRuns: [],
     cleanupRequired: [], error: null, sending: false, hydrating: false, buffered: [],
+    changedFiles: [], filesTick: 0, rulesTick: 0,
     beginHydrate: (projectId) => set({ projectId, messages: [], streams: {}, agentStatuses: {}, activeRunId: null, liveRuns: [],
-      cleanupRequired: [], error: null, sending: false, hydrating: true, buffered: [] }),
+      cleanupRequired: [], error: null, sending: false, hydrating: true, buffered: [],
+      changedFiles: [], filesTick: 0, rulesTick: 0 }),
     mergeHistory: (projectId, messages) => {
       if (projectId !== get().projectId) return;
       set((state) => ({ messages: upsert(messages, state.messages) }));
@@ -117,6 +123,11 @@ export function createProjectStore() {
           if (!active || !event.runId) return { agentStatuses };
           return { agentStatuses, liveRuns: withRun(state.liveRuns, event.runId), activeRunId: event.runId };
         }
+        if (name === "files:changed") {
+          const event = payload as ProjectEventMap["files:changed"];
+          return { changedFiles: event.changed, filesTick: state.filesTick + 1 };
+        }
+        if (name === "rules:changed") return { rulesTick: state.rulesTick + 1 };
         const event = payload as ProjectEventMap["run:finished"];
         const previous = streams[event.runId] ?? streamFor(event.projectId, event.runId, event.agentId);
         if (previous.finished) return {};
@@ -130,6 +141,7 @@ export function createProjectStore() {
     },
     setError: (error) => set({ error }),
     setSending: (sending) => set({ sending }),
+    setChangedFiles: (projectId, paths) => { if (projectId === get().projectId) set({ changedFiles: paths }); },
   }));
 }
 export const projectStore = createProjectStore();
@@ -140,7 +152,7 @@ export function attachProjectEvents(
   receive: (name: keyof ProjectEventMap, payload: ProjectEventMap[keyof ProjectEventMap]) => void,
 ): { ready: Promise<void>; dispose: () => void } {
   let disposed = false; const unlisteners: (() => void)[] = [];
-  const names: (keyof ProjectEventMap)[] = ["message:delta", "message:new", "agent:status", "run:finished"];
+  const names: (keyof ProjectEventMap)[] = ["message:delta", "message:new", "agent:status", "run:finished", "files:changed", "rules:changed"];
   const ready = Promise.all(names.map(async (name) => {
     const unlisten = await subscribe(name, (payload) => { if (!disposed) receive(name, payload); });
     if (disposed) unlisten(); else unlisteners.push(unlisten);

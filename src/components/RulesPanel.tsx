@@ -1,6 +1,6 @@
 import { assistantAvailable } from "../lib/clis";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { isValidRuleFilename } from "../lib/wizard";
 import type { Agent, CliInfo, DraftInput, DraftMember, Project, RuleDoc } from "../types";
@@ -8,7 +8,7 @@ import { AssistantDraftDialog } from "./AssistantDraftDialog";
 import { Button, inputClass } from "./ui";
 
 /** 项目页的规章面板。直接读写项目文件夹里的 .imates/rules/。 */
-export function RulesPanel({ projectId, project, agents, clis }: { projectId: string; project: Project; agents: Agent[]; clis: CliInfo[] }) {
+export function RulesPanel({ projectId, project, agents, clis, refreshTick = 0 }: { projectId: string; project: Project; agents: Agent[]; clis: CliInfo[]; refreshTick?: number }) {
   const [rules, setRules] = useState<RuleDoc[]>([]);
   const [templates, setTemplates] = useState<RuleDoc[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -37,6 +37,13 @@ export function RulesPanel({ projectId, project, agents, clis }: { projectId: st
 
   const saved = rules.find((rule) => rule.filename === selected);
   const dirty = saved !== undefined && saved.content !== draft;
+  const [stale, setStale] = useState(false);
+  useEffect(() => {
+    // 只在收到新的规章事件时触发；自己刚做的操作已经重新读取过。
+    if (refreshTick === 0 || ownChange.current) return;
+    if (dirty) { setStale(true); return; }
+    reload(selected).catch((e) => setError(String(e)));
+  }, [refreshTick]);
   const assistantReady = assistantAvailable(clis);
   const context = (extra: Pick<DraftInput, "memberName" | "role" | "targetFilename">): Omit<DraftInput, "draftId" | "currentText" | "feedback"> => ({
     ...extra, folderPath: project.folderPath, projectName: project.name, description: project.description,
@@ -45,13 +52,18 @@ export function RulesPanel({ projectId, project, agents, clis }: { projectId: st
   });
   const unusedTemplates = templates.filter((t) => !rules.some((r) => r.filename === t.filename));
 
+  const ownChange = useRef(false);
+
   /** 执行一个会改动文件的操作，失败时把原因显示出来。 */
   async function run(action: () => Promise<void>) {
     setError(null);
+    ownChange.current = true;
     try {
       await action();
     } catch (e) {
       setError(String(e));
+    } finally {
+      ownChange.current = false;
     }
   }
 
@@ -144,6 +156,12 @@ export function RulesPanel({ projectId, project, agents, clis }: { projectId: st
       )}
 
       {error && <p className="text-sm text-red-400">{error}</p>}
+      {stale && (
+        <div className="flex items-center justify-between gap-2 rounded border border-amber-900 bg-amber-950/40 px-2 py-1 text-xs text-amber-200">
+          <span>规章文件已在别处变化，当前编辑内容尚未保存。</span>
+          <Button onClick={() => { setStale(false); reload(selected).catch((e) => setError(String(e))); }}>放弃编辑并重新载入</Button>
+        </div>
+      )}
 
       <div className="space-y-2 border-t border-slate-800 pt-3">
         <select

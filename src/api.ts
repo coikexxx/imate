@@ -5,6 +5,7 @@ import type {
   ProxyState,
   Agent,
   Message,
+  FileListing,
   ProjectRuntime,
   SendMessageResponse,
   Instruction,
@@ -69,4 +70,7 @@ export const api = {
 
   listRuleTemplates: () => invoke<RuleDoc[]>("list_rule_templates"),
   listPersonaTemplates: () => invoke<PersonaTemplate[]>("list_persona_templates"),
+  listFiles: (projectId: string) => invoke<FileListing>("list_files", { projectId }),
+  openFile: (projectId: string, path: string) => invoke<void>("open_file", { projectId, path }),
+  watchProject: (projectId: string) => invoke<string[]>("watch_project", { projectId }),
 };

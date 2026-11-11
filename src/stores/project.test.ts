@@ -45,7 +45,7 @@ describe("运行输出归并", () => {
     const subscription = attachProjectEvents(async () => () => { removed += 1; }, () => {});
     subscription.dispose();
     await subscription.ready;
-    expect(removed).toBe(4);
+    expect(removed).toBe(6);
   });
   it("加载期间结束的回合不会被较旧的运行快照复活", () => {
     const store = createProjectStore(); const state = store.getState();
@@ -88,5 +88,29 @@ describe("运行输出归并", () => {
     expect(store.getState().liveRuns).toEqual(["r1"]);
     state.applyEvent("run:finished", { projectId: "甲", runId: "别的回合", agentId: "b", seq: 1, status: "failed", error: null });
     expect(store.getState().activeRunId).toBe("r1");
+  });
+  it("文件变化以后端给出的全集为准，并推动文件树刷新", () => {
+    const store = createProjectStore(); const state = store.getState();
+    state.beginHydrate("甲");
+    state.hydrate("甲", [], { active: null, cleanupRequired: [] });
+    state.applyEvent("files:changed", { projectId: "甲", paths: ["a.txt"], changed: ["a.txt"] });
+    state.applyEvent("files:changed", { projectId: "乙", paths: ["x.txt"], changed: ["x.txt"] });
+    expect(store.getState().changedFiles).toEqual(["a.txt"]);
+    expect(store.getState().filesTick).toBe(1);
+    state.applyEvent("files:changed", { projectId: "甲", paths: [], changed: [] });
+    expect(store.getState().changedFiles).toEqual([]);
+    expect(store.getState().filesTick).toBe(2);
+    state.setChangedFiles("乙", ["不该写入"]);
+    expect(store.getState().changedFiles).toEqual([]);
+  });
+  it("规章变化只推动规章面板刷新，不影响运行状态", () => {
+    const store = createProjectStore(); const state = store.getState();
+    state.beginHydrate("甲");
+    state.hydrate("甲", [], { active: null, cleanupRequired: [] });
+    state.applyEvent("agent:status", { projectId: "甲", agentId: "a", runId: "r", status: "working" });
+    state.applyEvent("rules:changed", { projectId: "甲", version: "abc" });
+    expect(store.getState().rulesTick).toBe(1);
+    expect(store.getState().activeRunId).toBe("r");
+    expect(store.getState().agentStatuses.a).toBe("working");
   });
 });
