@@ -1,4 +1,5 @@
 mod chat;
+mod orchestrator;
 mod assistant;
 mod prompts;
 mod runner;
