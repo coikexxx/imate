@@ -817,4 +817,104 @@ mod integration_tests {
         runtime.cancel_all(); assert!(*project.borrow() && *draft.borrow());
         assert!(runtime.reserve("new", "run-3").is_err());
     }
+
+    #[test]
+    #[ignore = "仅供隔离子进程调用"]
+    fn crash_helper() {
+        let db = std::env::var("IMATES_CRASH_DB").unwrap();
+        let folder = std::fs::canonicalize(std::env::var("IMATES_CRASH_DIR").unwrap()).unwrap();
+        let conn = crate::store::open(std::path::Path::new(&db)).unwrap();
+        let project = projects::create(&conn, "甲", "", folder.to_str().unwrap()).unwrap();
+        let input = NewAgent { name: "组长".into(), role: "开发".into(),
+            persona: "## 定位\n开发\n## 职责\n测试\n## 边界\n不越界\n## 工作风格\n务实".into(),
+            cli: "codex".into(), model: None, is_leader: true };
+        let agent = agents::create(&conn, &project.id, &input).unwrap();
+        let run = runs::insert_running(&conn, Some(&agent.id), "execute", "probe", None).unwrap();
+        let mut sleeper = {
+            #[cfg(windows)]
+            { let mut command = std::process::Command::new("cmd.exe"); command.args(["/D", "/C", "ping -n 30 127.0.0.1 >NUL"]); command }
+            #[cfg(unix)]
+            { let mut command = std::process::Command::new("sleep"); command.arg("30"); command }
+        };
+        sleeper.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        { use std::os::windows::process::CommandExt; sleeper.creation_flags(0x0800_0000); }
+        let sleeper = sleeper.spawn().unwrap();
+        let owner = RuntimeOwner { run_id: run.id.clone(), project_id: Some(project.id.clone()), draft_id: None,
+            folder_path: folder.to_string_lossy().into_owned(), pid: Some(sleeper.id()), process_group: Some(sleeper.id()),
+            nonce: "nonce".into(), instance: "crash-test".into(), started_at: 1, cleanup_required: false };
+        save_owner(&conn, &owner).unwrap();
+        drop(conn);
+        std::fs::write(folder.join("ready"), format!("{}\n{}\n{}", run.id, project.id, sleeper.id())).unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(40));
+    }
+
+    #[test]
+    fn killed_process_reopen_blocks_directory_until_confirm() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let db = root.path().join("imates.db");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args(["--ignored", "--exact", "commands::integration_tests::crash_helper", "--nocapture"]);
+        child.env("IMATES_CRASH_DB", &db).env("IMATES_CRASH_DIR", folder.path());
+        child.stdin(std::process::Stdio::null());
+        let mut child = child.spawn().unwrap();
+        let ready = folder.path().join("ready");
+        let started = std::time::Instant::now();
+        while !ready.exists() && started.elapsed() < std::time::Duration::from_secs(15) {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        assert!(ready.exists(), "崩溃辅助进程没有写好数据库");
+        let text = std::fs::read_to_string(&ready).unwrap();
+        let mut lines = text.lines();
+        let run_id = lines.next().unwrap().to_string();
+        let project_id = lines.next().unwrap().to_string();
+        let sleeper_pid: u32 = lines.next().unwrap().trim().parse().unwrap();
+        kill_pid(child.id(), false);
+        let _ = child.wait();
+        let cli = crate::cli_registry::ResolvedCli { info: CliInfo { id: "codex".into(), label: "Codex".into(), installed: true,
+            supported: true, path: Some("/bin/test".into()), version: None }, program: "/bin/test".into(), path_env: "/bin".into(),
+            environment_source: crate::cli_registry::EnvironmentSource::Process };
+        let state = AppState::new(crate::store::open(&db).unwrap(), root.path().into()).unwrap();
+        assert_eq!(runs::get(&state.db_lock().unwrap(), &run_id).unwrap().status, "interrupted");
+        assert_eq!(projects::get(&state.db_lock().unwrap(), &project_id).unwrap().status, "waiting_user");
+        assert!(state.runtime_snapshot(&project_id).unwrap().active.is_none());
+        assert_eq!(state.runtime_snapshot(&project_id).unwrap().cleanup_required.len(), 1);
+        assert!(state.prepare_send(&project_id, "必须阻塞", &cli).is_err());
+        let sleeper_alive = process_alive(sleeper_pid);
+        state.confirm_cleanup(&run_id).unwrap();
+        assert!(state.runtime_snapshot(&project_id).unwrap().cleanup_required.is_empty());
+        assert!(state.prepare_send(&project_id, "已人工处理", &cli).is_ok());
+        assert!(sleeper_alive, "数据库标成 interrupted 时，残留子进程应仍在；测试环境若用作业对象连带结束它，这条会失败");
+        assert!(process_alive(sleeper_pid), "确认清理不应把残留进程杀掉");
+        kill_pid(sleeper_pid, true);
+    }
+
+    fn process_alive(pid: u32) -> bool {
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]).output();
+            let Ok(output) = output else { return false };
+            let text = String::from_utf8_lossy(&output.stdout);
+            return text.split(',').any(|field| field.trim().trim_matches('"') == pid.to_string());
+        }
+        #[cfg(unix)]
+        {
+            std::process::Command::new("/bin/ps").args(["-p", &pid.to_string()]).output().is_ok_and(|output| output.status.success())
+        }
+    }
+    fn kill_pid(pid: u32, tree: bool) {
+        #[cfg(windows)]
+        {
+            let mut args = vec!["/PID".to_string(), pid.to_string(), "/F".into()];
+            if tree { args.push("/T".into()); }
+            let _ = std::process::Command::new("taskkill").args(&args).stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        }
+        #[cfg(unix)]
+        {
+            let _ = tree;
+            unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+        }
+    }
 }

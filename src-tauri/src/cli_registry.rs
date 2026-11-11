@@ -341,17 +341,18 @@ mod tests {
 
     #[test]
     fn resolve_cli_uses_the_absolute_executable_from_its_path_snapshot() {
+        let program = std::path::PathBuf::from(if cfg!(windows) { r"C:\custom\bin\claude" } else { "/custom/bin/claude" });
         let resolved = resolve_cli_with(
             "claude",
             Some("/custom/bin:/usr/bin".into()),
             |binary, path| {
                 assert_eq!(binary, "claude");
                 assert_eq!(path, "/custom/bin:/usr/bin");
-                Some(PathBuf::from("/custom/bin/claude"))
+                Some(program.clone())
             },
         )
         .unwrap();
-        assert_eq!(resolved.program, PathBuf::from("/custom/bin/claude"));
+        assert_eq!(resolved.program, std::path::PathBuf::from(if cfg!(windows) { r"C:\custom\bin\claude" } else { "/custom/bin/claude" }));
         assert_eq!(resolved.path_env, "/custom/bin:/usr/bin");
         assert!(resolved.program.is_absolute());
     }
@@ -361,7 +362,9 @@ mod tests {
             Some("/custom/bin:/usr/bin".into())
         }, |binary, path| {
             assert_eq!(binary, "codex");
-            (path == "/custom/bin:/usr/bin").then(|| "/custom/bin/codex".into())
+            (path == "/custom/bin:/usr/bin").then(|| {
+                std::path::PathBuf::from(if cfg!(windows) { r"C:\custom\bin\codex" } else { "/custom/bin/codex" })
+            })
         }).unwrap();
         assert_eq!(resolved.environment_source, EnvironmentSource::LoginShell);
         assert_eq!(resolved.path_env, "/custom/bin:/usr/bin");
