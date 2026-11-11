@@ -128,6 +128,9 @@ pub async fn run_turn_managed(
     let mut command = Command::new(program);
     command.args(args).current_dir(&request.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(path) = spec.path_env { command.env("PATH", path); }
+    for (key, value) in adapter.environment() {
+        if let Some(value) = value { command.env(key, value); } else { command.env_remove(key); }
+    }
     platform::configure(&mut command);
     let mut child = match command.spawn() { Ok(child) => child, Err(e) => return RunOutcome::failed(format!("无法启动 CLI：{e}")) };
     let pid = child.id().expect("刚启动的进程有 PID");
@@ -261,6 +264,11 @@ mod tests {
         let Some((scenario, text)) = input.split_once('\n') else { return; };
         let event = |kind: &str, text: &str| println!("{}", serde_json::json!({"type":kind,"text":text}));
         match scenario {
+            "proxy_env" => {
+                let vars: std::collections::BTreeMap<_, _> = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
+                    .into_iter().map(|key| (key, std::env::var(key).ok())).collect();
+                event("complete", &serde_json::to_string(&vars).unwrap());
+            }
             "echo" => { event("text", text); event("complete", "已完成"); }
             "completed_but_failed" => { event("complete", "已输出"); std::process::exit(7); }
             "error_then_complete" => { event("text", "部分回答"); event("error", "致命错误"); event("complete", "迟到成功"); }
@@ -340,6 +348,28 @@ mod tests {
         if let Some(delay) = cancel_after { tokio::spawn(async move { tokio::time::sleep(delay).await; let _ = sender.send(true); }); }
         let outcome = run_turn_with_config(Box::new(adapter), request, cancellation, |_| {}, cfg).await;
         (outcome, folder)
+    }
+    #[tokio::test]
+    async fn proxy_overrides_reach_only_child_and_direct_mode_removes_them() {
+        let before: Vec<_> = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"].map(std::env::var_os).into();
+        for manual in [true, false] {
+            let folder = tempfile::tempdir().unwrap();
+            let request = TurnRequest { prompt: "proxy_env\n检查子进程环境".into(), session_id: None,
+                cwd: folder.path().into(), mode: RunMode::Execute, model: None };
+            let inner = FakeAdapter::new(std::env::current_exe().unwrap(), vec!["--ignored".into(), "--exact".into(), "runner::tests::subprocess_helper".into(), "--nocapture".into()]);
+            let proxy = if manual { crate::proxy::manual_environment(&crate::proxy::ProxySettings {
+                mode: crate::proxy::ProxyMode::Manual, url: "http://127.0.0.1:7890".into(),
+            }).unwrap() } else { crate::proxy::ProxyEnvironment::default() };
+            let adapter = crate::proxy::ProxyAdapter::new(Box::new(inner), crate::proxy::overrides(&proxy));
+            let (_sender, cancellation) = tokio::sync::watch::channel(false);
+            let out = run_turn(Box::new(adapter), request, cancellation, |_| {}).await;
+            assert_eq!(out.status, "ok");
+            let vars: serde_json::Value = serde_json::from_str(&out.final_text).unwrap();
+            for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] {
+                if manual { assert_eq!(vars[key], "http://127.0.0.1:7890"); } else { assert!(vars[key].is_null()); }
+            }
+        }
+        assert_eq!(before, ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"].map(std::env::var_os));
     }
     #[tokio::test]
     async fn real_process_preserves_stdin_and_requires_zero_exit_and_completion() {

@@ -335,3 +335,29 @@ Windows 用例覆盖了关闭 stdout 后的 EOF 宽限、父进程先退出并�
 错误模型点名的 run 为 failed，系统消息保留 CLI 原文：`Couldn't set model 'imates-m5-no-such-model-20261111': Invalid params: "unknown model id". Run 'grok models' to see available models.`，成员显示执行出错。模型已恢复空值并重新打开核对；恢复后成功对话待联网复验。两个直接回合的 usage_json 均为 null，没有成功团队回合，团队用量仍未验收。Dsh 窗口执行、完整团队协作、仅 Grok/Dsh 环境的助理均未验证；Pi 仍未安装。
 
 完整逐项结果见 M5 Task 9。截图、原始输出与只读数据库摘要仅留本机临时目录，未提交。用户随后要求 Grok 使用本机代理，将以新增 Task 10 实现后继续验收。
+
+
+### Grok 本机代理与继续验收（2026-11-11）
+
+用户明确要求 Grok 使用本机代理。本机 Windows 已开启 HTTP/HTTPS 静态代理，应用启动环境没有代理变量。仅对测试进程补入本机代理后，`grok models` 1.22 秒返回退出码 0 和模型列表。新增应用配置默认跟随本机代理，Windows 经 WinHTTP 读取静态地址；可选手动代理/直连，配置只传给 Grok 子进程，不改系统或 CLI 配置。
+
+真实 Tauri 窗口确认检测到本机代理，手动输入非法 FTP 地址得到明确报错且内容保留；有效手动地址、直连均保存并重新打开核对，最终恢复 system。配置持久化为 `{"mode":"system","url":""}`。应用内默认模型的 Grok 创建 a.txt，磁盘内容严格为 hi；再次点名问上一条任务，返回 a.txt / hi，两回合 session ID 相同，数据库两条 run 均为 ok，第二条命令含 -r，代理没有出现在命令参数中。错误模型恢复后的成功对话由此验证，Task 9 清单 4、8 通过。
+
+| 应用直接回合 | inputTokens | outputTokens | cacheReadInputTokens | costUsd |
+|---|---:|---:|---:|---:|
+| 创建 a.txt | 20182 | 1097 | 65536 | 0.079714 |
+| 同会话复述任务 | 20359 | 252 | 1664 | 0.043062 |
+
+这些是直接回合，并非团队回合，不替代清单 10 的团队用量验收。
+
+G4 的三回合复测在第二回合遇到失败，因此第三回合未执行：
+
+| 回合 | 实测事实 | 结果 |
+|---|---|---|
+| plan 首回合 | 31.27 秒、exit=0、cwd 正确、回显 plan；实际 write 返回 is_error=true，工具原文 `Rejected: file edits are not allowed in plan mode`，blocked-first.txt 不存在 | 模式回显、工具拒写通过 |
+| 同 session 的 bypassPermissions | 9.18 秒、exit=0、cwd 正确、回显 bypassPermissions；write 仍返回上述 plan 拒写，created.txt 不存在；正确复述上一回合文件名 | 跨模式失败；CLI 的 success 不能代替文件验收 |
+| 切回 plan | 未执行 | 第二回合已失败，停止后续 |
+
+G4 两回合 input_tokens 为 38776 / 1203，modelUsage.costUSD 为 0.092212 / 0.02762，下降证实不是会话累计。本次沿用 M0 的本回合用量归一结论。混合模式仍不能宣称通过：需另行修订/验证模式切换或分模式会话方案；本机代理功能没有改写权限策略。
+
+Dsh 仍为 QUOTA / 402，未再调用；Pi 未安装。完整团队讨论/执行/验收、团队用量未通过。后端代理新增 6 个测试先失败后通过；全套串行测试 168 passed、2 ignored，前端 32 passed，两端构建通过。默认并行测试出现原有 runner 时序用例失败（部分回答尚未输出即触发 100ms 取消，或 180ms 空闲超时），串行原断言全部通过，没有删断言、放宽期望或跳过用例。原始输出、截图和数据库摘要仍仅保存在仓库外临时目录。

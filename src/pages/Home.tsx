@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { api } from "../api";
 import { ProjectCard } from "../components/ProjectCard";
+import { ProxySettingsButton } from "../components/ProxySettings";
 import type { ProjectSummary } from "../types";
 
 export default function Home() {
@@ -38,9 +39,12 @@ export default function Home() {
     <main className="mx-auto max-w-6xl p-8">
       <header className="mb-6 flex items-baseline justify-between">
         <h1 className="text-2xl font-bold">imates</h1>
-        <p className="text-sm text-slate-400">
-          {projects ? `${projects.length} 个项目 · ${agentTotal} 个 Agent` : "加载中…"}
-        </p>
+        <div className="flex items-center gap-4">
+          <p className="text-sm text-slate-400">
+            {projects ? `${projects.length} 个项目 · ${agentTotal} 个 Agent` : "加载中…"}
+          </p>
+          <ProxySettingsButton />
+        </div>
       </header>
 
       {error && <p className="mb-4 text-sm text-red-400">{error}</p>}

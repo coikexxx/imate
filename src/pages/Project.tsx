@@ -8,6 +8,7 @@ import { projectStore } from "../stores/project";
 import { api } from "../api";
 import { AgentForm } from "../components/AgentForm";
 import { MemberList } from "../components/MemberList";
+import { ProxySettingsButton } from "../components/ProxySettings";
 import { RulesPanel } from "../components/RulesPanel";
 import { Button, Modal } from "../components/ui";
 import {
@@ -124,9 +125,10 @@ export default function Project() {
         <span className="rounded bg-slate-800 px-2 py-0.5 text-xs">
           {activeRunId ? "执行中" : STATUS_LABELS[project.status]}
         </span>
-        <span className="truncate text-xs text-slate-500" title={project.folderPath}>
+        <span className="flex-1 truncate text-xs text-slate-500" title={project.folderPath}>
           {project.folderPath}
         </span>
+        <ProxySettingsButton />
       </header>
 
       {!detail.folderExists && (

@@ -54,6 +54,8 @@ pub trait CliAdapter: Send + Sync {
     fn id(&self) -> &'static str;
     fn detect(&self) -> Option<CliInfo>;
     fn build_command(&self, req: &TurnRequest) -> CommandSpec;
+    /// 只覆盖本次子进程的环境；None 表示移除继承的变量。
+    fn environment(&self) -> Vec<(String, Option<String>)> { vec![] }
     fn parse_line(&mut self, line: &str) -> Vec<AgentEvent>;
 }
 

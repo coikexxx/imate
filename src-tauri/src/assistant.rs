@@ -358,8 +358,8 @@ async fn resolve_assistant_cli(state: &AppState) -> AppResult<crate::cli_registr
 pub async fn run_draft(app: tauri::AppHandle, state: &AppState, kind: DraftKind, input: DraftInput) -> AppResult<DraftResponse> {
     validate_input(&input, kind)?;
     let cli = resolve_assistant_cli(state).await?;
+    let adapter = state.make_runtime_adapter(&cli, RunMode::Discuss, None)?;
     let started = state.prepare_draft(kind, &input, &cli)?;
-    let adapter = commands::make_adapter(&cli, RunMode::Discuss, None)?;
     let worker_started = StartedDraft { kind: started.kind, input: started.input.clone(), run_id: started.run_id.clone(), folder: started.folder.clone(),
         request: started.request.clone(), cancellation: started.cancellation.clone() };
     let worker = tokio::spawn(async move {

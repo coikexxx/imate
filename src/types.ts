@@ -1,5 +1,8 @@
 // 与后端 DTO 一一对应，字段为 camelCase。
 
+export interface GrokProxySettings { mode: "system" | "manual" | "direct"; url: string }
+export interface GrokProxyState { settings: GrokProxySettings; detectedProxy: string; detectionError: string | null }
+
 export interface CliInfo {
   id: string;
   label: string;
