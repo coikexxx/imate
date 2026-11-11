@@ -1,7 +1,7 @@
 # imates MVP 开发手册
 
-> 版本：2026-11-11（第 4 版，按 M2 多 Agent 评审校准权限、运行契约与 M3 前置规则）· 状态：M1 已完成；M2 实现已完成，实际验收未闭环。2026-11-11 决定暂不补测剩余三项。M3 实现已落地，自动测试通过，真实 CLI 团队讨论未执行；M5 grok、dsh 与应用统一代理已接入，窗口部分验收通过，Dsh 认证与自定义 gpt-6.1-sol 已通过真实调用及窗口验收；Grok 跨模式、pi 与团队流程仍未闭环
-> 实施计划：[M0 CLI 实测](plans/2026-11-10-M0-CLI实测.md)、[M1 骨架](plans/2026-11-10-M1-骨架.md)、[M2 单 Agent 对话](plans/2026-11-10-M2-单Agent对话.md)、[M3 团队协作](plans/2026-11-11-M3-团队协作.md)、[M4 文件与动画](plans/2026-11-11-M4-文件与动画.md)（待确认）、[M5 其余适配器](plans/2026-11-11-M5-其余适配器.md)（实现完成，验收受阻，pi 待安装）
+> 版本：2026-11-11（第 4 版，按 M2 多 Agent 评审校准权限、运行契约与 M3 前置规则）· 状态：M1 已完成；M2 实现已完成，实际验收未闭环。2026-11-11 决定暂不补测剩余三项。M3 实现已落地，2026-11-11 完成九项整改（自动测试通过，真实 CLI 团队讨论仍未执行）；M5 grok、dsh 与应用统一代理已接入，窗口部分验收通过，Dsh 认证与自定义 gpt-6.1-sol 已通过真实调用及窗口验收；Grok 跨模式、pi 与团队流程仍未闭环
+> 实施计划：[M0 CLI 实测](plans/2026-11-10-M0-CLI实测.md)、[M1 骨架](plans/2026-11-10-M1-骨架.md)、[M2 单 Agent 对话](plans/2026-11-10-M2-单Agent对话.md)、[M3 团队协作](plans/2026-11-11-M3-团队协作.md)、[M3 整改](plans/2026-11-11-M3-整改.md)、[M4 文件与动画](plans/2026-11-11-M4-文件与动画.md)（待确认）、[M5 其余适配器](plans/2026-11-11-M5-其余适配器.md)（实现完成，验收受阻，pi 待安装）
 > 设计依据：[参考项目调研](参考项目调研.md)
 
 ## 1. 产品定义
@@ -507,7 +507,7 @@ agents: name_key                             -- trim().to_lowercase()，项目�
 | `rules:changed` | `{ projectId, version }` | 规章面板刷新；M3 应用内、M4 外部变化 |
 | `assistant:delta` | `{ draftId, runId, seq, text }` | 助理草稿进度，不进入项目群聊 |
 
-以上为权威事件契约，载荷一律 camelCase。`seq` 从 1 开始，在同一 run 内单调递增，终态使用最终 seq。`get_project_runtime(projectId)` 返回 `{ active: RuntimeSnapshot | null, cleanupRequired: CleanupNotice[] }`：活动快照为 `{ projectId, runId, agentId, status, seq, partialText }`，清理提示为 `{ runId, projectId: string | null, folderPath }`，也包含同目录的助理残留。`confirm_runtime_cleanup(runId)` 只在用户明确确认已处理 interrupted 进程后解除对应目录阻塞，不能操作活跃回合；此标记不是自动清理的证明。所有权/清理标记存既有 settings 表，进程启动前写入，清理完成后才清除，不要求修改 v1 schema。M3 并行讨论再把 active 扩展为快照集合。
+以上为权威事件契约，载荷一律 camelCase。`seq` 从 1 开始，在同一 run 内单调递增，终态使用最终 seq。`get_project_runtime(projectId)` 返回 `{ active: RuntimeSnapshot | null, cleanupRequired: CleanupNotice[] }`：活动快照为 `{ projectId, runId, agentId, status, seq, partialText }`，清理提示为 `{ runId, projectId: string | null, folderPath }`，也包含同目录的助理残留。`confirm_runtime_cleanup(runId)` 只在用户明确确认已处理 interrupted 进程后解除对应目录阻塞，不能操作活跃回合；此标记不是自动清理的证明。所有权/清理标记存既有 settings 表，进程启动前写入，清理完成后才清除，不要求修改 v1 schema。`active` 仍是单个快照：团队并行讨论时返回最近启动的一个，前端从 `agent:status`、`message:delta`、`run:finished` 事件维护正在运行的回合集合（`liveRuns`），界面刷新后只能恢复出一个运行中的成员，其余成员等下一次状态事件。
 
 前端先订阅，再读取历史与快照；消息按 id upsert，增量按 `runId/seq` 去重，终态后迟到片段不复活旧回合，旧 run 状态也不得覆盖新 run。
 
@@ -572,7 +572,7 @@ agents: name_key                             -- trim().to_lowercase()，项目�
 | CLI 未登录、调用失败 | 该回合失败，原始报错写入系统消息 |
 | 讨论轮中某成员失败 | 记为"未发言"，本轮照常继续 |
 | 执行中任务失败 | 任务标为 failed，本批余下的任务标为 cancelled，直接进入组长验收，由组长决定打回、重新派工或答复用户。执行回合不自动重试，因为它可能已经改了文件 |
-| 普通回合失败与自动重试 | 先按实际模式和失败类型判断，不按“是否组长”判断。仅对 Discuss、无任何工具调用、明确可重放的短暂调用失败自动重试一次；未登录、权限不符、取消、超时、协议外未知失败均不自动重试。Execute（含组长执行自己任务）不自动重试 |
+| 普通回合失败与自动重试 | 先按实际模式和失败类型判断，不按“是否组长”判断。仅对 Discuss、无任何工具调用、明确可重放的短暂调用失败自动重试一次；未登录、权限不符、取消、超时、协议外未知失败均不自动重试。Execute（含组长执行自己任务）不自动重试。**短暂失败的自动重试尚未实现**：目前没有可靠的失败分类依据；当前的自动补救只有协议纠错（组长协议出错时发回重发一次）和会话重建（启动阶段明确拒绝会话时清空会话重开一次），两者同一逻辑回合合计最多一次 |
 | 回合超时（模型空闲、工具阈值或总时长超限） | 杀进程树，run 记 timeout，任务按执行失败处理；后续完成事件不能覆盖 |
 | stdout 已关闭但进程 30 秒内不退出 | 杀进程树，按失败处理，已输出的文本保留 |
 | 实际权限回显与请求不符 | 有回显时立即失败；无回显时按适配器能力表的版本/平台行为证据处理，不能伪造已核对 |
@@ -614,6 +614,8 @@ agents: name_key                             -- trim().to_lowercase()，项目�
 M2 当前已完成实现，macOS 实际 CLI/UI 验收部分通过。2026-11-11 在 Windows 11 10.0.26300 补了 runner 进程树自动化、跨进程恢复测试，以及 Claude Code 2.1.319 同一 session 的 plan → bypassPermissions → plan 工具事实和用量。同日决定暂不补测以下三项，它们保持未验收，M2 不标为完成：macOS Finder/Dock 启动 PATH、macOS Claude Code 2.1.322 的工具层拒写、应用窗口里的异常退出和“我已处理残留进程，解除阻塞”。
 
 M3 实现已落地。同日自动测试为后端 `cargo test` 144 passed、2 ignored，前端 `npm test` 29 passed，`npm run build` 通过。真实 CLI 团队讨论未执行，因此不把手册第 11 节“正常走完讨论到交付”记为已验收。上述 M2 三项不因 M3 测试通过而改为完成。
+
+M3 整改（2026-11-11，`fix/m3-remediation`，Task 1–7 已实现）：代码审核发现九处与手册不符，已改回手册规定——游标只在回合成功时按提示词上界推进（A）、已有会话的下一回合注入修改后的人设（B）、提示词只带成员未读消息且最多 200 条（C）、组长协议出错发回重发一次（D）、讨论中失败的成员记为未发言（E）、启动阶段会话失效时重建一次（F）、被点名成员并行讨论（G）、整条指令期间一直占住项目和工作目录（H）、团队回合推送实时状态并保证终态事件（I）。自动测试：后端 `cargo test` 196 passed、2 ignored，前端 `npm test` 35 passed，Node 桥接 4 passed，`cargo build` 与 `npm run build` 通过。整改计划 Task 8 Step 2 的真实 CLI 团队讨论清单十条**均未执行（需用户在应用窗口中验收），因此仍不能写“已走完讨论到交付”**。
 
 M5 当前进度（2026-11-11）：Task 1–6、10–13 已完成。统一代理覆盖全部已接入 CLI；Dsh 可选 headless/已登录账号，直接选用 Web/headless 已配置模型。新桥接账号同会话三回合、gpt-6.1-sol 写入与续接通过；窗口设置持久化、来源切换保留模型、账号/自定义模型执行、续接、停止清理与用量入库通过。gpt-6 单次调用返回上游 PI_AI_ERROR，未回退模型。后端串行 180 passed、2 ignored，前端 33 passed，Node 桥接 4 passed，两端构建通过；原有默认并行 runner 时序限制保留。Grok 跨模式仍拒写，pi 未安装，团队完整流程及团队用量未验收；M5 未完成，M3 整改仍待定。实测详情见 [CLI 实测记录](CLI实测记录.md)，逐项结果见 [M5 Task 9–13](plans/2026-11-11-M5-其余适配器.md)。不改变 M2、M3 的未验收状态。
 
