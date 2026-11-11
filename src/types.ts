@@ -107,7 +107,11 @@ export type AgentStatus = "idle" | "thinking" | "talking" | "working" | "error";
 export interface MessageDelta { projectId: string; runId: string; seq: number; agentId: string; text: string }
 export interface MessageNew { projectId: string; runId: string | null; message: Message }
 export interface AgentStatusEvent { projectId: string; runId: string | null; agentId: string; status: AgentStatus }
-export interface RunFinished { projectId: string; runId: string; agentId: string; seq: number; status: "ok" | "failed" | "timeout" | "cancelled"; error: string | null }
+export interface RunFinished {
+  projectId: string; runId: string; agentId: string; seq: number;
+  status: "ok" | "failed" | "timeout" | "cancelled"; error: string | null;
+  replacement?: { runId: string; messageId: number };
+}
 export interface RuntimeSnapshot { projectId: string; runId: string; agentId: string; status: AgentStatus; seq: number; partialText: string }
 export interface CleanupNotice { runId: string; projectId: string | null; folderPath: string }
 export interface ProjectRuntime { active: RuntimeSnapshot | null; cleanupRequired: CleanupNotice[] }

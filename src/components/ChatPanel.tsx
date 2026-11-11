@@ -30,7 +30,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
     projectStore.getState().beginHydrate(projectId);
     const subscription = attachProjectEvents(api.listenProjectEvent, (name, payload) => {
       projectStore.getState().applyEvent(name, payload);
-      if (name === "run:finished" && payload.projectId === projectId) {
+      if (name === "run:finished" && payload.projectId === projectId && !("replacement" in payload && payload.replacement)) {
         onFinished?.();
         Promise.all([api.getProjectRuntime(projectId), api.getProject(projectId), api.listInstructions(projectId)]).then(async ([runtime, detail, found]) => {
           if (disposed || projectStore.getState().projectId !== projectId) return;

@@ -65,6 +65,28 @@ describe("运行输出归并", () => {
     state.applyEvent("agent:status", { projectId: "乙", agentId: "a", runId: "x", status: "error" });
     expect(store.getState().agentStatuses.a).toBe("working");
   });
+  it.each([false, true])("旧会话重开后，正文仍绑定同一条消息（发送响应迟到：%s）", (lateResponse) => {
+    const store = createProjectStore(); const state = store.getState();
+    state.beginHydrate("甲");
+    state.hydrate("甲", [message(7, "")], { active: null, cleanupRequired: [] });
+    if (!lateResponse) state.registerRun("甲", "旧回合", "agent-1", 7);
+    state.applyEvent("run:finished", { projectId: "甲", runId: "旧回合", agentId: "agent-1", seq: 1,
+      status: "failed", error: null, replacement: { runId: "新回合", messageId: 7 } });
+    if (lateResponse) state.registerRun("甲", "旧回合", "agent-1", 7);
+    expect(store.getState().liveRuns).toEqual(["新回合"]);
+    expect(store.getState().activeRunId).toBe("新回合");
+    expect(store.getState().agentStatuses["agent-1"]).toBe("thinking");
+    expect(store.getState().error).toBeNull();
+    state.applyEvent("message:delta", { projectId: "甲", runId: "旧回合", agentId: "agent-1", seq: 2, text: "旧正文" });
+    state.applyEvent("message:delta", { projectId: "甲", runId: "新回合", agentId: "agent-1", seq: 1, text: "新正文" });
+    expect(Object.values(store.getState().streams).filter((stream) => stream.messageId === 7))
+      .toEqual([expect.objectContaining({ runId: "新回合", text: "新正文" })]);
+    state.applyEvent("message:new", { projectId: "甲", runId: "新回合", message: message(7, "完整回复") });
+    state.applyEvent("run:finished", { projectId: "甲", runId: "新回合", agentId: "agent-1", seq: 2, status: "ok", error: null });
+    expect(store.getState().messages).toEqual([message(7, "完整回复")]);
+    expect(store.getState().streams["新回合"].final).toBe(true);
+    expect(store.getState().activeRunId).toBeNull();
+  });
   it("并行回合里一个结束时，其余还在运行就不清空运行状态", () => {
     const store = createProjectStore(); const state = store.getState();
     state.beginHydrate("甲");

@@ -7,7 +7,7 @@ export function applyDelta(current: StreamText, delta: TextDelta): StreamText {
   if (delta.projectId !== current.projectId || delta.runId !== current.runId || delta.seq <= current.seq) return current;
   return { ...current, seq: delta.seq, text: current.text + delta.text };
 }
-interface Stream extends StreamText { agentId: string; messageId: number | null; finished: boolean; final: boolean }
+interface Stream extends StreamText { agentId: string; messageId: number | null; finished: boolean; final: boolean; superseded?: boolean }
 type Buffered = { name: keyof ProjectEventMap; payload: ProjectEventMap[keyof ProjectEventMap] };
 interface ProjectState {
   projectId: string;
@@ -85,6 +85,7 @@ export function createProjectStore() {
       if (projectId !== get().projectId) return;
       set((state) => {
         const stream = state.streams[runId] ?? streamFor(projectId, runId, agentId);
+        if (stream.superseded) return {};
         const liveRuns = stream.finished ? state.liveRuns : withRun(state.liveRuns, runId);
         return { streams: { ...state.streams, [runId]: { ...stream, messageId } },
           liveRuns, activeRunId: stream.finished ? state.activeRunId : runId, hydrating: false };
@@ -131,11 +132,21 @@ export function createProjectStore() {
         const event = payload as ProjectEventMap["run:finished"];
         const previous = streams[event.runId] ?? streamFor(event.projectId, event.runId, event.agentId);
         if (previous.finished) return {};
-        streams[event.runId] = { ...previous, seq: Math.max(previous.seq, event.seq), finished: true };
+        const finished = { ...previous, seq: Math.max(previous.seq, event.seq), finished: true };
+        const remaining = state.liveRuns.filter((id) => id !== event.runId);
+        if (event.replacement) {
+          const { runId, messageId } = event.replacement;
+          const next = streams[runId] ?? streamFor(event.projectId, runId, event.agentId);
+          streams[event.runId] = { ...finished, messageId: null, superseded: true };
+          streams[runId] = { ...next, messageId };
+          const liveRuns = next.finished ? remaining : withRun(remaining, runId);
+          if (!next.finished) agentStatuses[event.agentId] = next.text ? "talking" : "thinking";
+          return { streams, agentStatuses, liveRuns, activeRunId: latestRun(liveRuns) };
+        }
+        streams[event.runId] = finished;
         agentStatuses[event.agentId] = event.status === "ok" || event.status === "cancelled" ? "idle" : "error";
-        const liveRuns = state.liveRuns.filter((id) => id !== event.runId);
-        return { streams, agentStatuses, liveRuns,
-          activeRunId: state.activeRunId === event.runId ? latestRun(liveRuns) : state.activeRunId,
+        return { streams, agentStatuses, liveRuns: remaining,
+          activeRunId: state.activeRunId === event.runId ? latestRun(remaining) : state.activeRunId,
           error: event.error ?? state.error, sending: false };
       });
     },

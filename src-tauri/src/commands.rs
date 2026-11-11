@@ -1016,8 +1016,8 @@ impl AppState {
         runtime.generations.remove(&old_id); runtime.generations.insert(run.id.clone(), 0);
         runtime.snapshots.insert(project_id.clone(), RuntimeSnapshot { project_id: project_id.clone(), run_id: run.id.clone(), agent_id: prepared.agent.id.clone(), status: "thinking".into(), seq: 0, partial_text: String::new() });
         let events = vec![("run:finished", json!({"projectId":project_id,"runId":old_id,"agentId":prepared.agent.id,
-            "seq":seq,"status":"failed","error":"旧会话不可用，已重建一次"})),
-            ("agent:status", json!({"projectId":project_id,"runId":run.id,"agentId":prepared.agent.id,"status":"thinking"}))];
+            "seq":seq,"status":"failed","error":null,
+            "replacement":{"runId":run.id,"messageId":started.agent_message_id}}))];
         started.run_id = run.id; started.prepared = prepared; started.request = request; started.baseline = None;
         Ok(events)
     }

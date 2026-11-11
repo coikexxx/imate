@@ -14,7 +14,7 @@ imates 是一个 Tauri 2 桌面应用，让一个人像管理团队一样管理�
 | `docs/plans/2026-11-10-M0-CLI实测.md` | M0 的逐步计划 | 执行 M0 时 |
 | `docs/plans/2026-11-10-M1-骨架.md` | M1 的逐步计划 | 执行 M1 时 |
 | `docs/plans/2026-11-10-M2-单Agent对话.md` | M2 的逐步计划 | 执行 M2 时 |
-| `docs/plans/2026-11-11-M3-团队协作.md` | M3 的逐步计划 | 执行 M3 时。实现已落地，真实 CLI 团队讨论未执行 |
+| `docs/plans/2026-11-11-M3-团队协作.md` | M3 的逐步计划 | 执行 M3 时。实现已落地，真实 CLI 团队已走完讨论到交付 |
 | `docs/plans/2026-11-11-M3-整改.md` | M3 九处与手册不符之处的整改计划 | 执行 M3 整改时。Task 1–7 已实现（`fix/m3-remediation`），Task 8 清单的真实 CLI 验收待用户执行；是 M4 的前置 |
 | `docs/plans/2026-11-11-M4-文件与动画.md` | M4 的逐步计划 | 执行 M4 时。Task 1–9 已实现，14 条窗口验收待用户执行 |
 | `docs/plans/2026-11-11-M5-其余适配器.md` | M5 的逐步计划 | 统一代理与 Dsh 认证/已配置模型选择已实现并通过 Task 13 实测；Grok 跨模式、pi 和团队流程仍未闭环 |
@@ -29,8 +29,8 @@ imates 是一个 Tauri 2 桌面应用，让一个人像管理团队一样管理�
 | M0 CLI 实测 | 已有 | 已完成（pi 顺延 M5） |
 | M1 骨架 | 已有 | 已完成（窗口验收已通过） |
 | M2 单 Agent 对话 | 已实现，验收未闭环 | Task 1–10 已完成。2026-11-11 用户决定暂不补测，保持未验收：macOS Claude 2.1.322 工具层拒写、Finder/Dock PATH、应用窗口里的异常退出与“我已处理残留进程”点击。Windows runner、Claude 2.1.319 跨模式工具事实与用量、跨进程恢复已记录 |
-| M3 团队协作 | 已有 | Task 1–9 已实现。2026-11-11 自动测试通过：后端 `cargo test` 144 passed、2 ignored，前端 `npm test` 29 passed，`npm run build` 通过。真实 CLI 团队讨论未执行。不因此把 M2 三项未验收改成完成 |
-| M3 整改 | 已有 | 2026-11-11 在 `fix/m3-remediation` 完成 Task 1–7：游标与人设、未读消息、协议纠错、未发言、会话重建、并行讨论与整段预留、实时状态与终态事件、前端 `liveRuns`。自动测试：后端 `cargo test` 196 passed、2 ignored，前端 `npm test` 35 passed，Node 桥接 4 passed，两端构建通过。Task 8 Step 2 的真实 CLI 团队讨论十条清单未执行，需用户在应用窗口验收；未验收前不把 M3「正常走完讨论到交付」记为通过，M4 可在整改合并后开工 |
+| M3 团队协作 | 已有 | Task 1–9 已实现。2026-11-11 自动测试通过：后端 `cargo test` 144 passed、2 ignored，前端 `npm test` 29 passed，`npm run build` 通过。真实 CLI 团队已走完讨论到交付。M2 三项仍未验收 |
+| M3 整改 | 已有 | 2026-11-11 在 `fix/m3-remediation` 完成 Task 1–7：游标与人设、未读消息、协议纠错、未发言、会话重建、并行讨论与整段预留、实时状态与终态事件、前端 `liveRuns`。自动测试：后端 `cargo test` 196 passed、2 ignored，前端 `npm test` 35 passed，Node 桥接 4 passed，两端构建通过。Task 8 Step 2 第 1–9 条通过，第 10 条协议纠错未触发。2026-11-12 补测未读游标与 Codex 会话重建，修复了重开后正文需刷新才能显示的问题 |
 | M4 文件与动画 | 已有 | 2026-11-11 在 `feat/m4-files-office` 实现 Task 1–9：文件树、notify 监听、外部规章变更通知、像素办公室。自动测试：后端 `cargo test` 207 passed、2 ignored，前端 `npm test` 49 passed，两端构建通过。窗口验收 14 条未执行，需用户验收；未验收前不标为完成 |
 | M5 其余适配器 | 已实现 grok/dsh、代理与 Dsh 模型设置，验收未闭环 | Task 1–6、10–13 已完成。统一代理覆盖全部已接入 CLI；Dsh 可选 headless/已登录账号，直接选用 Web/headless 已配置模型。新桥接账号同会话三回合、gpt-6.1-sol 写入与续接通过；窗口设置持久化、来源切换保留模型、账号/自定义模型执行、续接、停止清理与用量入库通过。gpt-6 单次调用返回上游 PI_AI_ERROR，未回退模型。后端串行 180 passed、2 ignored，前端 33 passed，Node 桥接 4 passed，两端构建通过；原有默认并行 runner 时序限制保留。Grok 跨模式仍拒写，pi 未安装，团队完整流程及团队用量未验收；M5 未完成，M3 整改仍待定 |
 | M6 打磨打包 | 未写 | 依赖 M3 |
