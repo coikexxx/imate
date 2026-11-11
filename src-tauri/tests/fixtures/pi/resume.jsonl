@@ -1,0 +1,6 @@
+{"type":"session","id":"01a1cb9b-89c8-742b-ae8f-fc018d2272b6","version":3,"cwd":"<PROJECT>"}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"hello"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":".txt"}}
+{"type":"turn_end","message":{"role":"assistant","stopReason":"stop","usage":{"input":76,"output":3,"cacheRead":1152,"cacheWrite":0,"reasoning":0,"totalTokens":1231,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0,"totalFromProvider":false}},"content":[{"type":"text","text":"hello.txt"}]}}
+{"type":"agent_end","willRetry":false}
+{"type":"agent_settled","aborted":false}

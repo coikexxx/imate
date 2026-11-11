@@ -1,0 +1,12 @@
+{"type":"session","id":"01a1cb9b-89c8-742b-ae8f-fc018d2272b6","version":3,"cwd":"<PROJECT>"}
+{"type":"tool_execution_start","toolCallId":"call_00_cpZplfhE5cPVZJ2zexoS2185","toolName":"write","args":{"path":"hello.txt","content":"PI-EXECUTE-FIXTURE-OK"}}
+{"type":"tool_execution_end","toolCallId":"call_00_cpZplfhE5cPVZJ2zexoS2185","toolName":"write","durationMs":3,"isError":false}
+{"type":"turn_end","message":{"role":"assistant","stopReason":"toolUse","usage":{"input":1111,"output":98,"cacheRead":0,"cacheWrite":0,"reasoning":28,"totalTokens":1209,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0,"totalFromProvider":false}},"content":[{"type":"toolCall","id":"call_00_cpZplfhE5cPVZJ2zexoS2185","name":"write"}]}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Created"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" file"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":":"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":" hello"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":".txt"}}
+{"type":"turn_end","message":{"role":"assistant","stopReason":"stop","usage":{"input":176,"output":6,"cacheRead":1024,"cacheWrite":0,"reasoning":0,"totalTokens":1206,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0,"totalFromProvider":false}},"content":[{"type":"text","text":"Created file: hello.txt"}]}}
+{"type":"agent_end","willRetry":false}
+{"type":"agent_settled","aborted":false}

@@ -1,0 +1,17 @@
+{"type":"session","id":"01a1cb9b-6ed4-73a5-a01a-6dafe884a80e","version":3,"cwd":"<PROJECT>"}
+{"type":"tool_execution_start","toolCallId":"call_00_ET_F4TJb6cuAs17IfsyML5v9050","toolName":"read","args":{"path":"readme.txt"}}
+{"type":"tool_execution_end","toolCallId":"call_00_ET_F4TJb6cuAs17IfsyML5v9050","toolName":"read","durationMs":5,"isError":false}
+{"type":"turn_end","message":{"role":"assistant","stopReason":"toolUse","usage":{"input":975,"output":45,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":1020,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0,"totalFromProvider":false}},"content":[{"type":"toolCall","id":"call_00_ET_F4TJb6cuAs17IfsyML5v9050","name":"read"}]}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"PI"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"-D"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"ISC"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"USS"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"-F"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"IX"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"T"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"URE"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"-"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"OK"}}
+{"type":"turn_end","message":{"role":"assistant","stopReason":"stop","usage":{"input":148,"output":11,"cacheRead":896,"cacheWrite":0,"reasoning":0,"totalTokens":1055,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0,"totalFromProvider":false}},"content":[{"type":"text","text":"PI-DISCUSS-FIXTURE-OK"}]}}
+{"type":"agent_end","willRetry":false}
+{"type":"agent_settled","aborted":false}

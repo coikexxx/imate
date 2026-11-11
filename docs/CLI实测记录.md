@@ -450,3 +450,18 @@ Windows Dsh 0.2.2-rc.1；真实调用均在仓库外临时目录，应用使用�
 **停止与清理：** 自定义模型再次启动后实际点击停止；本次运行 cancelled，指令进入 waiting_user；本次 Dsh 进程退出，应用创建的 mjs/json 辅助文件删除，已有文件不变。随后放弃这条测试指令，项目恢复 idle。成功结束和上游失败的临时桥接文件也已清理。测试窗口正常关闭；原 Dsh Web 仍监听本机 3080，未关闭用户进程。最终应用认证为 account，目录来源为 web，网络代理为 system；验收成员保留已选择的自定义模型。
 
 Task 9 清单 1–5、8 已通过；其中旧第 2 项的“禁用模型框”已由用户新规格替代并重验。第 7 项 Grok/Dsh 直接回合停止通过，团队停止未验收。第 6/10 项团队完整流程/团队用量、第 9 可选项仍未验收；Grok 同 session 跨模式拒写、Pi 未安装保持原状，M5 不标完成。M2/M3 的未验收与 M3 整改状态不变。原始输出、截图和数据库摘要只留仓库外临时目录。
+
+## M5 pi 采样（macOS arm64，2026-11-12）
+
+本机 `pi 1.5.1` 已安装并能使用现有配置完成请求。四种样本都在仓库外的独立临时目录采集，启动时使用 `--mode json`，提示词经 stdin，`--session-dir` 指向该临时目录。为隔离这组样本，未加载扩展、MCP 和技能。
+
+| 场景 | 实际结果 |
+|---|---|
+| 讨论 | 仅开放 `read`，真实调用一次并回复文本标记，退出 0 |
+| 执行 | 开放 `read,write`，真实创建 `hello.txt` 并确认正文，退出 0 |
+| 续接 | `--session <id>`，同 ID、不调用工具，正确回答 `hello.txt`，退出 0 |
+| 启动错误 | 不存在的 ID 导致退出 1，无 stdout JSON，stderr 为 `No session found matching '<id>'` |
+
+流式正文在 `message_update.assistantMessageEvent` 的 `text_delta` 中。工具以 `tool_execution_start/end` 配对；同一用户回合可有多个 `turn_end`，按其 assistant 消息归集用量，不再重复读取 `message_end` 和 `agent_end.messages`。例如讨论样本第二子轮 `input=148`、`cacheRead=896`、`output=11`、`totalTokens=1055`；缓存和非缓存输入分开，`totalFromProvider=false` 的零费用不当成真实零。最后出现 `agent_end` 和 `agent_settled`。本轮样本没有验证跨模式、Windows 或操作系统级文件隔离。
+
+脱敏事件见 `src-tauri/tests/fixtures/pi/`，接线方案与验收见 M5 Task 8。
