@@ -11,7 +11,7 @@
 |---|---|---|---|
 | Windows / claude 2.1.319 | init 回显模式、同模式续接；M0 的 plan 拒绝项目文件但写入计划目录；2026-11-11 的跨模式 Write 工具层拒绝与成功写入，以及 `result.usage` / 费用语义 | 应用内 Discuss 走查 | 部分通过 |
 | Windows / codex 0.167.0 | 新线程 read-only/workspace-write 行为、续接记忆；thread.started 不回显权限 | G1 resume 权限覆盖及 Discuss → Execute → Discuss；G2 累计/本回合语义；非 git cwd；新 runner 清理 | 未验证 |
-| Windows / grok 1.0.77、dsh 0.2.2-rc.1 | 下文已有场景；grok 回显模式，dsh 不回显 | M5 跨模式续接、用量归一、应用 current_dir 与进程行为 | 未验证 |
+| Windows / grok 1.0.77、dsh 0.2.2-rc.1 | M0 场景；M5 适配器与测试已落地，dsh 首回合 cwd 正确 | 跨模式续接、追加用量对照及应用窗口验收；grok 联网超时，dsh QUOTA / 402 | M5 验收受阻 |
 | macOS / Claude Code 2.1.322、Codex 0.167.0 | G1/G2 CLI 基线；G3 Claude 模式回显和续接；M2 应用对话、点名、停止与草稿保存见后文 | Claude 工具层拒写；Finder/Dock PATH；异常退出后的实际恢复 | 部分通过 |
 | pi | M0 未安装 | M5 安装登录后重新实测 | 未执行 |
 
@@ -290,3 +290,37 @@ Windows 用例覆盖了关闭 stdout 后的 EOF 宽限、父进程先退出并�
 - macOS Finder 或 Dock 脱离开发终端后的 PATH。
 - macOS Claude 2.1.322 的工具层拒写。
 - 应用窗口内的异常退出，以及“我已处理残留进程，解除阻塞”的点击。macOS 上已经走过的对话、点名、停止和草稿不在这项里。后端跨进程恢复测试已经通过，它不代替这次窗口点击。
+
+## M5 实测（Windows，2026-11-11）
+
+环境：Windows 11 10.0.26300；grok 1.0.77（50ca579fa996）、dsh 0.2.2-rc.1，与 M0 样本版本一致。所有调用都在仓库外新建的非 git 临时目录中执行，不传 `--cwd`。grok 直接启动 `grok.exe`，使用 `--prompt-file`；dsh 将本机 `dsh.cmd` 已核对的一行启动器解析为绝对 `node.exe` 和入口脚本，通过参数数组直接启动，提示词经 stdin。本次没有经过 `cmd.exe`，核对的是应用的实际启动方式。
+
+### G4 grok：网络阻塞，未完成
+
+首回合命令为 `grok --prompt-file <提示词文件> --output-format streaming-messages-json --permission-mode plan`，工作目录由子进程 cwd 指定。要求实际调用写工具创建 `blocked-first.txt`。180 秒内 stdout 为 0 字节，没有收到 init、工具或完成事件；stderr 为 6,000 字节，包含 11 次 `error sending request for url`、5 次 `model catalog fetch timed out` 和 3 次 `Settings fetch failed`。超时后通过 PID 终止本次测试进程树并等待退出，没有触碰其他 Grok 会话。
+
+| 回合 | 结果 | 会话、工具与文件事实 |
+|---|---|---|
+| 1，plan | 测试在 180 秒终止；不是正常 CLI 完成退出 | 未获得 session、cwd 或权限回显，无工具事件，`blocked-first.txt` 不存在 |
+| 2，bypassPermissions 续接 | 未执行 | 无可续接的首回合，未创建 `created.txt` |
+| 3，plan 续接 | 未执行 | 跨模式切回及工具层拒写未验证 |
+
+不能以文件不存在认定只读生效：本次根本没有进入可观测的模型回合。需恢复 Grok 网络访问后重新执行 G4。
+
+### G5 dsh：余额不足，未完成
+
+首回合命令为 `dsh headless --json --permission-mode read-only --approval-policy never -`，使用上文解析后的真实入口启动。20.39 秒后退出码为 1。session 事件的 cwd 与临时项目目录一致，session ID 为 `session-99adadb5-f0f6-475c-9039-f00ed53d6496`；无权限回显。没有工具调用。最终 `reason.kind=error`、`error.code=QUOTA`、`error.status=402`，错误正文为 `Insufficient Balance`。未修改任何测试目标文件。
+
+| 回合 | 结果 | 会话、工具与文件事实 |
+|---|---|---|
+| 1，read-only | QUOTA / 402 / Insufficient Balance | cwd 正确；无 write 调用；`blocked-first.txt` 不存在，不能据此验收只读拒写 |
+| 2，workspace-write 续接 | 未执行 | 按计划遇到充值阻塞即停止 |
+| 3，read-only 续接 | 未执行 | 跨模式切回及工具层拒写未验证 |
+
+唯一 step_end 没有 usage，final 的键为 type、sessionId、reason、text。这里不能归一为 0 token，也没有可用的本回合/累计对照。需充值后重新执行 G5。
+
+### 已确认与保留项
+
+两个适配器的解析与用量规则以同版本的 M0 真实样本及测试为依据，本次失败没有产生与该证据矛盾的用量读数；没有据此编造新的归一语义。G4/G5 跨模式验收、成功回合用量追加对照、应用窗口走查均未完成，macOS 未验证。pi 未安装，未录制样本或编写适配器。
+
+本次原始输出仅保存在仓库之外的临时目录，未入库；记录中的路径与请求标识已省略。网络恢复、余额补足后按 M5 Task 7 重跑，不将这次失败记为通过。

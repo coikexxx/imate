@@ -159,8 +159,8 @@ pub trait CliAdapter: Send + Sync {
 |---|---|---|---|---|---|---|
 | claude | `claude -p`，提示词经 stdin | `--output-format stream-json --verbose`，本次没有 token 增量 | `--resume <session_id>`，ID 不变 | `--permission-mode plan`（拦住工作目录里的写，但会写自己的计划目录） | `--permission-mode bypassPermissions`（能写到工作目录外） | Windows 2.1.319 |
 | codex | `codex exec --json -`，提示词经 stdin | `--json`，整段 `agent_message`，没有 token 增量 | `codex exec resume <thread_id> --json -`（不能加 `-s`，权限覆盖待 G1） | `-s read-only` | `-s workspace-write`（Windows 样本可写到工作目录外） | M0 样本 0.167.0 |
-| grok | `grok --prompt-file <文件>` | `--output-format streaming-messages-json`，整段消息。要逐字增量改用 `streaming-json` | `-r <session_id>`，ID 不变 | `--permission-mode plan`（拦住工作目录里的写，但会写自己的会话目录） | `--permission-mode bypassPermissions`（能写到工作目录外） | M0 样本 1.0.77 |
-| dsh | `dsh headless -`，提示词经 stdin；runner 设置 current_dir，M0 人工调用在 Git Bash 用 `cmd //c` | `--json`，整段 `text`，另有 `thinking`。用量在 `step_end.usage`（camelCase） | `--session-id <id>`，ID 不变，`turn` 递增 | `--permission-mode read-only --approval-policy never`（沙箱拒绝写入） | `--permission-mode workspace-write --approval-policy never`（能写到工作目录外） | Windows 0.2.2-rc.1，仅 `.cmd` 垫片 |
+| grok | `grok --prompt-file <文件>` | `--output-format streaming-messages-json`，整段消息。要逐字增量改用 `streaming-json` | `-r <session_id>`，ID 不变 | `--permission-mode plan`（拦住工作目录里的写，但会写自己的会话目录） | `--permission-mode bypassPermissions`（能写到工作目录外） | Windows 1.0.77；M5 追加实测因网络超时未完成 |
+| dsh | `dsh headless -`，提示词经 stdin；runner 设置 current_dir，M0 人工调用在 Git Bash 用 `cmd //c` | `--json`，整段 `text`，另有 `thinking`。用量在 `step_end.usage`（camelCase） | `--session-id <id>`，ID 不变，`turn` 递增 | `--permission-mode read-only --approval-policy never`（沙箱拒绝写入） | `--permission-mode workspace-write --approval-policy never`（能写到工作目录外） | Windows 0.2.2-rc.1；M5 首回合 cwd 正确，余额不足未完成 |
 | pi | 实测 | 实测 | 实测 | 实测 | 实测 | 未安装，M5 前需先装 |
 
 某个 CLI 没有强制只读模式时的兜底：仍按其实际能力运行，并在提示词里明确要求"本回合只讨论，不要修改任何文件"；界面标为讨论意图，不承诺文件绝对不变。claude 和 grok 的 `plan` 会写各自的计划/会话目录，提示词兜底仍然要留。dsh 没有 `--model`，模型在 profile 配置里，`agents.model` 对它不起作用。
@@ -175,13 +175,13 @@ M0 确认：claude 的 `bypassPermissions`、codex 的 `workspace-write`、grok 
 |---|---|---|---|---|
 | claude | `system/init.permissionMode` 可核对。Windows 2.1.319 在 2026-11-11 有工具层拒写：plan 下 Write 被拒绝且目标文件不存在，bypassPermissions 下 Write 成功。M0 另有写入计划目录的样本。macOS 2.1.322 仍无工具层证据。以上都不等于硬隔离 | Windows 2.1.319 同一 session 的 plan → bypassPermissions → plan 已核对模式、续接和文件事实。macOS 2.1.322 只核对了模式回显和续接，该次 plan 请求没有触发写工具 | macOS G3 与 Windows 2.1.319 都对照了 `result.usage` 与 `model_usage_since_last_result`；后者的 `costUSD` 是本回合费用，`total_cost_usd` 为会话累计；不重复累加 assistant usage | M2 |
 | codex | `thread.started` 无权限字段；Windows M0 有新会话样本，macOS 0.167.0 G1 已有工具和文件事实 | macOS 同模式续接与 Discuss → Execute → Discuss 已通过 G1；结果不外推其他版本/平台 | macOS G2 已证实 `turn.completed.usage` 为线程累计，同会话按可靠基线取差；缓存输入不重复计入 input | M2 |
-| grok | `system/init.permissionMode` 可核对；讨论模式仍写自己的会话目录 | 同模式续接已验证，跨模式切换未验证 | 存在 `result.usage`，本回合/累计语义待 M5 对照 | M5 |
-| dsh | `session` 不回显权限；Windows 沙箱行为已有样本 | 续接可传权限参数，但跨模式切换未验证 | 按 `step_end.usage` 的步级计数归集；必须验证不重复纳入 `final` 或累计字段 | M5 |
+| grok | `system/init.permissionMode` 可核对；讨论模式仍写自己的会话目录 | M0 同模式续接已有证据；2026-11-11 M5 首回合因联网超时终止，跨模式切换未验证；macOS 未验证 | M0 同会话 execute → resume 的输入与费用下降，按本回合计；M5 追加对照未完成，保留原样本依据 | M5 已接入，真实 CLI 验收受阻 |
+| dsh | `session` 不回显权限；Windows M0 沙箱行为已有样本；M5 首回合 cwd 与进程目录一致 | M0 同模式续接已有证据；2026-11-11 M5 首回合返回 QUOTA / 402，跨模式未验证；macOS 未验证 | 按 M0 `step_end.usage` 逐步归集，`final` 不含 usage；M5 因余额不足未产生可归一用量，追加验证未完成 | M5 已接入，真实 CLI 验收受阻 |
 | pi | 未安装、无样本 | 未验证 | 未验证 | M5 |
 
 有权限回显时必须核对，回显不符立即失败；没有回显时只能报告“此版本/平台行为已验证”或“未验证”。G1 至少覆盖同模式续接和同一会话的 `Discuss → Execute → Discuss`，以工具确实尝试写入、工具结果及文件状态共同判定，不能仅凭模型声称遵守只读。跨模式不通过时，不能用单个 `session_id` 承载混合模式；适配器保持该能力阻塞，回填分模式会话或重建会话方案及测试后再启用。
 
-`CliInfo` 至少包含 `id / label / installed / supported / path / version`。`installed` 不证明已登录或可运行；M2 仅 claude/codex 的 `supported` 为真，G1/G3 未通过的能力仍不得宣称已验收。用户自定义 CLI 配置仍是后续需求。
+`CliInfo` 至少包含 `id / label / installed / supported / path / version`。`installed` 不证明已登录或可运行；M2 仅 claude/codex 的 `supported` 为真；M5 已加入 grok/dsh，pi 仍为假。G1/G3 未通过的能力仍不得宣称已验收。用户自定义 CLI 配置仍是后续需求。
 
 ### 平台与配置继承
 
