@@ -613,7 +613,7 @@ M2 当前已完成实现，macOS 实际 CLI/UI 验收部分通过。2026-11-11 �
 
 M3 实现已落地。同日自动测试为后端 `cargo test` 144 passed、2 ignored，前端 `npm test` 29 passed，`npm run build` 通过。真实 CLI 团队讨论未执行，因此不把手册第 11 节“正常走完讨论到交付”记为已验收。上述 M2 三项不因 M3 测试通过而改为完成。
 
-M5 当前进度（2026-11-11）：Task 1–6 已完成，grok、dsh 已接入成员与助理，团队回合保存用量。2026-11-11 后端 162 passed、2 ignored，前端 32 passed，cargo build 与 npm run build 通过。Task 7 真实验收受阻：grok 网络超时，dsh QUOTA / 402 余额不足；窗口验收未执行。pi 未安装，Task 8 未执行。M5 未完成验收，M3 整改仍待定。实测详情见 [CLI 实测记录](CLI实测记录.md)，剩余窗口清单见 [M5 Task 9](plans/2026-11-11-M5-其余适配器.md)。本次未执行任何窗口验收条目，也不改变 M2、M3 的未验收状态。
+M5 当前进度（2026-11-11）：Task 1–6 已完成，grok、dsh 已接入成员与助理，团队回合保存用量。2026-11-11 后端 162 passed、2 ignored，前端 32 passed，cargo build 与 npm run build 通过。Task 7 真实验收受阻：grok 网络超时，dsh QUOTA / 402 余额不足；窗口清单 1–3 通过、7/8 部分通过，完整协作及用量未验收。pi 未安装，Task 8 未执行。M5 未完成验收，用户要求增加 Grok 本机代理配置，M3 整改仍待定。实测详情见 [CLI 实测记录](CLI实测记录.md)，剩余窗口清单见 [M5 Task 9](plans/2026-11-11-M5-其余适配器.md)。窗口的实际操作及证据见 M5 Task 9，不改变 M2、M3 的未验收状态。
 
 依赖关系：M0 与 M1 互不依赖，可以并行；M2 同时依赖 M0 和 M1；M2 → M3 必须按序。M4 的文件树只依赖 M1，像素办公室依赖 M2 的状态事件；M5 依赖 M2。M4 和 M5 可以在 M3 之后以任意顺序进行。
 
