@@ -28,6 +28,8 @@ pub struct AppState {
     pub runtime: Mutex<ActiveRuns>,
     pub draft_sessions: Mutex<crate::assistant::DraftSessions>,
     pub data_dir: PathBuf,
+    pub watch: crate::fs_watch::WatchHub,
+    rules_guard: Mutex<()>,
     instance: String,
 }
 
@@ -204,7 +206,7 @@ pub fn save_rule(
     filename: String,
     content: String,
 ) -> AppResult<()> {
-    state.save_rule_for_project(&project_id, &filename, &content)
+    state.save_rule_for_project(&project_id, &filename, &content).map(|_| ())
 }
 
 #[tauri::command]
@@ -213,7 +215,7 @@ pub fn delete_rule(
     project_id: String,
     filename: String,
 ) -> AppResult<()> {
-    state.delete_rule_for_project(&project_id, &filename)
+    state.delete_rule_for_project(&project_id, &filename).map(|_| ())
 }
 
 #[tauri::command]
@@ -390,6 +392,21 @@ pub fn remove_owner(conn: &Connection, run_id: &str) -> AppResult<()> {
     conn.execute("DELETE FROM settings WHERE key=?1", [format!("{OWNER_PREFIX}{run_id}")])?;
     Ok(())
 }
+const RULES_DIGEST_PREFIX: &str = "rules_digest:";
+fn load_rule_digest(conn: &Connection, project_id: &str) -> AppResult<Option<std::collections::BTreeMap<String, String>>> {
+    use rusqlite::OptionalExtension;
+    let value: Option<String> = conn
+        .query_row("SELECT value FROM settings WHERE key=?1", [format!("{RULES_DIGEST_PREFIX}{project_id}")], |row| row.get(0))
+        .optional()?;
+    // 记录损坏时当作没有基线，下一次只重新记录，不误报。
+    Ok(value.and_then(|text| serde_json::from_str(&text).ok()))
+}
+fn save_rule_digest(conn: &Connection, project_id: &str, digest: &std::collections::BTreeMap<String, String>) -> AppResult<()> {
+    let value = serde_json::to_string(digest).map_err(|e| AppError::Invalid(format!("规章摘要序列化失败：{e}")))?;
+    conn.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        rusqlite::params![format!("{RULES_DIGEST_PREFIX}{project_id}"), value])?;
+    Ok(())
+}
 
 #[derive(Default)]
 pub struct ActiveRuns {
@@ -499,7 +516,8 @@ pub struct SendMessageResponse { pub run_id: String, pub user_message: Message, 
 impl AppState {
     pub fn new(conn: Connection, data_dir: PathBuf) -> AppResult<Self> {
         let state = Self { db: Mutex::new(conn), runtime: Mutex::new(ActiveRuns::default()),
-            draft_sessions: Mutex::new(crate::assistant::DraftSessions::default()), data_dir, instance: crate::store::new_id() };
+            draft_sessions: Mutex::new(crate::assistant::DraftSessions::default()), data_dir,
+            watch: crate::fs_watch::WatchHub::default(), rules_guard: Mutex::new(()), instance: crate::store::new_id() };
         state.recover()?; Ok(state)
     }
     pub fn db_lock(&self) -> AppResult<MutexGuard<'_, Connection>> {
@@ -508,7 +526,13 @@ impl AppState {
     pub fn runtime_lock(&self) -> AppResult<MutexGuard<'_, ActiveRuns>> {
         self.runtime.lock().map_err(|_| AppError::Invalid("运行状态不可用，请重启应用".into()))
     }
-    pub fn save_rule_for_project(&self, project_id: &str, filename: &str, content: &str) -> AppResult<()> {
+    fn rules_lock(&self) -> AppResult<MutexGuard<'_, ()>> {
+        self.rules_guard.lock().map_err(|_| AppError::Invalid("规章状态不可用，请重启应用".into()))
+    }
+
+    pub fn save_rule_for_project(&self, project_id: &str, filename: &str, content: &str) -> AppResult<Message> {
+        // 写文件、写通知、记摘要在同一把锁里，监听回调不会在中间插进来重复通知。
+        let _guard = self.rules_lock()?;
         let folder = {
             let conn = self.db_lock()?;
             projects::get(&conn, project_id)?.folder_path
@@ -521,7 +545,8 @@ impl AppState {
         self.record_rule_notice(project_id, path, operation, filename, Some(content))
     }
 
-    pub fn delete_rule_for_project(&self, project_id: &str, filename: &str) -> AppResult<()> {
+    pub fn delete_rule_for_project(&self, project_id: &str, filename: &str) -> AppResult<Message> {
+        let _guard = self.rules_lock()?;
         let folder = {
             let conn = self.db_lock()?;
             projects::get(&conn, project_id)?.folder_path
@@ -532,12 +557,51 @@ impl AppState {
         self.record_rule_notice(project_id, path, "删除", filename, None)
     }
 
-    fn record_rule_notice(&self, project_id: &str, folder: &Path, operation: &str, filename: &str, content: Option<&str>) -> AppResult<()> {
+    fn record_rule_notice(&self, project_id: &str, folder: &Path, operation: &str, filename: &str, content: Option<&str>) -> AppResult<Message> {
         let current = rules::list(folder)?;
         let notice = rules::change_notice(operation, filename, content, &current);
         let conn = self.db_lock()?;
-        messages::insert(&conn, project_id, "system", None, "system", &notice)?;
-        Ok(())
+        let tx = conn.unchecked_transaction()?;
+        let message = messages::insert(&tx, project_id, "system", None, "system", &notice)?;
+        save_rule_digest(&tx, project_id, &rules::digest_map(&current))?;
+        tx.commit()?;
+        Ok(message)
+    }
+
+    /// 比对磁盘上的规章和上次记录的摘要。有外部变化时写一条系统消息并返回它。
+    pub fn sync_rules(&self, project_id: &str) -> AppResult<Option<(Message, String)>> {
+        let _guard = self.rules_lock()?;
+        let folder = {
+            let conn = self.db_lock()?;
+            projects::get(&conn, project_id)?.folder_path
+        };
+        // 项目文件夹整个不在时由项目页提示重新选择，不当成规章被清空。
+        if !Path::new(&folder).is_dir() {
+            return Ok(None);
+        }
+        let current = rules::list(Path::new(&folder))?;
+        let digest = rules::digest_map(&current);
+        let conn = self.db_lock()?;
+        let Some(previous) = load_rule_digest(&conn, project_id)? else {
+            save_rule_digest(&conn, project_id, &digest)?;
+            return Ok(None);
+        };
+        let Some(notice) = rules::external_change_notice(&previous, &current) else {
+            return Ok(None);
+        };
+        let tx = conn.unchecked_transaction()?;
+        let message = messages::insert(&tx, project_id, "system", None, "system", &notice)?;
+        save_rule_digest(&tx, project_id, &digest)?;
+        tx.commit()?;
+        Ok(Some((message, rules::fingerprint(&current))))
+    }
+
+    pub fn rules_version(&self, project_id: &str) -> AppResult<String> {
+        let folder = {
+            let conn = self.db_lock()?;
+            projects::get(&conn, project_id)?.folder_path
+        };
+        Ok(rules::fingerprint(&rules::list(Path::new(&folder))?))
     }
 
     fn recover(&self) -> AppResult<()> {
@@ -1785,4 +1849,47 @@ mod integration_tests {
         assert!(super::make_adapter(&resolved("pi"), RunMode::Discuss, None).is_err());
     }
 
+    #[test]
+    fn external_rule_edits_write_one_notice_and_app_saves_are_not_repeated() {
+        let (state, folder, first, _second, _cli) = setup();
+        let dir = rules::rules_dir(folder.path());
+        assert!(state.sync_rules(&first).unwrap().is_none(), "首次只记录基线");
+        let saved = state.save_rule_for_project(&first, "协作规范.md", "甲").unwrap();
+        assert!(saved.content.contains("操作：新增"));
+        assert!(state.sync_rules(&first).unwrap().is_none(), "应用内保存已经通知过，不重复");
+
+        std::fs::write(dir.join("协作规范.md"), "乙").unwrap();
+        std::fs::write(dir.join("开发规范.md"), "开发").unwrap();
+        let (message, version) = state.sync_rules(&first).unwrap().unwrap();
+        assert_eq!(message.sender_type, "system");
+        assert_eq!(message.kind, "system");
+        assert!(message.content.contains("操作：外部修改"));
+        assert!(message.content.contains("替换：协作规范.md"));
+        assert!(message.content.contains("新增：开发规范.md"));
+        assert!(message.content.contains("协作规范.md 全文：\n乙"));
+        assert_eq!(version, state.rules_version(&first).unwrap());
+        assert!(state.sync_rules(&first).unwrap().is_none(), "同一变化只通知一次");
+
+        std::fs::remove_file(dir.join("协作规范.md")).unwrap();
+        std::fs::remove_file(dir.join("开发规范.md")).unwrap();
+        let (cleared, version) = state.sync_rules(&first).unwrap().unwrap();
+        assert!(cleared.content.contains("旧规章全部失效，当前暂无规章"));
+        assert_eq!(version, "none");
+
+        let deleted = {
+            state.save_rule_for_project(&first, "写作规范.md", "写作").unwrap();
+            state.delete_rule_for_project(&first, "写作规范.md").unwrap()
+        };
+        assert!(deleted.content.contains("操作：删除"));
+        assert!(state.sync_rules(&first).unwrap().is_none());
+    }
+
+    #[test]
+    fn missing_project_folder_is_not_reported_as_cleared_rules() {
+        let (state, folder, first, _second, _cli) = setup();
+        state.save_rule_for_project(&first, "协作规范.md", "甲").unwrap();
+        let gone = folder.path().join("已移走");
+        projects::update(&state.db_lock().unwrap(), &first, "甲", "", gone.to_str().unwrap()).unwrap();
+        assert!(state.sync_rules(&first).unwrap().is_none());
+    }
 }

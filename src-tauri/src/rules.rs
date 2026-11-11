@@ -101,6 +101,69 @@ pub fn change_notice(operation: &str, filename: &str, content: Option<&str>, cur
     notice
 }
 
+/// 64 位 FNV-1a。只用来判断规章内容是否变化，不用于安全目的。
+pub fn fnv1a(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// 用有序的文件名和全文算出的规章版本。没有规章时为 `none`。
+pub fn fingerprint(rules: &[RuleDoc]) -> String {
+    if rules.is_empty() {
+        return "none".to_string();
+    }
+    let mut text = String::new();
+    for rule in rules {
+        text.push_str(&rule.filename);
+        text.push('\0');
+        text.push_str(&rule.content);
+        text.push('\0');
+    }
+    fnv1a(&text)
+}
+
+/// 文件名到正文摘要。用来比较两次读取之间哪些规章变了。
+pub fn digest_map(rules: &[RuleDoc]) -> std::collections::BTreeMap<String, String> {
+    rules.iter().map(|rule| (rule.filename.clone(), fnv1a(&rule.content))).collect()
+}
+
+/// 应用之外修改规章后给现有会话看的通知。没有变化时返回 None。
+/// 监听只能证明文件变了，这里不写是谁改的。
+pub fn external_change_notice(previous: &std::collections::BTreeMap<String, String>, current: &[RuleDoc]) -> Option<String> {
+    let now = digest_map(current);
+    let added: Vec<&RuleDoc> = current.iter().filter(|rule| !previous.contains_key(&rule.filename)).collect();
+    let replaced: Vec<&RuleDoc> = current
+        .iter()
+        .filter(|rule| previous.get(&rule.filename).is_some_and(|old| Some(old) != now.get(&rule.filename)))
+        .collect();
+    let deleted: Vec<&String> = previous.keys().filter(|name| !now.contains_key(*name)).collect();
+    if added.is_empty() && replaced.is_empty() && deleted.is_empty() {
+        return None;
+    }
+    let names = |items: Vec<&str>| if items.is_empty() { "无".to_string() } else { items.join("、") };
+    let mut notice = format!(
+        "规章版本：{}\n操作：外部修改\n新增：{}\n替换：{}\n删除：{}\n有效文件：{}\n",
+        fingerprint(current),
+        names(added.iter().map(|rule| rule.filename.as_str()).collect()),
+        names(replaced.iter().map(|rule| rule.filename.as_str()).collect()),
+        names(deleted.iter().map(|name| name.as_str()).collect()),
+        names(current.iter().map(|rule| rule.filename.as_str()).collect()),
+    );
+    if current.is_empty() {
+        notice.push_str("旧规章全部失效，当前暂无规章");
+    } else {
+        notice.push_str("此前的规章版本已失效。");
+    }
+    for rule in added.iter().chain(replaced.iter()) {
+        notice.push_str(&format!("\n{} 全文：\n{}", rule.filename, rule.content));
+    }
+    Some(notice)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,5 +273,39 @@ mod tests {
         assert!(notice.contains("规章版本：none"), "{notice}");
         assert!(notice.contains("操作：删除"), "{notice}");
         assert!(notice.contains("旧规章全部失效，当前暂无规章"), "{notice}");
+    }
+
+    #[test]
+    fn fingerprint_changes_with_content_even_when_length_is_equal() {
+        let doc = |name: &str, text: &str| RuleDoc { filename: name.into(), content: text.into() };
+        assert_eq!(fingerprint(&[]), "none");
+        let first = fingerprint(&[doc("协作规范.md", "甲")]);
+        assert_eq!(first.len(), 16);
+        assert_eq!(first, fingerprint(&[doc("协作规范.md", "甲")]));
+        assert_ne!(first, fingerprint(&[doc("协作规范.md", "乙")]));
+        assert_ne!(first, fingerprint(&[doc("开发规范.md", "甲")]));
+        assert_eq!(fnv1a(""), "cbf29ce484222325");
+    }
+
+    #[test]
+    fn external_notice_lists_added_replaced_and_deleted_files() {
+        let doc = |name: &str, text: &str| RuleDoc { filename: name.into(), content: text.into() };
+        let previous = digest_map(&[doc("协作规范.md", "旧协作"), doc("设计规范.md", "设计")]);
+        let current = vec![doc("协作规范.md", "新协作"), doc("开发规范.md", "开发正文")];
+        assert!(external_change_notice(&previous, &[doc("协作规范.md", "旧协作"), doc("设计规范.md", "设计")]).is_none());
+        let notice = external_change_notice(&previous, &current).unwrap();
+        for text in [
+            "操作：外部修改", "新增：开发规范.md", "替换：协作规范.md", "删除：设计规范.md",
+            "有效文件：协作规范.md、开发规范.md", "此前的规章版本已失效",
+            "协作规范.md 全文：\n新协作", "开发规范.md 全文：\n开发正文",
+        ] {
+            assert!(notice.contains(text), "通知缺少：{text}\n{notice}");
+        }
+        assert!(notice.contains(&format!("规章版本：{}", fingerprint(&current))));
+        assert!(!notice.contains("设计\n"), "删除的规章不应再附全文");
+        let cleared = external_change_notice(&previous, &[]).unwrap();
+        assert!(cleared.contains("规章版本：none"));
+        assert!(cleared.contains("旧规章全部失效，当前暂无规章"));
+        assert!(cleared.contains("删除：协作规范.md、设计规范.md"));
     }
 }
