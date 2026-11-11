@@ -173,7 +173,7 @@ M0 确认：claude 的 `bypassPermissions`、codex 的 `workspace-write`、grok 
 
 | CLI | M0 权限证据 | 会话与模式切换 | 用量归一规则 | 接入阶段 |
 |---|---|---|---|---|
-| claude | `system/init.permissionMode` 可核对。Windows 2.1.319 在 2026-11-11 有一次工具层拒写：Write 被调用，plan 模式拒绝，目标文件不存在，未写计划目录。M0 另有写入计划目录的样本。macOS 2.1.322 仍无工具层证据。以上都不等于硬隔离 | macOS 同会话 plan → bypassPermissions → plan 已验证模式回显和续接；该证据只覆盖模式回显，不覆盖工具层拒写 | macOS G3 对照了 `result.usage` 与 `model_usage_since_last_result`；后者提供本回合费用，`total_cost_usd` 为会话累计；不重复累加 assistant usage | M2 |
+| claude | `system/init.permissionMode` 可核对。Windows 2.1.319 在 2026-11-11 有工具层拒写：plan 下 Write 被拒绝且目标文件不存在，bypassPermissions 下 Write 成功。M0 另有写入计划目录的样本。macOS 2.1.322 仍无工具层证据。以上都不等于硬隔离 | Windows 2.1.319 同一 session 的 plan → bypassPermissions → plan 已核对模式、续接和文件事实。macOS 2.1.322 只核对了模式回显和续接，该次 plan 请求没有触发写工具 | macOS G3 与 Windows 2.1.319 都对照了 `result.usage` 与 `model_usage_since_last_result`；后者的 `costUSD` 是本回合费用，`total_cost_usd` 为会话累计；不重复累加 assistant usage | M2 |
 | codex | `thread.started` 无权限字段；Windows M0 有新会话样本，macOS 0.167.0 G1 已有工具和文件事实 | macOS 同模式续接与 Discuss → Execute → Discuss 已通过 G1；结果不外推其他版本/平台 | macOS G2 已证实 `turn.completed.usage` 为线程累计，同会话按可靠基线取差；缓存输入不重复计入 input | M2 |
 | grok | `system/init.permissionMode` 可核对；讨论模式仍写自己的会话目录 | 同模式续接已验证，跨模式切换未验证 | 存在 `result.usage`，本回合/累计语义待 M5 对照 | M5 |
 | dsh | `session` 不回显权限；Windows 沙箱行为已有样本 | 续接可传权限参数，但跨模式切换未验证 | 按 `step_end.usage` 的步级计数归集；必须验证不重复纳入 `final` 或累计字段 | M5 |
@@ -609,7 +609,7 @@ agents: name_key                             -- trim().to_lowercase()，项目�
 | M5 其余适配器 | grok、dsh、pi | 五种 CLI 都能当成员参与讨论和执行 |
 | M6 打磨打包 | 设置页、报错文案、用量展示、Win 与 mac 安装包 | 在干净机器上可安装使用 |
 
-M2 当前已完成实现，macOS 实际 CLI/UI 验收部分通过。2026-11-11 在 Windows 11 10.0.26300 补了 runner 进程树自动化、跨进程恢复测试，以及 Claude Code 2.1.319 的一次 plan 模式工具层拒写。Finder/Dock 启动 PATH、macOS 上的工具层拒写、应用窗口里的异常退出手验仍未完成。按上述验收标准，M2 暂不标为完成。
+M2 当前已完成实现，macOS 实际 CLI/UI 验收部分通过。2026-11-11 在 Windows 11 10.0.26300 补了 runner 进程树自动化、跨进程恢复测试，以及 Claude Code 2.1.319 同一 session 的 plan → bypassPermissions → plan 工具事实和用量。Finder/Dock 启动 PATH、macOS 上的工具层拒写、应用窗口里的异常退出和清理确认仍未完成。按上述验收标准，M2 暂不标为完成。
 
 依赖关系：M0 与 M1 互不依赖，可以并行；M2 同时依赖 M0 和 M1；M2 → M3 必须按序。M4 的文件树只依赖 M1，像素办公室依赖 M2 的状态事件；M5 依赖 M2。M4 和 M5 可以在 M3 之后以任意顺序进行。
 

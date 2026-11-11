@@ -9,7 +9,7 @@
 
 | 平台/CLI | 已有证据 | 待验证项 | 状态 |
 |---|---|---|---|
-| Windows / claude 2.1.319 | init 回显模式、同模式续接、M0 的 plan 拒绝项目文件但写入计划目录；2026-11-11 另有一次 Write 工具层拒绝且未写计划目录 | 跨模式续接、result.usage/费用的本回合语义、应用内 Discuss 走查 | 部分通过 |
+| Windows / claude 2.1.319 | init 回显模式、同模式续接；M0 的 plan 拒绝项目文件但写入计划目录；2026-11-11 的跨模式 Write 工具层拒绝与成功写入，以及 `result.usage` / 费用语义 | 应用内 Discuss 走查 | 部分通过 |
 | Windows / codex 0.167.0 | 新线程 read-only/workspace-write 行为、续接记忆；thread.started 不回显权限 | G1 resume 权限覆盖及 Discuss → Execute → Discuss；G2 累计/本回合语义；非 git cwd；新 runner 清理 | 未验证 |
 | Windows / grok 1.0.77、dsh 0.2.2-rc.1 | 下文已有场景；grok 回显模式，dsh 不回显 | M5 跨模式续接、用量归一、应用 current_dir 与进程行为 | 未验证 |
 | macOS / Claude Code 2.1.322、Codex 0.167.0 | G1/G2 CLI 基线；G3 Claude 模式回显和续接；M2 应用对话、点名、停止与草稿保存见后文 | Claude 工具层拒写；Finder/Dock PATH；异常退出后的实际恢复 | 部分通过 |
@@ -255,7 +255,25 @@ G3 的 Finder/Dock 环境、runner 进程树取消/超时/正常退出、异常�
 - 第一次模型没有调用工具。这条只记为文字拒绝。
 - 第二次模型调用了 `Write`，写入目标是临时目录中的 `blocked-tool.txt`，内容为 `denied-probe`。随后出现 `permission_denied`，`tool_name` 为 `Write`，`decision_reason_type` 为 `mode`。工具结果 `is_error` 为 true，权限决定为 `reject`。工具结果文本为：`Cannot write to <PATH>\blocked-tool.txt while in plan mode.` 回合最终 `subtype` 仍是 `success`，`result.is_error` 为 false。工具被拒绝时，整回合仍可能被 CLI 标成成功。
 
-这条证据只覆盖该 Windows 版本和这条启动路径上的一次工具层拒绝。没有做 Discuss → Execute → Discuss 续接，也没有在应用里点选 Discuss。M0 的另一条 plan 请求曾经把计划写进 Claude 自己的计划目录，因此讨论模式仍然不是文件系统隔离。macOS 2.1.322 仍然没有工具层证据。
+上面两次请求没有续接。随后在另一个仓库外临时目录、同一启动方式下，用同一个 session 连续跑了四回合。四次进程退出码都是 0，stderr 都为空，`permissionMode` 都与当次参数一致，session 不变，输出里没有计划目录，计划目录也没有新增文件。每次工具被拒绝时，工具结果 `is_error` 为 true，回合最终 `subtype` 仍是 `success`，`result.is_error` 为 false。
+
+| 回合 | 模式 | 工具与文件 |
+|---|---|---|
+| 首次 | plan | 调用 Write 创建 `blocked-tool.txt`，工具层拒绝，文件不存在 |
+| 续接 | bypassPermissions | 调用 Write 创建 `hello-claude.txt`，工具返回创建成功，内容为 `g3-execute` |
+| 续接 | plan | 调用 Write 改写 `hello-claude.txt`，工具层拒绝，内容仍为 `g3-execute`。这一次没有再调用创建工具 |
+| 再续接 | plan | 调用 Write 创建 `blocked-again.txt`，工具层拒绝，文件不存在，`hello-claude.txt` 仍为 `g3-execute` |
+
+拒绝文本仍是 `Cannot write to <PATH>\<文件名> while in plan mode.`，`decision_reason_type` 为 `mode`。这覆盖该 Windows 版本和这条启动路径上的 plan → bypassPermissions → plan。没有在应用里点选 Discuss。M0 的另一条 plan 请求曾经把计划写进 Claude 自己的计划目录，因此讨论模式仍然不是文件系统隔离。macOS 2.1.322 仍然没有工具层证据。
+
+四回合的 `result.usage` 与同条 `model_usage_since_last_result` 的 input、output、cache read、cache creation 一致。`costUSD` 等于相邻两次 `total_cost_usd` 的差，所以 `total_cost_usd` 是会话累计，`costUSD` 是本回合费用。助手消息里较小的 usage 不作为回合用量。
+
+| 回合 | input | output | cache read | cache creation | 本回合 costUSD | total_cost_usd |
+|---|---:|---:|---:|---:|---:|---:|
+| 首次 plan | 4 | 709 | 41535 | 18565 | 0.0855115 | 0.0855115 |
+| bypassPermissions | 4 | 173 | 61063 | 445 | 0.0096243 | 0.0951358 |
+| 回到 plan | 4 | 324 | 63535 | 2126 | 0.0181055 | 0.1132413 |
+| 再次 plan | 4 | 209 | 66222 | 453 | 0.0105322 | 0.1237735 |
 
 ### runner 与异常恢复
 
@@ -269,7 +287,6 @@ Windows 用例覆盖了关闭 stdout 后的 EOF 宽限、父进程先退出并�
 
 - macOS Finder 或 Dock 脱离开发终端后的 PATH。
 - macOS Claude 2.1.322 的工具层拒写。
-- 应用窗口内的停止、草稿、异常退出和清理确认。本机没有重走 macOS 已做过的界面项。
-- Windows 上 Claude 的跨模式续接和用量语义。
+- 应用窗口内的停止、草稿、异常退出和清理确认。本机没有重走 macOS 已做过的界面项，也没有点选“我已处理残留进程，解除阻塞”。
 
 因此 M2 仍不标为完成。
