@@ -114,7 +114,12 @@ pub fn should_rebuild_session(outcome: &crate::runner::RunOutcome, had_session: 
     if !had_session || retried || outcome.status != "failed" || outcome.tool_seen || !outcome.partial_text.is_empty() || !outcome.cleanup_complete {
         return false;
     }
-    let error = outcome.error.as_deref().unwrap_or_default().to_lowercase();
+    mentions_missing_session(outcome.error.as_deref().unwrap_or_default())
+}
+
+/// 文本里是否有“续接的会话不存在/已损坏”的特征。runner 也用它检查 stderr 尾部。
+pub fn mentions_missing_session(text: &str) -> bool {
+    let error = text.to_lowercase();
     ["session not found", "session does not exist", "session doesn't exist", "no conversation found", "invalid session", "session is corrupt", "thread not found", "thread does not exist", "no rollout found for thread", "conversation not found", "conversation does not exist", "omit --session-id to start a new session", "会话不存在", "会话损坏", "找不到会话"]
         .iter().any(|pattern| error.contains(pattern))
 }

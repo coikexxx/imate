@@ -250,7 +250,13 @@ pub async fn run_turn_managed(
         out.error = Some(out.error.take().map(|error| format!("{error}；{cleanup}")).unwrap_or_else(|| cleanup.into()));
     }
     if out.status != "ok" && out.error.is_none() {
-        out.error = Some(format!("CLI 未正常完成（退出码 {}，stderr 尾部 {} 字节，诊断内容未写入日志）", out.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "未知".into()), stderr_tail.len()));
+        let exit = out.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "未知".into());
+        // stderr 原文可能含隐私，不写入 error；只把“会话不存在”这类可识别的原因换成固定说明，供重建判断使用。
+        out.error = Some(if crate::chat::mentions_missing_session(&String::from_utf8_lossy(&stderr_tail)) {
+            format!("CLI 报告续接的会话不存在（退出码 {exit}，原文未写入日志）")
+        } else {
+            format!("CLI 未正常完成（退出码 {exit}，stderr 尾部 {} 字节，诊断内容未写入日志）", stderr_tail.len())
+        });
     }
     out
 }
@@ -283,6 +289,10 @@ mod tests {
             "partial" => { event("text", "部分回答"); std::io::stdout().flush().unwrap(); std::thread::sleep(Duration::from_secs(30)); }
             "flood" => { for _ in 0..10000 { eprintln!("诊断持续输出"); } event("complete", "已完成"); }
             "flood_fail" => { for _ in 0..10000 { eprintln!("stderr 中的私密字节"); } event("complete", "完成事件不能掩盖非零退出"); std::process::exit(9); }
+            "missing_session" => {
+                eprintln!("Error: thread/resume: thread/resume failed: no rollout found for thread id 0000-私密线程 (code -32600)");
+                std::process::exit(1);
+            }
             "unknown" => { println!("CLI 私密原始输出不应写入诊断日志"); event("complete", "已完成"); }
             "long_line" => {
                 let line = serde_json::to_string(&serde_json::json!({"type":"text","text":"长".repeat(150000)})).unwrap();
@@ -401,6 +411,16 @@ mod tests {
         assert!(failed.error.unwrap().contains("尾部 8192 字节"));
         let (out, _) = run("long_line", None, config()).await;
         assert_eq!(out.status, "ok"); assert_eq!(out.partial_text.chars().count(), 150000);
+    }
+    #[tokio::test]
+    async fn stderr_missing_session_is_reported_without_raw_text() {
+        let (out, _) = run("missing_session", None, config()).await;
+        assert_eq!(out.status, "failed");
+        let error = out.error.clone().unwrap();
+        assert!(!error.contains("私密线程") && !error.contains("rollout"), "不写入 stderr 原文：{error}");
+        assert!(crate::chat::should_rebuild_session(&out, true, false), "会话不存在应当允许重建：{error}");
+        let failed = run("flood_fail", None, config()).await.0;
+        assert!(!crate::chat::should_rebuild_session(&failed, true, false));
     }
     #[tokio::test]
     async fn tools_have_separate_timeout_and_switch_back_to_model_idle() {
