@@ -1,11 +1,12 @@
-import room from "../assets/openoffice/room.json";
 import type { Agent, AgentStatus } from "../types";
-import { hashOf, MAX_SEATS } from "./layout";
+import { hashOf } from "./layout";
+import { GBA_ROOM as room, MEETING_SEATS, REST_SEATS, WORK_SEATS } from "./gbaOfficeMap";
 
 export const ROOM = room;
 export const ROOM_WIDTH = room.cols * room.cellSize;
 export const ROOM_HEIGHT = room.rows * room.cellSize;
-export const CHARACTER_SCALE = 2;
+export const CHARACTER_SCALE = 1;
+export { WORK_SEATS };
 export const STATUS_TEXT: Record<AgentStatus, string> = {
   idle: "空闲", thinking: "思考中", talking: "发言中", working: "工作中", error: "出错",
 };
@@ -14,20 +15,6 @@ export interface Cell { col: number; row: number }
 export interface Position { x: number; y: number }
 export type Facing = "down" | "up" | "right" | "left";
 export interface OfficeSeat extends Cell { facing: Facing }
-
-const desks = room.objects.filter((object) => object.type === "desk");
-const chairs = room.objects.filter((object) => object.type === "chair");
-const adjacentDesk = (chair: Cell) => desks.find((desk) => Math.abs(desk.col - chair.col) + Math.abs(desk.row - chair.row) === 1);
-
-/** 沿用上游房间的原始座标，沙发不占用 imates 的工作工位。 */
-export const WORK_SEATS: OfficeSeat[] = chairs.filter(adjacentDesk)
-  .sort((a, b) => a.row - b.row || a.col - b.col).slice(0, MAX_SEATS)
-  .map((chair) => {
-    const desk = adjacentDesk(chair)!;
-    const facing: Facing = desk.col < chair.col ? "left" : desk.col > chair.col ? "right" : desk.row < chair.row ? "up" : "down";
-    return { col: chair.col, row: chair.row, facing };
-  });
-const REST_SEATS = chairs.filter((chair) => !adjacentDesk(chair));
 
 export function cellPoint(cell: Cell): Position {
   return { x: (cell.col + 0.5) * room.cellSize, y: (cell.row + 0.5) * room.cellSize };
@@ -77,7 +64,7 @@ export interface OfficeActor extends Position {
   path: Cell[];
   facing: Facing;
   status: AgentStatus;
-  destination: "desk" | "rest";
+  destination: "desk" | "rest" | "meeting";
   idleSeconds: number;
 }
 
@@ -113,9 +100,11 @@ export function syncActors(actors: Map<string, OfficeActor>, members: Pick<Agent
     }
     const status = statuses[member.id] ?? "idle";
     if (actor.status !== status) {
+      const previous = actor.status;
       actor.status = status;
       actor.idleSeconds = 0;
-      if (status !== "idle") routeActor(actor, actor.home, "desk");
+      if (status === "talking") routeActor(actor, MEETING_SEATS[actor.seatIndex], "meeting");
+      else if (status !== "idle" || previous === "talking") routeActor(actor, actor.home, "desk");
     }
   }
   for (const id of actors.keys()) if (!present.has(id)) actors.delete(id);
@@ -136,7 +125,7 @@ export function stepActor(actor: OfficeActor, deltaSeconds: number, motion: bool
   if (actor.path.length === 0) {
     if (actor.status === "idle") {
       actor.idleSeconds += dt;
-      // 五个休息座位一人一个；其余成员留在工位，避免挤在同一沙发上。
+      // 八个休息点一人一个，分别位于摸鱼区和阳台。
       const rest = REST_SEATS[actor.seatIndex];
       if (rest && actor.idleSeconds > 8 + hashOf(actor.id) % 10) {
         routeActor(actor, actor.destination === "desk" ? rest : actor.home, actor.destination === "desk" ? "rest" : "desk");
@@ -164,7 +153,8 @@ export function stepActor(actor: OfficeActor, deltaSeconds: number, motion: bool
       distance = 0;
     }
   }
-  if (actor.path.length === 0) actor.facing = actor.destination === "desk" ? actor.home.facing : "down";
+  if (actor.path.length === 0) actor.facing = actor.destination === "desk" ? actor.home.facing
+    : actor.destination === "meeting" ? MEETING_SEATS[actor.seatIndex].facing : REST_SEATS[actor.seatIndex].facing;
 }
 
 /** 帧排列与 OpenOffice 的 assetLoader / spriteData 一致。 */
