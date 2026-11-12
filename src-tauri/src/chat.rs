@@ -90,9 +90,13 @@ impl ChatService {
             mode: RunMode::Execute, model: prepared.agent.model.clone() }
     }
     pub fn on_event(conn: &Connection, prepared: &PreparedTurn, run_id: &str, event: &AgentEvent) -> AppResult<()> {
-        if let AgentEvent::SessionStarted { session_id } = event {
-            agents::set_session(conn, &prepared.agent.id, Some(session_id))?;
-            conn.execute("UPDATE runs SET session_id=?1 WHERE id=?2 AND status='running'", rusqlite::params![session_id, run_id])?;
+        match event {
+            AgentEvent::SessionStarted { session_id } => {
+                agents::set_session(conn, &prepared.agent.id, Some(session_id))?;
+                conn.execute("UPDATE runs SET session_id=?1 WHERE id=?2 AND status='running'", rusqlite::params![session_id, run_id])?;
+            }
+            AgentEvent::ModelReported { model } => crate::store::runs::set_reported_model(conn, run_id, model)?,
+            _ => {}
         }
         Ok(())
     }
@@ -217,6 +221,21 @@ mod tests {
         crate::store::runs::finish(&conn, &second.id, "ok", Some(0), None, None).unwrap();
         let resumed = ChatService::send(&conn, &project_id, user.id, false).unwrap();
         assert_eq!(ChatService::request(&resumed, "/tmp/项目".into()).session_id.as_deref(), Some("执行会话"));
+    }
+    #[test]
+    fn on_event_records_the_reported_model_only_on_a_running_run() {
+        let (conn, project_id, roster) = setup();
+        let user = messages::insert(&conn, &project_id, "user", None, "chat", "记录模型").unwrap();
+        let prepared = ChatService::send(&conn, &project_id, user.id, false).unwrap();
+        let run = crate::store::runs::insert_running(&conn, Some(&roster[0].id), "execute", "{}", None).unwrap();
+        let reported = |conn: &rusqlite::Connection| -> Option<String> {
+            conn.query_row("SELECT reported_model FROM runs WHERE id=?1", [&run.id], |row| row.get(0)).unwrap()
+        };
+        ChatService::on_event(&conn, &prepared, &run.id, &AgentEvent::ModelReported { model: "claude-sonnet-5-5".into() }).unwrap();
+        assert_eq!(reported(&conn).as_deref(), Some("claude-sonnet-5-5"));
+        crate::store::runs::finish(&conn, &run.id, "ok", Some(0), None, None).unwrap();
+        ChatService::on_event(&conn, &prepared, &run.id, &AgentEvent::ModelReported { model: "迟到".into() }).unwrap();
+        assert_eq!(reported(&conn).as_deref(), Some("claude-sonnet-5-5"));
     }
     #[test]
     fn send_rejects_project_marked_as_running() {

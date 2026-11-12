@@ -58,7 +58,10 @@ impl CliAdapter for GrokAdapter {
                     return self.fail(format!("Grok 权限模式不符：期望 {}，收到 {}", self.permission(),
                         v["permissionMode"].as_str().unwrap_or("未回显")));
                 }
-                v["session_id"].as_str().map(|id| vec![AgentEvent::SessionStarted { session_id: id.into() }]).unwrap_or_default()
+                let mut events: Vec<AgentEvent> = v["session_id"].as_str()
+                    .map(|id| AgentEvent::SessionStarted { session_id: id.into() }).into_iter().collect();
+                events.extend(super::model_event(&v));
+                events
             }
             Some("assistant" | "user") => {
                 let mut events = vec![];
@@ -222,5 +225,40 @@ mod tests {
         let spec = discuss.build_command(&TurnRequest { session_id: None, model: Some("  ".into()), ..request });
         assert!(spec.args.windows(2).any(|a| a == ["--permission-mode", "plan"]));
         assert!(!spec.args.iter().any(|arg| arg == "-r" || arg == "-m"));
+    }
+
+    fn reported(events: &[AgentEvent]) -> Vec<&str> {
+        events.iter().filter_map(|event| match event { AgentEvent::ModelReported { model } => Some(model.as_str()), _ => None }).collect()
+    }
+
+    #[test]
+    fn init_reports_the_model_the_cli_says_it_used() {
+        let discuss = feed(include_str!("../../tests/fixtures/grok/discuss.jsonl"), RunMode::Discuss);
+        assert_eq!(reported(&discuss), ["grok-4.7"]);
+        let execute = feed(include_str!("../../tests/fixtures/grok/execute.jsonl"), RunMode::Execute);
+        assert_eq!(reported(&execute), ["grok-4.7"]);
+        let resume = feed(include_str!("../../tests/fixtures/grok/resume.jsonl"), RunMode::Discuss);
+        assert_eq!(reported(&resume), ["grok-4.7"]);
+        let session = discuss.iter().position(|e| matches!(e, AgentEvent::SessionStarted { .. })).unwrap();
+        let model = discuss.iter().position(|e| matches!(e, AgentEvent::ModelReported { .. })).unwrap();
+        assert!(session < model);
+    }
+
+    #[test]
+    fn init_reports_whatever_model_the_cli_echoes_even_when_unknown() {
+        let events = feed(include_str!("../../tests/fixtures/grok/error.jsonl"), RunMode::Discuss);
+        assert_eq!(reported(&events), ["no-such-model"]);
+    }
+
+    #[test]
+    fn init_with_unsafe_model_reports_nothing_but_keeps_the_session() {
+        let init = |model: &str| format!(r#"{{"type":"system","subtype":"init","session_id":"s","permissionMode":"plan"{model}}}"#);
+        let mut adapter = GrokAdapter::new("grok".into(), RunMode::Discuss);
+        let control = adapter.parse_line(&init(r#","model":"bad\u0007name""#));
+        assert!(matches!(control.as_slice(), [AgentEvent::SessionStarted { .. }]));
+        let long = adapter.parse_line(&init(&format!(r#","model":"{}""#, "m".repeat(201))));
+        assert!(matches!(long.as_slice(), [AgentEvent::SessionStarted { .. }]));
+        let limit = adapter.parse_line(&init(&format!(r#","model":"{}""#, "m".repeat(200))));
+        assert_eq!(reported(&limit), ["m".repeat(200).as_str()]);
     }
 }

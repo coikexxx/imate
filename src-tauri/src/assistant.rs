@@ -334,6 +334,7 @@ impl AppState {
                     conn.execute("UPDATE runs SET session_id=?1 WHERE id=?2 AND status='running'", rusqlite::params![session_id, started.run_id])?;
                     session.session_id = Some(session_id.clone());
                 }
+                AgentEvent::ModelReported { model } => crate::store::runs::set_reported_model(&conn, &started.run_id, model)?,
                 AgentEvent::TextDelta { text } => session.partial_text.push_str(text),
                 _ => {}
             }
@@ -477,6 +478,19 @@ mod tests {
         assert_eq!(choose_cli_id(None, &clis, &closed_claude).unwrap(), "codex", "自动选择跳过已关闭的 CLI");
         assert!(choose_cli_id(Some("claude"), &clis, &closed_claude).unwrap_err().to_string().contains("已在应用管理中关闭"));
         assert!(choose_cli_id(None, &clis, &|_| false).is_err());
+    }
+    #[test]
+    fn draft_run_records_the_reported_model_but_never_a_requested_one() {
+        let folder = tempfile::tempdir().unwrap();
+        let state = AppState::new(crate::store::open_in_memory().unwrap(), folder.path().into()).unwrap();
+        let started = state.prepare_draft(DraftKind::Persona, &input(folder.path()), &cli()).unwrap();
+        let models = |state: &AppState| -> (Option<String>, Option<String>) {
+            state.db_lock().unwrap().query_row("SELECT requested_model, reported_model FROM runs WHERE id=?1", [&started.run_id],
+                |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+        };
+        assert_eq!(models(&state), (None, None));
+        assert!(state.draft_event(&started, &AgentEvent::ModelReported { model: "grok-4.7".into() }).unwrap());
+        assert_eq!(models(&state), (None, Some("grok-4.7".into())));
     }
     #[test]
     fn draft_runs_have_no_agent_or_chat_messages_and_feedback_resumes() {

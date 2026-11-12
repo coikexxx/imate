@@ -226,6 +226,8 @@ pub async fn run_turn_managed(
                 if latched.is_some() { break; }
                 match &event {
                     AgentEvent::SessionStarted { session_id } => out.session_id = Some(session_id.clone()),
+                    // 模型名由各调用方按需写入运行记录，不进入回合结果。
+                    AgentEvent::ModelReported { .. } => {}
                     AgentEvent::TextDelta { text } => out.partial_text.push_str(text),
                     AgentEvent::ToolUse { .. } => out.tool_seen = true,
                     AgentEvent::ToolState { active } => {

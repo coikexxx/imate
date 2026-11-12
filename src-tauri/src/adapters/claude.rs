@@ -53,7 +53,10 @@ impl CliAdapter for ClaudeAdapter {
                     return self.fail(format!("Claude 权限模式不符：期望 {}，收到 {}", self.permission(),
                         v["permissionMode"].as_str().unwrap_or("未回显")));
                 }
-                v["session_id"].as_str().map(|id| vec![AgentEvent::SessionStarted { session_id: id.into() }]).unwrap_or_default()
+                let mut events: Vec<AgentEvent> = v["session_id"].as_str()
+                    .map(|id| AgentEvent::SessionStarted { session_id: id.into() }).into_iter().collect();
+                events.extend(super::model_event(&v));
+                events
             }
             Some("assistant" | "user") => {
                 let mut events = vec![];
@@ -215,4 +218,38 @@ mod tests {
         assert!(matches!(&events[0], AgentEvent::TurnCompleted { usage: Some(u), .. } if u.cost_usd.is_none() && u.input_tokens.is_none()));
     }
 
+    fn reported(events: &[AgentEvent]) -> Vec<&str> {
+        events.iter().filter_map(|event| match event { AgentEvent::ModelReported { model } => Some(model.as_str()), _ => None }).collect()
+    }
+
+    #[test]
+    fn init_reports_the_model_the_cli_says_it_used() {
+        let discuss = feed(include_str!("../../tests/fixtures/claude/discuss.jsonl"), RunMode::Discuss);
+        assert_eq!(reported(&discuss), ["claude-sonnet-5-5"]);
+        let execute = feed(include_str!("../../tests/fixtures/claude/execute.jsonl"), RunMode::Execute);
+        assert_eq!(reported(&execute), ["claude-sonnet-5-5"]);
+        // 会话事件仍在，且先于模型事件。
+        let session = discuss.iter().position(|e| matches!(e, AgentEvent::SessionStarted { .. })).unwrap();
+        let model = discuss.iter().position(|e| matches!(e, AgentEvent::ModelReported { .. })).unwrap();
+        assert!(session < model);
+    }
+
+    #[test]
+    fn init_reports_whatever_model_the_cli_echoes_even_when_unknown() {
+        let events = feed(include_str!("../../tests/fixtures/claude/error.jsonl"), RunMode::Discuss);
+        assert_eq!(reported(&events), ["no-such-model"]);
+    }
+
+    #[test]
+    fn init_without_model_or_with_unsafe_model_reports_nothing() {
+        let init = |model: &str| format!(r#"{{"type":"system","subtype":"init","session_id":"s","permissionMode":"plan"{model}}}"#);
+        let mut adapter = ClaudeAdapter::new("claude".into(), RunMode::Discuss);
+        assert!(matches!(adapter.parse_line(&init("")).as_slice(), [AgentEvent::SessionStarted { .. }]));
+        let control = adapter.parse_line(&init(r#","model":"bad\u0007name""#));
+        assert!(matches!(control.as_slice(), [AgentEvent::SessionStarted { .. }]));
+        let long = adapter.parse_line(&init(&format!(r#","model":"{}""#, "m".repeat(201))));
+        assert!(matches!(long.as_slice(), [AgentEvent::SessionStarted { .. }]));
+        let limit = adapter.parse_line(&init(&format!(r#","model":"{}""#, "m".repeat(200))));
+        assert_eq!(reported(&limit), ["m".repeat(200).as_str()]);
+    }
 }

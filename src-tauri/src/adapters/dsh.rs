@@ -198,6 +198,18 @@ mod tests {
     }
 
     #[test]
+    fn dsh_events_never_carry_a_reported_model() {
+        for (fixture, mode) in [(include_str!("../../tests/fixtures/dsh/discuss.jsonl"), RunMode::Discuss),
+            (include_str!("../../tests/fixtures/dsh/execute.jsonl"), RunMode::Execute),
+            (include_str!("../../tests/fixtures/dsh/resume.jsonl"), RunMode::Discuss),
+            (include_str!("../../tests/fixtures/dsh/error.jsonl"), RunMode::Discuss)] {
+            let events = feed(fixture, mode);
+            assert!(!events.is_empty());
+            assert!(!events.iter().any(|e| matches!(e, AgentEvent::ModelReported { .. })));
+        }
+    }
+
+    #[test]
     fn real_unknown_session_error_fails_once_and_never_completes() {
         let events = feed(include_str!("../../tests/fixtures/dsh/error.jsonl"), RunMode::Discuss);
         assert!(matches!(events.as_slice(), [AgentEvent::Error { message }] if message.contains("does not exist") && message.contains("--session-id")));

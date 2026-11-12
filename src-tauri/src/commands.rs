@@ -786,6 +786,7 @@ impl AppState {
             let command = serde_json::to_string(&json!({"program":spec.program, "args":spec.args}))
                 .map_err(|e| AppError::Invalid(e.to_string()))?;
             let run = runs::insert_running(&tx, Some(&prepared.agent.id), "execute", &command, request.session_id.as_deref())?;
+            runs::set_requested_model(&tx, &run.id, request.model.as_deref())?;
             let placeholder = messages::insert(&tx, project_id, "assistant", Some(&prepared.agent.id), "chat", "")?;
             save_owner(&tx, &self.new_owner(&run.id, Some(project_id), None, &folder))?;
             tx.execute("UPDATE projects SET status='executing',updated_at=?1 WHERE id=?2", rusqlite::params![crate::store::now_ms(), project_id])?;
@@ -840,6 +841,7 @@ impl AppState {
             let spec = adapter.build_command(&request);
             let command = serde_json::to_string(&json!({"program": spec.program, "args": spec.args})).map_err(|e| AppError::Invalid(e.to_string()))?;
             let run = runs::insert_running(&tx, Some(&prepared.agent.id), "execute", &command, request.session_id.as_deref())?;
+            runs::set_requested_model(&tx, &run.id, request.model.as_deref())?;
             let placeholder = messages::insert(&tx, project_id, "assistant", Some(&prepared.agent.id), "chat", "")?;
             save_owner(&tx, &self.new_owner(&run.id, Some(project_id), None, &folder))?;
             tx.execute("UPDATE projects SET status='executing',updated_at=?1 WHERE id=?2", rusqlite::params![crate::store::now_ms(), project_id])?;
@@ -902,6 +904,17 @@ pub fn live_status(mode: RunMode, event: &AgentEvent, current: &'static str) -> 
         (RunMode::Discuss, AgentEvent::TextDelta { .. }) => "talking",
         (RunMode::Discuss, _) => current,
     }
+}
+
+/// 团队回合开始时记下请求的模型。运行记录由编排器先创建，所以这里只补写。写失败不影响回合。
+fn record_requested_model(state: &AppState, run_id: &str, model: Option<&str>) {
+    if let Ok(conn) = state.db_lock() { let _ = runs::set_requested_model(&conn, run_id, model); }
+}
+
+/// 团队回合的事件处理：CLI 回报模型时写进运行记录（会话与用量仍在回合结束时由编排器落库）。
+fn record_reported_model(state: &AppState, run_id: &str, event: &AgentEvent) {
+    let AgentEvent::ModelReported { model } = event else { return };
+    if let Ok(conn) = state.db_lock() { let _ = runs::set_reported_model(&conn, run_id, model); }
 }
 
 /// 结果没能落库（已停止等）时，不能把回合报成成功。
@@ -1008,6 +1021,7 @@ impl AppState {
         let spec = make_adapter(cli, RunMode::Execute, None)?.build_command(&request);
         let run = runs::insert_running(&tx, Some(&prepared.agent.id), "execute",
             &serde_json::to_string(&json!({"program":spec.program,"args":spec.args})).map_err(|e| AppError::Invalid(e.to_string()))?, None)?;
+        runs::set_requested_model(&tx, &run.id, request.model.as_deref())?;
         save_owner(&tx, &self.new_owner(&run.id, Some(project_id), None, &request.cwd))?;
         tx.execute("UPDATE projects SET status='executing' WHERE id=?1", [project_id])?; tx.commit()?;
         let old_id = started.run_id.clone();
@@ -1362,6 +1376,7 @@ async fn run_orchestrated(
     };
     let request = crate::adapters::TurnRequest { prompt: spec.prompt.clone(), session_id: session,
         cwd: folder.clone(), mode, model: agent.model.clone() };
+    record_requested_model(&state, &spec.run_id, request.model.as_deref());
     let run_id = spec.run_id.clone();
     let agent_id = spec.agent_id.clone();
     let registered = match state.runtime_lock() {
@@ -1381,6 +1396,7 @@ async fn run_orchestrated(
     emit_events(app, vec![("agent:status", json!({"projectId": project_id, "runId": run_id, "agentId": agent_id, "status": "thinking"}))]);
     let mut shown: &'static str = "thinking";
     let outcome = crate::runner::run_turn_managed(adapter, request, cancellation, |event| {
+        record_reported_model(&app.state::<AppState>(), &run_id, &event);
         let next = live_status(mode, &event, shown);
         if next == shown { return; }
         shown = next;
@@ -1582,6 +1598,55 @@ mod integration_tests {
         assert_eq!(crate::store::instructions::get(&conn, &instruction.id).unwrap().status, "completed");
         assert_eq!(projects::get(&conn, &first).unwrap().status, "idle");
         assert!(crate::store::instructions::active_instruction(&conn, &first).unwrap().is_none());
+    }
+    fn run_models(state: &AppState, run_id: &str) -> (Option<String>, Option<String>) {
+        state.db_lock().unwrap().query_row("SELECT requested_model, reported_model FROM runs WHERE id=?1", [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+    }
+    #[test]
+    fn direct_run_records_requested_model_at_start_and_reported_model_from_events() {
+        let (state, _folder, first, _second, cli) = setup();
+        // 没有指定模型、也没有 CLI 默认模型：请求值为空。
+        let plain = state.prepare_send(&first, "无模型", &cli).unwrap();
+        assert_eq!(run_models(&state, &plain.run_id), (None, None));
+        state.finish_project(&plain, outcome("ok")).unwrap();
+
+        let agent_id = agents::list(&state.db_lock().unwrap(), &first).unwrap().remove(0).id;
+        state.db_lock().unwrap().execute("UPDATE agents SET model='成员模型' WHERE id=?1", [&agent_id]).unwrap();
+        let started = state.prepare_send(&first, "有模型", &cli).unwrap();
+        assert_eq!(run_models(&state, &started.run_id), (Some("成员模型".into()), None));
+        state.apply_project_event(&started, AgentEvent::ModelReported { model: "实际模型".into() }).unwrap();
+        assert_eq!(run_models(&state, &started.run_id), (Some("成员模型".into()), Some("实际模型".into())));
+        state.finish_project(&started, outcome("ok")).unwrap();
+        // 运行结束后迟到的事件不再改写。
+        assert!(state.apply_project_event(&started, AgentEvent::ModelReported { model: "迟到".into() }).unwrap().is_empty());
+        assert_eq!(run_models(&state, &started.run_id), (Some("成员模型".into()), Some("实际模型".into())));
+    }
+    #[test]
+    fn team_turn_records_reported_model_on_its_run_and_ignores_other_events() {
+        let (state, _folder, first, _second, cli) = setup();
+        let started = state.prepare_send(&first, "团队回合", &cli).unwrap();
+        record_reported_model(&state, &started.run_id, &AgentEvent::TextDelta { text: "正文".into() });
+        record_reported_model(&state, &started.run_id, &AgentEvent::SessionStarted { session_id: "s".into() });
+        assert_eq!(run_models(&state, &started.run_id), (None, None));
+        record_reported_model(&state, &started.run_id, &AgentEvent::ModelReported { model: "claude-sonnet-5-5".into() });
+        assert_eq!(run_models(&state, &started.run_id), (None, Some("claude-sonnet-5-5".into())));
+        record_requested_model(&state, &started.run_id, Some("sonnet"));
+        assert_eq!(run_models(&state, &started.run_id), (Some("sonnet".into()), Some("claude-sonnet-5-5".into())));
+        record_requested_model(&state, &started.run_id, None);
+        assert_eq!(run_models(&state, &started.run_id), (None, Some("claude-sonnet-5-5".into())));
+    }
+    #[test]
+    fn launched_existing_message_records_requested_model() {
+        let (state, _folder, first, _second, cli) = setup();
+        let user = {
+            let conn = state.db_lock().unwrap();
+            let agent_id = agents::list(&conn, &first).unwrap().remove(0).id;
+            conn.execute("UPDATE agents SET model='成员模型' WHERE id=?1", [&agent_id]).unwrap();
+            messages::insert(&conn, &first, "user", None, "chat", "@组长 已落库的消息").unwrap()
+        };
+        let started = state.launch_existing_message(&first, user.id, &cli).unwrap();
+        assert_eq!(run_models(&state, &started.run_id), (Some("成员模型".into()), None));
     }
     #[test]
     #[cfg(unix)]

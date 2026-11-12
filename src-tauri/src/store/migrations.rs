@@ -117,6 +117,10 @@ ALTER TABLE runs ADD COLUMN instruction_id TEXT REFERENCES instructions(id) ON D
 ALTER TABLE runs ADD COLUMN task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL;
 
 ALTER TABLE agents ADD COLUMN name_key TEXT;
+"#, r#"
+ALTER TABLE runs ADD COLUMN requested_model TEXT;
+ALTER TABLE runs ADD COLUMN reported_model TEXT;
+ALTER TABLE messages ADD COLUMN run_id TEXT;
 "#];
 
 /// 把数据库升级到最新版本。版本号记在 `PRAGMA user_version`。
@@ -181,6 +185,36 @@ mod tests {
         assert!(migrate(&mut conn).is_err());
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
         assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn run_model_migration_adds_three_columns_and_leaves_old_rows_empty() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // 只应用到上一版（本迁移之前）的全部迁移。
+        let previous = MIGRATIONS.len() - 1;
+        for sql in &MIGRATIONS[..previous] { conn.execute_batch(sql).unwrap(); }
+        conn.pragma_update(None, "user_version", previous as i64).unwrap();
+        conn.execute("INSERT INTO projects (id,name,description,folder_path,status,created_at,updated_at) VALUES ('p','甲','','/tmp','idle',1,1)", []).unwrap();
+        conn.execute("INSERT INTO messages (project_id,sender_type,kind,content,created_at) VALUES ('p','user','chat','旧消息',1)", []).unwrap();
+        conn.execute("INSERT INTO runs (id,agent_id,mode,command,started_at,status) VALUES ('r',NULL,'execute','{}',1,'ok')", []).unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
+        assert_eq!(version, previous as i64 + 1);
+        let columns = |table: &str| -> Vec<String> {
+            let mut statement = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap();
+            statement.query_map([], |row| row.get::<_, String>(1)).unwrap().map(|name| name.unwrap()).collect()
+        };
+        let runs = columns("runs");
+        assert!(runs.contains(&"requested_model".to_string()) && runs.contains(&"reported_model".to_string()));
+        assert!(columns("messages").contains(&"run_id".to_string()));
+        let (requested, reported): (Option<String>, Option<String>) = conn
+            .query_row("SELECT requested_model, reported_model FROM runs WHERE id='r'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!((requested, reported), (None, None));
+        let run_id: Option<String> = conn.query_row("SELECT run_id FROM messages", [], |row| row.get(0)).unwrap();
+        assert_eq!(run_id, None);
     }
 
     #[test]

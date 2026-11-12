@@ -48,11 +48,23 @@ pub struct Usage {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     SessionStarted { session_id: String },
+    /// CLI 在事件流里回报的实际模型名（只有 Claude、Grok 的 init 事件带它）。
+    ModelReported { model: String },
     TextDelta { text: String },
     ToolUse { name: String, summary: String },
     ToolState { active: bool },
     TurnCompleted { final_text: String, usage: Option<Usage> },
     Error { message: String },
+}
+
+/// 从 CLI 事件对象的 `model` 字段生成 `ModelReported`。
+/// 去掉首尾空白后为空、超过 200 个字符或含控制字符的值一律不接受。
+pub(crate) fn model_event(value: &serde_json::Value) -> Option<AgentEvent> {
+    let model = value["model"].as_str()?.trim();
+    if model.is_empty() || model.chars().count() > 200 || model.chars().any(char::is_control) {
+        return None;
+    }
+    Some(AgentEvent::ModelReported { model: model.into() })
 }
 
 pub trait CliAdapter: Send + Sync {
@@ -113,6 +125,19 @@ mod tests {
         assert!(json.get("input_tokens").is_none());
         assert_eq!(serde_json::to_value(RunMode::Discuss).unwrap(), "discuss");
         assert_eq!(serde_json::to_value(RunMode::Execute).unwrap(), "execute");
+    }
+
+    #[test]
+    fn model_event_accepts_plain_names_and_rejects_unsafe_values() {
+        let event = |model: serde_json::Value| model_event(&serde_json::json!({ "model": model }));
+        assert_eq!(event("claude-sonnet-5-5".into()), Some(AgentEvent::ModelReported { model: "claude-sonnet-5-5".into() }));
+        assert_eq!(event("  grok-4.7 ".into()), Some(AgentEvent::ModelReported { model: "grok-4.7".into() }));
+        assert_eq!(event("模型一".into()), Some(AgentEvent::ModelReported { model: "模型一".into() }));
+        assert_eq!(event("m".repeat(200).into()), Some(AgentEvent::ModelReported { model: "m".repeat(200) }));
+        for rejected in [serde_json::Value::Null, 5.into(), "".into(), "   ".into(), "a\u{7}b".into(), "a\nb".into(), "m".repeat(201).into()] {
+            assert_eq!(event(rejected.clone()), None, "{rejected}");
+        }
+        assert_eq!(model_event(&serde_json::json!({})), None);
     }
 
     #[test]

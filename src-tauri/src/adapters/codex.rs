@@ -151,6 +151,19 @@ mod tests {
     }
 
     #[test]
+    fn codex_events_never_carry_a_reported_model() {
+        for (fixture, mode) in [(include_str!("../../tests/fixtures/codex/discuss.jsonl"), RunMode::Discuss),
+            (include_str!("../../tests/fixtures/codex/execute.jsonl"), RunMode::Execute),
+            (include_str!("../../tests/fixtures/codex/resume.jsonl"), RunMode::Execute),
+            (include_str!("../../tests/fixtures/codex/error.jsonl"), RunMode::Discuss)] {
+            let mut adapter = CodexAdapter::new("codex".into(), mode, None);
+            let events: Vec<_> = fixture.lines().flat_map(|line| adapter.parse_line(line)).collect();
+            assert!(!events.is_empty());
+            assert!(!events.iter().any(|e| matches!(e, AgentEvent::ModelReported { .. })));
+        }
+    }
+
+    #[test]
     fn real_failed_turn_never_completes() {
         let mut adapter = CodexAdapter::new("codex".into(), RunMode::Discuss, None);
         let events: Vec<_> = include_str!("../../tests/fixtures/codex/error.jsonl")

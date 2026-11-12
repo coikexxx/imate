@@ -66,6 +66,26 @@ pub fn get(conn: &Connection, id: &str) -> AppResult<Run> {
     .ok_or_else(|| AppError::NotFound(format!("运行 {id}")))
 }
 
+/// 记录本次运行请求的模型（实际传给适配器的 `TurnRequest.model`）。空值或纯空白写 NULL，表示由 CLI 自己决定。
+/// 与 `session_id` 一样，只改仍在运行的记录。
+pub fn set_requested_model(conn: &Connection, run_id: &str, model: Option<&str>) -> AppResult<()> {
+    let model = model.map(str::trim).filter(|model| !model.is_empty());
+    conn.execute(
+        "UPDATE runs SET requested_model = ?1 WHERE id = ?2 AND status = 'running'",
+        params![model, run_id],
+    )?;
+    Ok(())
+}
+
+/// 记录 CLI 在事件流里回报的实际模型。只改仍在运行的记录，迟到的事件不覆盖已结束的运行。
+pub fn set_reported_model(conn: &Connection, run_id: &str, model: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE runs SET reported_model = ?1 WHERE id = ?2 AND status = 'running'",
+        params![model, run_id],
+    )?;
+    Ok(())
+}
+
 /// 仅将 running 转为终态，返回是否成功完成了这次状态转换。
 pub fn finish(
     conn: &Connection,
@@ -287,6 +307,39 @@ mod tests {
         assert_eq!(notifications[0].sender_type, "system");
         assert!(interrupt_running(&conn).unwrap().is_empty());
         assert_eq!(crate::store::messages::list(&conn, &project_id, None, 200).unwrap(), notifications);
+    }
+
+    fn models(conn: &rusqlite::Connection, run_id: &str) -> (Option<String>, Option<String>) {
+        conn.query_row("SELECT requested_model, reported_model FROM runs WHERE id = ?1", [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+    }
+
+    #[test]
+    fn requested_model_is_written_while_running_and_empty_means_null() {
+        let (conn, _, agent_id) = setup();
+        let run = insert_running(&conn, Some(&agent_id), "execute", "codex exec", None).unwrap();
+        assert_eq!(models(&conn, &run.id), (None, None));
+        set_requested_model(&conn, &run.id, Some("gpt-5.5")).unwrap();
+        assert_eq!(models(&conn, &run.id), (Some("gpt-5.5".into()), None));
+        for empty in [None, Some(""), Some("   ")] {
+            set_requested_model(&conn, &run.id, empty).unwrap();
+            assert_eq!(models(&conn, &run.id), (None, None), "{empty:?}");
+        }
+        // 不存在的运行不报错，也不会写出任何行。
+        set_requested_model(&conn, "不存在", Some("x")).unwrap();
+    }
+
+    #[test]
+    fn reported_model_is_written_only_while_running() {
+        let (conn, _, agent_id) = setup();
+        let running = insert_running(&conn, Some(&agent_id), "execute", "claude -p", None).unwrap();
+        set_reported_model(&conn, &running.id, "claude-sonnet-5-5").unwrap();
+        assert_eq!(models(&conn, &running.id), (None, Some("claude-sonnet-5-5".into())));
+
+        let finished = insert_running(&conn, Some(&agent_id), "execute", "claude -p", None).unwrap();
+        finish(&conn, &finished.id, "ok", Some(0), None, None).unwrap();
+        set_reported_model(&conn, &finished.id, "迟到的模型").unwrap();
+        assert_eq!(models(&conn, &finished.id), (None, None));
     }
 
     #[test]
