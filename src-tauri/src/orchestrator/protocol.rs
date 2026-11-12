@@ -32,11 +32,20 @@ pub struct TaskLimit {
     pub rework_count: u32,
 }
 
-/// 阶段与返工护栏。讨论轮数按整条指令累计。
+/// 调用方只传本条指令的任务，供派工前验证替代关系。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplacementLimit {
+    pub id: String,
+    pub status: String,
+    pub superseded: bool,
+}
+
+/// 阶段、返工与任务替代护栏。讨论轮数按整条指令累计。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LimitContext {
     pub discuss_rounds: u32,
     pub task: Option<TaskLimit>,
+    pub replacement_tasks: Vec<ReplacementLimit>,
 }
 
 /// 干预研判才允许的处置。其他阶段出现该字段即拒绝。
@@ -102,6 +111,7 @@ pub fn parse_final(
     }
     let action = parse_action(&json, agents)?;
     validate_phase(phase, &action, limits)?;
+    validate_replacements(&action, limits)?;
     Ok(ParsedLeaderTurn { speech, action })
 }
 
@@ -356,6 +366,26 @@ fn validate_rework(task_id: &str, limits: &LimitContext) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_replacements(action: &ProtocolAction, limits: &LimitContext) -> AppResult<()> {
+    let ActionKind::Assign { tasks, .. } = &action.kind else { return Ok(()) };
+    let mut seen = std::collections::HashSet::new();
+    for id in tasks.iter().filter_map(|task| task.replaces_task_id.as_deref()) {
+        let Some(old) = limits.replacement_tasks.iter().find(|task| task.id == id) else {
+            return Err(invalid(format!("replaces_task_id「{id}」不属于本条指令或不存在；跨指令重试请新建任务，不要填写 replaces_task_id")));
+        };
+        if old.superseded {
+            return Err(invalid(format!("replaces_task_id「{id}」已经被替代")));
+        }
+        if !matches!(old.status.as_str(), "failed" | "cancelled") {
+            return Err(invalid(format!("replaces_task_id「{id}」的状态 {} 不能替代，只允许 failed/cancelled", old.status)));
+        }
+        if !seen.insert(id) {
+            return Err(invalid(format!("replaces_task_id「{id}」不能在同一批派工中重复替代")));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,7 +399,40 @@ mod tests {
         }
     }
     fn limits(rounds: u32, task: Option<TaskLimit>) -> LimitContext {
-        LimitContext { discuss_rounds: rounds, task }
+        LimitContext { discuss_rounds: rounds, task, replacement_tasks: Vec::new() }
+    }
+    #[test]
+    fn assign_rejects_replacement_outside_current_instruction() {
+        let agents = vec![agent("a", "前端")];
+        let action = serde_json::json!({"action":"assign","decision":"重试","tasks":[{
+            "to":"前端","title":"重试","detail":"重新执行","replaces_task_id":"旧指令或不存在的任务"
+        }]}).to_string();
+        let fence = char::from(96).to_string().repeat(3);
+        let text = [format!("{fence}imates"), action, fence].join("\n");
+        let error = parse_final(&text, Phase::Triage, &agents, &limits(0, None)).unwrap_err().to_string();
+        assert!(error.contains("replaces_task_id") && error.contains("本条指令"), "{error}");
+    }
+    #[test]
+    fn replacement_requires_unreplaced_failed_or_cancelled_task_and_unique_target() {
+        let agents = vec![agent("a", "前端")];
+        let fence = char::from(96).to_string().repeat(3);
+        for (status, superseded, count, expected) in [
+            ("failed", false, 1, None), ("cancelled", false, 1, None),
+            ("failed", true, 1, Some("已经被替代")),
+            ("pending", false, 1, Some("不能替代")), ("running", false, 1, Some("不能替代")),
+            ("done", false, 1, Some("不能替代")), ("failed", false, 2, Some("重复替代")),
+        ] {
+            let task = serde_json::json!({"to":"前端","title":"新任务","detail":"完成","replaces_task_id":"old"});
+            let action = serde_json::json!({"action":"assign","decision":"重试","tasks":vec![task; count]}).to_string();
+            let text = [format!("{fence}imates"), action, fence.clone()].join("\n");
+            let mut context = limits(0, None);
+            context.replacement_tasks.push(ReplacementLimit { id: "old".into(), status: status.into(), superseded });
+            let result = parse_final(&text, Phase::Review, &agents, &context);
+            match expected {
+                None => assert!(result.is_ok(), "{result:?}"),
+                Some(reason) => assert!(result.unwrap_err().to_string().contains(reason)),
+            }
+        }
     }
     fn task(id: &str, status: &str, rework: u32) -> TaskLimit {
         TaskLimit { id: id.into(), status: status.into(), rework_count: rework }

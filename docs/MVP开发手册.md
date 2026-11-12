@@ -246,7 +246,7 @@ M0 确认：claude 的 `bypassPermissions`、codex 的 `workspace-write`、grok 
 | `assign` | `decision`、`tasks`（每项含 `to`、`title`、`detail`） | 公布决议并派工 |
 | `rework` | `task_id`、`feedback` | 打回某个任务 |
 
-任务项可选 `replaces_task_id` 记录被替代的失败/取消旧任务。干预研判阶段另外要求 `disposition`，其余阶段禁止该字段。
+任务项可选 `replaces_task_id` 记录被替代的失败/取消旧任务；该任务必须属于本条指令、尚未被替代，且同一批不能重复替代。用户在新指令里说“重试一下”时，组长必须新建任务，不填写 replaces_task_id；旧任务事实与归属保留。干预研判阶段另外要求 `disposition`，其余阶段禁止该字段。
 
 解析规则：
 
@@ -259,6 +259,7 @@ M0 确认：claude 的 `bypassPermissions`、codex 的 `workspace-write`、grok 
   - action 在当前阶段不可用（见上一小节的表）。
   - `assign` 的任务数不在 1 到 8 之间，某个任务的 `to` 不是现有成员，或 `title/detail/decision` 为空。整个派工拒绝执行，不部分落库。
   - `rework` 的 `task_id` 不属于本条指令、不是当前有效批次的 `done/failed` 任务，或已达返工上限。`cancelled` 任务不能靠返工自动复活。
+  - assign 的 replaces_task_id 指向不存在、其他指令、已被替代或状态不是 failed/cancelled 的任务，或同一批重复替代。
   - `reply` 的 `message` 为空。
 - 文本字段先去空白再校验：`title` 最多 200 字符，`topic` 最多 4,000，`detail/decision/feedback/message` 各最多 16,000；整块 UTF-8 最多 128 KiB。这些是应用协议限制，超限返回具体错误。
 - 返工成功不自动恢复下游已取消任务。若仍需执行，组长必须用 `assign` 显式新建任务，并通过任务项可选 `replaces_task_id` 关联同一指令的失败/取消旧任务。旧记录保留；交付时按未被替代的有效任务判断遗留项。

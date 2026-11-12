@@ -18,6 +18,7 @@ const PROTOCOL: &str = "\
 # 指令协议\n\
 回复末尾只能有一个闭合的 imates 代码块，之前的文字是发言。\n\
 reply 需要 message。discuss 需要 to 和 topic。assign 需要 decision 和 tasks，每项含 to、title、detail，可选 replaces_task_id。rework 需要 task_id 和 feedback。\n\
+replaces_task_id 只能引用本条指令内尚未被替代的 failed/cancelled 任务，同一批不能重复替代；跨指令重试请新建任务，不要填写 replaces_task_id。旧消息里的任务编号不代表本条指令的任务。\n\
 只有干预研判可以带 disposition：continue、end 或 replace。";
 
 /// 组长或成员正在执行的阶段。
@@ -157,7 +158,7 @@ fn stage_body(stage: Stage, snapshot: &TeamSnapshot<'_>) -> AppResult<String> {
             )
         }
         Stage::Review => format!(
-            "# 组长验收\n对照项目规章和各成员的边界检查。违反规章或越界时用 rework 打回，rework 必须写任务编号。\n{}",
+            "# 组长验收\n对照项目规章和各成员的边界检查。违反规章或越界时用 rework 打回，rework 必须写任务编号。\n{}\n\n{PROTOCOL}",
             format_tasks(snapshot.tasks)
         ),
         Stage::Intervention => format!(
@@ -294,6 +295,9 @@ mod tests {
             assert!(prompt.contains("不得修改 .imates/"), "{prompt}");
         }
         assert!(prompts[0].contains("能直接答复就") && prompts[0].contains("reply"));
+        for prompt in &prompts[..4] {
+            assert!(prompt.contains("跨指令重试请新建任务，不要填写 replaces_task_id"));
+        }
         assert!(prompts[1].contains("必须") && prompts[1].contains("assign") && prompts[1].contains("reply"));
         assert!(prompts[2].contains("task-7") && prompts[2].contains("已经写好校验"));
         assert!(prompts[4].contains("登录校验"));

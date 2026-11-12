@@ -15,7 +15,7 @@ use crate::store::messages::{self, Message};
 use crate::store::projects::{self, Project};
 use crate::store::{new_id, now_ms};
 use prompts::{Stage, TaskBrief, TeamSnapshot};
-use protocol::{parse_final, ActionKind, LimitContext, Phase, TaskLimit};
+use protocol::{parse_final, ActionKind, LimitContext, Phase, ReplacementLimit, TaskLimit};
 
 const TURN_LIMIT: i64 = 30;
 
@@ -504,7 +504,10 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
     }
     let roster = agents::list(conn, &instruction.project_id)?;
     let task = rework_limit(conn, &outcome.final_text)?;
-    let limits = LimitContext { discuss_rounds: instruction.discuss_rounds.max(0) as u32, task };
+    let limits = LimitContext {
+        discuss_rounds: instruction.discuss_rounds.max(0) as u32, task,
+        replacement_tasks: replacement_limits(conn, &instruction.id)?,
+    };
     let parsed = match parse_final(&outcome.final_text, protocol_phase(&instruction.phase), &roster, &limits) {
         Ok(parsed) => parsed,
         Err(error) => return protocol_failed(conn, run, instruction, agent, outcome, &error.to_string()),
@@ -788,6 +791,12 @@ fn rework_limit(conn: &Connection, text: &str) -> AppResult<Option<TaskLimit>> {
         Err(error) => return Err(error),
     };
     Ok(Some(TaskLimit { id: task.id, status: task.status, rework_count: task.rework_count.max(0) as u32 }))
+}
+
+fn replacement_limits(conn: &Connection, instruction_id: &str) -> AppResult<Vec<ReplacementLimit>> {
+    Ok(instructions::list_tasks(conn, instruction_id)?.into_iter().map(|task| ReplacementLimit {
+        id: task.id, status: task.status, superseded: task.superseded_by_task_id.is_some(),
+    }).collect())
 }
 
 fn fence_body(text: &str) -> Option<&str> {
@@ -1173,7 +1182,10 @@ fn continue_instruction(conn: &Connection, instruction: &Instruction) -> AppResu
         conn.execute("UPDATE instructions SET resume_phase = NULL, updated_at = ?1 WHERE id = ?2", params![now_ms(), fresh.id])?;
         let roster = agents::list(conn, &fresh.project_id)?;
         let task = rework_limit(conn, &text)?;
-        let limits = LimitContext { discuss_rounds: fresh.discuss_rounds.max(0) as u32, task };
+        let limits = LimitContext {
+            discuss_rounds: fresh.discuss_rounds.max(0) as u32, task,
+            replacement_tasks: replacement_limits(conn, &fresh.id)?,
+        };
         let parsed = parse_final(&text, protocol_phase(&phase), &roster, &limits)?;
         return replay_action(conn, &fresh, parsed, stashed_run_id.as_deref());
     }
@@ -1445,6 +1457,58 @@ mod tests {
 
     fn turn_count(conn: &rusqlite::Connection, project_id: &str) -> i64 {
         instructions::active_instruction(conn, project_id).unwrap().unwrap().turn_count
+    }
+    #[test]
+    fn cross_instruction_replacement_gets_one_correction_and_new_assignment_succeeds() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let old = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        let batch = instructions::insert_batch(&conn, &old.id, Some(&agents[0].id), "旧决议", &[
+            NewTask { assignee_agent_id: agents[1].id.clone(), title: "旧任务".into(), detail: "旧内容".into(), replaces_task_id: None },
+        ]).unwrap();
+        conn.execute("UPDATE tasks SET status='failed' WHERE id=?1", [&batch.tasks[0].id]).unwrap();
+        conn.execute("UPDATE instructions SET status='completed' WHERE id=?1", [&old.id]).unwrap();
+        start_team(&conn, &project_id);
+        let first = advance(&conn, &project_id).unwrap().remove(0);
+        let bad = serde_json::json!({"action":"assign","decision":"重试","tasks":[{
+            "to":"前端","title":"重试任务","detail":"检查已有产出后完成","replaces_task_id":batch.tasks[0].id
+        }]}).to_string();
+        apply_outcome(&conn, &first.run_id, &ok_text(&fence("重新派工。", &bad))).unwrap();
+        assert_eq!(crate::store::runs::get(&conn, &first.run_id).unwrap().status, "failed");
+        let current = instructions::get(&conn, &first.instruction_id).unwrap();
+        assert_eq!(current.status, "running");
+        assert!(instructions::list_tasks(&conn, &current.id).unwrap().is_empty());
+        let correction = advance(&conn, &project_id).unwrap().remove(0);
+        assert!(correction.prompt.contains("replaces_task_id"));
+        assert!(correction.prompt.contains("新建任务"));
+        let good = r#"{"action":"assign","decision":"在新指令里重试","tasks":[{"to":"前端","title":"重试任务","detail":"检查已有产出后完成"}]}"#;
+        apply_outcome(&conn, &correction.run_id, &ok_text(&fence("新建任务。", good))).unwrap();
+        let tasks = instructions::list_tasks(&conn, &current.id).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].status, "pending");
+        let old_task = instructions::get_task(&conn, &batch.tasks[0].id).unwrap();
+        assert_eq!(old_task.status, "failed");
+        assert_eq!(old_task.superseded_by_task_id, None);
+        assert_eq!(instructions::get(&conn, &current.id).unwrap().phase, "execute");
+    }
+    #[test]
+    fn invalid_replacement_still_invalid_after_correction_waits_for_user() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let bad = r#"{"action":"assign","decision":"替代","tasks":[{"to":"前端","title":"任务","detail":"执行","replaces_task_id":"不存在"}]}"#;
+        for _ in 0..2 {
+            let turn = advance(&conn, &project_id).unwrap().remove(0);
+            apply_outcome(&conn, &turn.run_id, &ok_text(&fence("重新派工。", bad))).unwrap();
+            assert_eq!(crate::store::runs::get(&conn, &turn.run_id).unwrap().status, "failed");
+        }
+        let instruction = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(instruction.status, "waiting_user");
+        assert_eq!(instruction.turn_count, 2);
+        assert!(instruction.wait_reason.unwrap().contains("replaces_task_id"));
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
+        assert!(instructions::list_tasks(&conn, &instruction.id).unwrap().is_empty());
+        assert!(messages::list(&conn, &project_id, None, 200).unwrap().iter()
+            .any(|message| message.sender_type == "system" && message.content.contains("replaces_task_id")));
     }
 
     #[test]
