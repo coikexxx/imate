@@ -47,6 +47,9 @@ struct StoredSnapshot {
     stashed_text: Option<String>,
     #[serde(default)]
     stashed_phase: Option<String>,
+    /// 产生暂存文本的组长运行。继续时用它给决议消息补上模型信息；旧数据没有这一项。
+    #[serde(default)]
+    stashed_run_id: Option<String>,
     /// 运行中点名。不占用批次任务，做完后进入干预研判。
     #[serde(default)]
     mention: Option<StoredMention>,
@@ -69,6 +72,7 @@ impl Default for StoredSnapshot {
             pending: None,
             stashed_text: None,
             stashed_phase: None,
+            stashed_run_id: None,
             mention: None,
         }
     }
@@ -492,9 +496,10 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
                 detail: task.detail,
                 replaces_task_id: task.replaces_task_id,
             }).collect();
-            instructions::insert_batch(conn, &instruction.id, Some(&agent.id), &decision, &batch)?;
+            let inserted = instructions::insert_batch(conn, &instruction.id, Some(&agent.id), &decision, &batch)?;
+            messages::set_run(conn, inserted.decision_message_id, &run.id)?;
             let tx = conn.unchecked_transaction()?;
-            save_speech(&tx, instruction, agent, &parsed.speech)?;
+            save_speech(&tx, instruction, agent, &run.id, &parsed.speech)?;
             tx.execute("UPDATE instructions SET phase = 'execute', updated_at = ?1 WHERE id = ?2", params![now_ms(), instruction.id])?;
             set_project_status(&tx, &instruction.project_id, "executing")?;
             finish_run(&tx, &run.id, outcome, "ok")?;
@@ -503,7 +508,7 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
         }
         ActionKind::Reply { .. } => {
             let tx = conn.unchecked_transaction()?;
-            save_speech(&tx, instruction, agent, &parsed.speech)?;
+            save_speech(&tx, instruction, agent, &run.id, &parsed.speech)?;
             if let Some(notice) = leftover_notice(&instructions::list_tasks(&tx, &instruction.id)?) {
                 messages::insert(&tx, &instruction.project_id, "system", None, "system", &notice)?;
             }
@@ -519,7 +524,7 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
         }
         ActionKind::Discuss { to, topic } => {
             let tx = conn.unchecked_transaction()?;
-            save_speech(&tx, instruction, agent, &parsed.speech)?;
+            save_speech(&tx, instruction, agent, &run.id, &parsed.speech)?;
             let stored = StoredSnapshot {
                 pending: Some(StoredPending::Discuss { agent_ids: to, topic, launched: false }),
                 ..StoredSnapshot::default()
@@ -535,7 +540,7 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
         }
         ActionKind::Rework { task_id, .. } => {
             let tx = conn.unchecked_transaction()?;
-            save_speech(&tx, instruction, agent, &parsed.speech)?;
+            save_speech(&tx, instruction, agent, &run.id, &parsed.speech)?;
             let changed = tx.execute(
                 "UPDATE tasks SET status = 'pending', rework_count = rework_count + 1, finished_at = NULL \
                  WHERE id = ?1 AND instruction_id = ?2",
@@ -566,7 +571,7 @@ fn protocol_failed(conn: &Connection, run: &RunRow, instruction: &Instruction, a
         return Ok(());
     }
     finish_run_with(&tx, &run.id, outcome, "failed", &format!("协议错误：{reason}"))?;
-    save_speech(&tx, instruction, agent, &outcome.final_text)?;
+    save_speech(&tx, instruction, agent, &run.id, &outcome.final_text)?;
     let notice = format!("组长的回复在重发后仍然不符合指令协议：{reason}\n原文已作为普通发言保留。可以重试、补充说明或放弃。");
     messages::insert(&tx, &instruction.project_id, "system", None, "system", &notice)?;
     mark_waiting(&tx, instruction, &format!("指令协议错误：{reason}"))?;
@@ -582,6 +587,7 @@ fn apply_execute(conn: &Connection, run: &RunRow, instruction: &Instruction, age
         outcome.final_text.clone()
     };
     let report = messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "report", &content)?;
+    messages::set_run(conn, report.id, &run.id)?;
     if outcome.status == "ok" {
         instructions::finish_task(conn, &task_id, "done", Some(report.id))?;
     } else {
@@ -612,7 +618,8 @@ fn apply_member_discuss(conn: &Connection, instruction: &Instruction, agent: &Ag
     let run = load_run(conn, run_id)?;
     if outcome.status == "ok" {
         let content = if outcome.final_text.trim().is_empty() { "（没有输出）" } else { outcome.final_text.trim() };
-        messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "discussion", content)?;
+        let speech = messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "discussion", content)?;
+        messages::set_run(conn, speech.id, &run.id)?;
         finish_run(conn, &run.id, outcome, "ok")?;
     } else {
         // 记为未发言，本轮照常继续。半截输出不当成发言。
@@ -764,11 +771,13 @@ fn fence_body(text: &str) -> Option<&str> {
     Some(after[..end].trim())
 }
 
-fn save_speech(conn: &Connection, instruction: &Instruction, agent: &Agent, speech: &str) -> AppResult<()> {
+/// 保存组长的发言，并把消息链接到产生它的运行（用于显示该次运行使用的模型）。
+fn save_speech(conn: &Connection, instruction: &Instruction, agent: &Agent, run_id: &str, speech: &str) -> AppResult<()> {
     if speech.trim().is_empty() {
         return Ok(());
     }
-    messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "discussion", speech.trim())?;
+    let message = messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "discussion", speech.trim())?;
+    messages::set_run(conn, message.id, run_id)?;
     Ok(())
 }
 
@@ -1059,12 +1068,13 @@ fn arm_next_input(conn: &Connection, instruction: &Instruction) -> AppResult<()>
 
 fn park_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agent: &Agent, outcome: &RunOutcome) -> AppResult<()> {
     let tx = conn.unchecked_transaction()?;
-    save_speech(&tx, instruction, agent, speech_of(&outcome.final_text))?;
+    save_speech(&tx, instruction, agent, &run.id, speech_of(&outcome.final_text))?;
     finish_run(&tx, &run.id, outcome, "ok")?;
     remember_agent(&tx, run, agent, outcome)?;
     let mut snap = load_snapshot(&instructions::get(&tx, &instruction.id)?.context_snapshot_json)?;
     snap.stashed_text = Some(outcome.final_text.clone());
     snap.stashed_phase = Some(instruction.phase.clone());
+    snap.stashed_run_id = Some(run.id.clone());
     save_snapshot(&tx, &instruction.id, &snap)?;
     arm_next_input(&tx, instruction)?;
     tx.commit()?;
@@ -1081,7 +1091,8 @@ fn apply_mention(conn: &Connection, run: &RunRow, instruction: &Instruction, age
     } else {
         outcome.final_text.clone()
     };
-    messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "report", &content)?;
+    let report = messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "report", &content)?;
+    messages::set_run(conn, report.id, &run.id)?;
     finish_run(conn, &run.id, outcome, if outcome.status == "ok" { "ok" } else { "failed" })?;
     remember_agent(conn, run, agent, outcome)?;
     let fresh = instructions::get(conn, &instruction.id)?;
@@ -1104,7 +1115,7 @@ fn apply_intervention(
     parsed: &protocol::ParsedLeaderTurn,
 ) -> AppResult<()> {
     let tx = conn.unchecked_transaction()?;
-    save_speech(&tx, instruction, agent, &parsed.speech)?;
+    save_speech(&tx, instruction, agent, &run.id, &parsed.speech)?;
     finish_run(&tx, &run.id, outcome, "ok")?;
     remember_agent(&tx, run, agent, outcome)?;
     tx.commit()?;
@@ -1112,7 +1123,7 @@ fn apply_intervention(
         (ActionKind::Reply { .. }, Some(protocol::Disposition::Continue)) => continue_instruction(conn, instruction),
         (ActionKind::Reply { .. }, Some(protocol::Disposition::End)) => end_instruction(conn, instruction),
         (ActionKind::Assign { decision, tasks }, Some(protocol::Disposition::Replace)) => {
-            replace_batch(conn, instruction, agent, decision, tasks)
+            replace_batch(conn, instruction, agent, &run.id, decision, tasks)
         }
         _ => {
             mark_waiting(conn, instruction, "干预阶段只接受 reply+continue、reply+end 或 assign+replace")?;
@@ -1130,13 +1141,14 @@ fn continue_instruction(conn: &Connection, instruction: &Instruction) -> AppResu
     let snap = load_snapshot(&fresh.context_snapshot_json)?;
     if let Some(text) = snap.stashed_text.clone() {
         let phase = snap.stashed_phase.clone().unwrap_or_else(|| fresh.phase.clone());
+        let stashed_run_id = snap.stashed_run_id.clone();
         clear_stash(conn, &fresh.id)?;
         conn.execute("UPDATE instructions SET resume_phase = NULL, updated_at = ?1 WHERE id = ?2", params![now_ms(), fresh.id])?;
         let roster = agents::list(conn, &fresh.project_id)?;
         let task = rework_limit(conn, &text)?;
         let limits = LimitContext { discuss_rounds: fresh.discuss_rounds.max(0) as u32, task };
         let parsed = parse_final(&text, protocol_phase(&phase), &roster, &limits)?;
-        return replay_action(conn, &fresh, parsed);
+        return replay_action(conn, &fresh, parsed, stashed_run_id.as_deref());
     }
     restore_phase(conn, &fresh)
 }
@@ -1163,6 +1175,7 @@ fn replace_batch(
     conn: &Connection,
     instruction: &Instruction,
     agent: &Agent,
+    run_id: &str,
     decision: &str,
     tasks: &[protocol::AssignedTask],
 ) -> AppResult<()> {
@@ -1177,12 +1190,14 @@ fn replace_batch(
         detail: task.detail.clone(),
         replaces_task_id: task.replaces_task_id.clone(),
     }).collect();
-    instructions::insert_batch(conn, &instruction.id, Some(&agent.id), decision, &batch)?;
+    let inserted = instructions::insert_batch(conn, &instruction.id, Some(&agent.id), decision, &batch)?;
+    messages::set_run(conn, inserted.decision_message_id, run_id)?;
     set_phase(conn, &instruction.id, "execute")?;
     set_project_status(conn, &instruction.project_id, "executing")
 }
 
-fn replay_action(conn: &Connection, instruction: &Instruction, parsed: protocol::ParsedLeaderTurn) -> AppResult<()> {
+/// 重放暂存的组长动作。`run_id` 是产生该动作的组长运行；旧数据没有记录时为 None，决议消息不链接。
+fn replay_action(conn: &Connection, instruction: &Instruction, parsed: protocol::ParsedLeaderTurn, run_id: Option<&str>) -> AppResult<()> {
     let leader = leader(conn, &instruction.project_id)?;
     match parsed.action.kind {
         ActionKind::Assign { decision, tasks } => {
@@ -1192,7 +1207,10 @@ fn replay_action(conn: &Connection, instruction: &Instruction, parsed: protocol:
                 detail: task.detail,
                 replaces_task_id: task.replaces_task_id,
             }).collect();
-            instructions::insert_batch(conn, &instruction.id, Some(&leader.id), &decision, &batch)?;
+            let inserted = instructions::insert_batch(conn, &instruction.id, Some(&leader.id), &decision, &batch)?;
+            if let Some(run_id) = run_id {
+                messages::set_run(conn, inserted.decision_message_id, run_id)?;
+            }
             set_phase(conn, &instruction.id, "execute")?;
             set_project_status(conn, &instruction.project_id, "executing")
         }
@@ -1250,6 +1268,7 @@ fn clear_stash(conn: &Connection, instruction_id: &str) -> AppResult<()> {
     let mut snap = load_snapshot(&fresh.context_snapshot_json)?;
     snap.stashed_text = None;
     snap.stashed_phase = None;
+    snap.stashed_run_id = None;
     save_snapshot(conn, instruction_id, &snap)
 }
 
@@ -1513,6 +1532,70 @@ mod tests {
         let systems: Vec<_> = messages::list(&conn, &project_id, None, 50).unwrap().into_iter().filter(|message| message.kind == "system").collect();
         assert!(systems.iter().all(|message| !message.content.contains("第三步")));
         assert_eq!(projects::get(&conn, &project_id).unwrap().status, "idle");
+    }
+
+    /// 给运行写入可区分的模型值，返回期望的 model_info。
+    fn tag_run(conn: &rusqlite::Connection, run_id: &str, tag: &str) -> Option<messages::ModelInfo> {
+        let (requested, reported) = (format!("请求-{tag}"), format!("报告-{tag}"));
+        conn.execute("UPDATE runs SET requested_model = ?1, reported_model = ?2 WHERE id = ?3", rusqlite::params![requested, reported, run_id]).unwrap();
+        Some(messages::ModelInfo { requested_model: Some(requested), reported_model: Some(reported) })
+    }
+
+    fn infos_of(conn: &rusqlite::Connection, project_id: &str, kind: &str) -> Vec<Option<messages::ModelInfo>> {
+        messages::list(conn, project_id, None, 100).unwrap().into_iter().filter(|message| message.kind == kind).map(|message| message.model_info).collect()
+    }
+
+    #[test]
+    fn member_messages_link_to_the_run_that_produced_them_and_others_do_not() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        // 讨论：组长发言与成员发言各链接到自己的运行。
+        let leader = advance(&conn, &project_id).unwrap();
+        let leader_info = tag_run(&conn, &leader[0].run_id, "组长讨论");
+        apply_outcome(&conn, &leader[0].run_id, &ok_text(&fence("先讨论。", r#"{"action":"discuss","to":["前端"],"topic":"校验"}"#))).unwrap();
+        let members = advance(&conn, &project_id).unwrap();
+        let member_info = tag_run(&conn, &members[0].run_id, "成员讨论");
+        apply_outcome(&conn, &members[0].run_id, &ok_text("成员的看法")).unwrap();
+        assert_eq!(infos_of(&conn, &project_id, "discussion"), vec![leader_info, member_info]);
+
+        // 派工：决议消息与组长发言链接到本次组长运行；执行报告链接到执行运行。
+        let leader = advance(&conn, &project_id).unwrap();
+        let decide_info = tag_run(&conn, &leader[0].run_id, "组长派工");
+        let assign = fence("开工。", r#"{"action":"assign","decision":"先做校验","tasks":[{"to":"前端","title":"校验","detail":"做校验"}]}"#);
+        apply_outcome(&conn, &leader[0].run_id, &ok_text(&assign)).unwrap();
+        assert_eq!(infos_of(&conn, &project_id, "decision"), vec![decide_info.clone()]);
+        let exec = advance(&conn, &project_id).unwrap();
+        let exec_info = tag_run(&conn, &exec[0].run_id, "成员执行");
+        apply_outcome(&conn, &exec[0].run_id, &ok_text("校验做完了")).unwrap();
+        assert_eq!(infos_of(&conn, &project_id, "report"), vec![exec_info]);
+
+        // 用户消息与系统消息不链接。
+        for message in messages::list(&conn, &project_id, None, 100).unwrap() {
+            if message.sender_type != "agent" {
+                assert_eq!(message.model_info, None, "{} 消息不应链接运行", message.sender_type);
+            }
+        }
+    }
+
+    #[test]
+    fn replayed_decision_links_to_the_leader_run_that_was_parked() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap();
+        let parked_info = tag_run(&conn, &leader[0].run_id, "被暂存的组长回合");
+        queue_user_text(&conn, &project_id, "不要派工").unwrap();
+        let assign = fence("先派工。", r#"{"action":"assign","decision":"先做接口","tasks":[{"to":"前端","title":"接口","detail":"做接口"}]}"#);
+        apply_outcome(&conn, &leader[0].run_id, &ok_text(&assign)).unwrap();
+        assert_eq!(infos_of(&conn, &project_id, "discussion"), vec![parked_info.clone()]);
+        let review = advance(&conn, &project_id).unwrap();
+        let review_info = tag_run(&conn, &review[0].run_id, "干预回合");
+        apply_outcome(&conn, &review[0].run_id, &ok_text(&fence(
+            "按原计划。",
+            r#"{"action":"reply","disposition":"continue","message":"继续"}"#,
+        ))).unwrap();
+        // 重放出来的决议是被暂存那一回合的产物，不是干预回合的。
+        assert_eq!(infos_of(&conn, &project_id, "decision"), vec![parked_info.clone()]);
+        assert_eq!(infos_of(&conn, &project_id, "discussion"), vec![parked_info, review_info]);
     }
 
     #[test]

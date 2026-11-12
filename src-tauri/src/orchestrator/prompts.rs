@@ -237,7 +237,7 @@ mod tests {
             id, project_id: "p".into(),
             sender_type: if sender.is_some() { "agent" } else { "user" }.into(),
             sender_agent_id: sender.map(str::to_owned),
-            kind: "chat".into(), content: content.into(), round: None, created_at: id,
+            kind: "chat".into(), content: content.into(), round: None, created_at: id, model_info: None,
         }
     }
 

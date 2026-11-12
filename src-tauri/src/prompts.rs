@@ -110,6 +110,6 @@ mod tests {
     }
     fn message(id: i64, content: &str, sender: Option<&str>) -> Message {
         Message { id, project_id: "project".into(), sender_type: if sender.is_some() { "assistant" } else { "user" }.into(),
-            sender_agent_id: sender.map(str::to_owned), kind: "chat".into(), content: content.into(), round: None, created_at: id }
+            sender_agent_id: sender.map(str::to_owned), kind: "chat".into(), content: content.into(), round: None, created_at: id, model_info: None }
     }
 }

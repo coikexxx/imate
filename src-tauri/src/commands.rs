@@ -788,6 +788,7 @@ impl AppState {
             let run = runs::insert_running(&tx, Some(&prepared.agent.id), "execute", &command, request.session_id.as_deref())?;
             runs::set_requested_model(&tx, &run.id, request.model.as_deref())?;
             let placeholder = messages::insert(&tx, project_id, "assistant", Some(&prepared.agent.id), "chat", "")?;
+            messages::set_run(&tx, placeholder.id, &run.id)?;
             save_owner(&tx, &self.new_owner(&run.id, Some(project_id), None, &folder))?;
             tx.execute("UPDATE projects SET status='executing',updated_at=?1 WHERE id=?2", rusqlite::params![crate::store::now_ms(), project_id])?;
             tx.commit()?;
@@ -843,6 +844,7 @@ impl AppState {
             let run = runs::insert_running(&tx, Some(&prepared.agent.id), "execute", &command, request.session_id.as_deref())?;
             runs::set_requested_model(&tx, &run.id, request.model.as_deref())?;
             let placeholder = messages::insert(&tx, project_id, "assistant", Some(&prepared.agent.id), "chat", "")?;
+            messages::set_run(&tx, placeholder.id, &run.id)?;
             save_owner(&tx, &self.new_owner(&run.id, Some(project_id), None, &folder))?;
             tx.execute("UPDATE projects SET status='executing',updated_at=?1 WHERE id=?2", rusqlite::params![crate::store::now_ms(), project_id])?;
             tx.commit()?;
@@ -1647,6 +1649,27 @@ mod integration_tests {
         };
         let started = state.launch_existing_message(&first, user.id, &cli).unwrap();
         assert_eq!(run_models(&state, &started.run_id), (Some("成员模型".into()), None));
+    }
+    #[test]
+    fn direct_placeholder_messages_link_to_their_run_and_user_messages_do_not() {
+        let (state, _folder, first, _second, cli) = setup();
+        let started = state.prepare_send(&first, "有模型", &cli).unwrap();
+        record_requested_model(&state, &started.run_id, Some("请求值"));
+        {
+            let conn = state.db_lock().unwrap();
+            conn.execute("UPDATE runs SET reported_model='报告值' WHERE id=?1", [&started.run_id]).unwrap();
+            let placeholder = messages::get(&conn, started.agent_message_id).unwrap();
+            assert_eq!(placeholder.model_info, Some(messages::ModelInfo { requested_model: Some("请求值".into()), reported_model: Some("报告值".into()) }));
+            assert_eq!(messages::get(&conn, started.user_message.id).unwrap().model_info, None);
+        }
+        // 先落库再启动的路径：占位消息同样链接到运行。
+        let (state, _folder, first, _second, cli) = setup();
+        let user = messages::insert(&state.db_lock().unwrap(), &first, "user", None, "chat", "@组长 已落库的消息").unwrap();
+        let started = state.launch_existing_message(&first, user.id, &cli).unwrap();
+        let conn = state.db_lock().unwrap();
+        assert_eq!(messages::get(&conn, started.agent_message_id).unwrap().model_info,
+            Some(messages::ModelInfo { requested_model: None, reported_model: None }));
+        assert_eq!(messages::get(&conn, user.id).unwrap().model_info, None);
     }
     #[test]
     #[cfg(unix)]
