@@ -1,8 +1,12 @@
 import type { CliConfig, CliConfigInput, CliModel } from "../types";
 
-/** 列表页分组：按是否检测到安装，各组保持后端给出的顺序 */
+/** 列表页分三组：已安装、未安装（二者都是已接入的）、暂未支持（含只做展示的占位），各组保持后端给出的顺序 */
 export function groupClis(configs: CliConfig[]) {
-  return { installed: configs.filter((c) => c.installed), missing: configs.filter((c) => !c.installed) };
+  return {
+    installed: configs.filter((c) => c.supported && c.installed),
+    missing: configs.filter((c) => c.supported && !c.installed),
+    unsupported: configs.filter((c) => !c.supported),
+  };
 }
 
 /** 开关显示：未支持、未安装一律关闭且不可切换 */
