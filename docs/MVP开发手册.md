@@ -484,6 +484,7 @@ messages: run_id                             -- 成员消息指向产生它的�
 - **请求的模型**（`requested_model`）：启动该次运行时实际传给 CLI 的有效模型，即成员自填的模型，或成员留空时回落到该 CLI 在「应用管理」里的默认模型；为空表示交由 CLI 自己决定。
 - **CLI 报告的模型**（`reported_model`）：CLI 在事件流里回报的模型。目前 Claude、Grok 在启动事件里回报；Codex、Dsh 的事件流没有模型字段，只有请求值。内置助理的草稿运行只记录报告值，不记录请求值。
 - 成员消息通过 `messages.run_id` 链到产生它的运行，消息查询随带 `modelInfo`（`requestedModel`、`reportedModel`）。有运行但两个值都没记录时 `modelInfo` 是两个空值，没有运行（旧消息、用户消息、系统消息）时 `modelInfo` 为 `null`，两者不同。
+- **Dsh 的请求值**是 Dsh 的模型选择（provider / model，库里存为 JSON），界面显示为「provider / model」。Dsh 使用账号认证且成员未指定模型时，Dsh 实际会补用自己的默认模型，界面仍显示「CLI 默认模型（未回报）」。
 - **群聊显示**：成员消息的发送者名字旁显示灰色小字，规则见 `src/lib/modelNote.ts`：有报告值显示报告值；只有请求值显示「xxx（请求值，CLI 未回报）」；两者都没有显示「CLI 默认模型（未回报）」；`modelInfo` 为 `null` 不显示。
 - 历史（升级前的）消息不回填、不显示；流式回复期间不显示，回复完成后出现；升级前已暂存的组长回合，重放其决议时不链接运行。
 

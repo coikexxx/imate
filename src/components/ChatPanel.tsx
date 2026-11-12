@@ -156,7 +156,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
         const note = message.senderType === "user" || message.senderType === "system" ? null : modelNote(message.modelInfo);
         return <article key={message.id} className={`mb-3 rounded px-3 py-2 ${message.senderType === "user" ? "bg-sky-950/50" : message.senderType === "system" ? "bg-amber-950/30" : "bg-slate-900"}`}>
           <p className="mb-1 text-xs text-slate-400">{sender(message.senderAgentId, message.senderType)}
-            {note && <span className="ml-2 text-xs text-slate-500" title={`使用模型：${note}`}>{note}</span>}</p>
+            {note && <span className="ml-2 max-w-full break-words text-xs text-slate-500" title={`使用模型：${note}`}>{note}</span>}</p>
           <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">{content || (stream?.finished ? "（本回合没有正文）" : "等待成员回复…")}</div>
         </article>;
       })}

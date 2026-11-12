@@ -1024,6 +1024,8 @@ impl AppState {
         let run = runs::insert_running(&tx, Some(&prepared.agent.id), "execute",
             &serde_json::to_string(&json!({"program":spec.program,"args":spec.args})).map_err(|e| AppError::Invalid(e.to_string()))?, None)?;
         runs::set_requested_model(&tx, &run.id, request.model.as_deref())?;
+        // 占位消息之后由新运行产出，改链到新运行，不再指向失败的旧运行。
+        messages::set_run(&tx, started.agent_message_id, &run.id)?;
         save_owner(&tx, &self.new_owner(&run.id, Some(project_id), None, &request.cwd))?;
         tx.execute("UPDATE projects SET status='executing' WHERE id=?1", [project_id])?; tx.commit()?;
         let old_id = started.run_id.clone();
@@ -1670,6 +1672,25 @@ mod integration_tests {
         assert_eq!(messages::get(&conn, started.agent_message_id).unwrap().model_info,
             Some(messages::ModelInfo { requested_model: None, reported_model: None }));
         assert_eq!(messages::get(&conn, user.id).unwrap().model_info, None);
+    }
+    #[test]
+    fn rebuilt_session_relinks_the_placeholder_message_to_the_new_run() {
+        let (state, _folder, first, _second, cli) = setup();
+        let mut started = state.prepare_send(&first, "重建会话", &cli).unwrap();
+        let old_run_id = started.run_id.clone();
+        {
+            let conn = state.db_lock().unwrap();
+            conn.execute("UPDATE runs SET requested_model='旧请求', reported_model='旧报告' WHERE id=?1", [&old_run_id]).unwrap();
+            conn.execute("UPDATE agents SET model='新请求' WHERE id=?1", [&started.prepared.agent.id]).unwrap();
+            let before = messages::get(&conn, started.agent_message_id).unwrap();
+            assert_eq!(before.model_info, Some(messages::ModelInfo { requested_model: Some("旧请求".into()), reported_model: Some("旧报告".into()) }));
+        }
+        state.rebuild_started(&mut started, &cli, &outcome("failed")).unwrap();
+        assert_ne!(started.run_id, old_run_id);
+        let conn = state.db_lock().unwrap();
+        // 占位消息改链到新运行：显示新运行的请求值，而不是失败的旧运行的值。
+        assert_eq!(messages::get(&conn, started.agent_message_id).unwrap().model_info,
+            Some(messages::ModelInfo { requested_model: Some("新请求".into()), reported_model: None }));
     }
     #[test]
     #[cfg(unix)]

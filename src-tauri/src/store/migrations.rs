@@ -190,8 +190,8 @@ mod tests {
     #[test]
     fn run_model_migration_adds_three_columns_and_leaves_old_rows_empty() {
         let mut conn = Connection::open_in_memory().unwrap();
-        // 只应用到上一版（本迁移之前）的全部迁移。
-        let previous = MIGRATIONS.len() - 1;
+        // 只应用到本迁移之前的两条迁移（固定为 2，之后再追加迁移也不会漂移）。
+        let previous = 2;
         for sql in &MIGRATIONS[..previous] { conn.execute_batch(sql).unwrap(); }
         conn.pragma_update(None, "user_version", previous as i64).unwrap();
         conn.execute("INSERT INTO projects (id,name,description,folder_path,status,created_at,updated_at) VALUES ('p','甲','','/tmp','idle',1,1)", []).unwrap();
@@ -202,7 +202,7 @@ mod tests {
 
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
         assert_eq!(version, MIGRATIONS.len() as i64);
-        assert_eq!(version, previous as i64 + 1);
+        assert!(version > previous as i64);
         let columns = |table: &str| -> Vec<String> {
             let mut statement = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap();
             statement.query_map([], |row| row.get::<_, String>(1)).unwrap().map(|name| name.unwrap()).collect()
