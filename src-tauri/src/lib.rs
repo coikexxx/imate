@@ -8,6 +8,7 @@ mod assistant;
 mod prompts;
 mod runner;
 mod cli_registry;
+mod cli_config;
 mod commands;
 mod error;
 mod adapters;
@@ -30,6 +31,7 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let conn = store::open(&data_dir.join("imates.db"))?;
+            cli_config::load_path_overrides(&conn);
             app.manage(commands::AppState::new(conn, data_dir)?);
             Ok(())
         })

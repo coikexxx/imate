@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -65,6 +66,43 @@ pub fn is_supported(id: &str) -> bool {
     matches!(id, "claude" | "codex" | "grok" | "dsh")
 }
 
+/// 应用管理里手动指定的 CLI 程序路径。进程内共享，保存配置和启动时写入。
+static PATH_OVERRIDES: Mutex<Vec<(String, PathBuf)>> = Mutex::new(Vec::new());
+
+/// 设置或清除（传 `None`）某个 CLI 的手动路径。
+pub fn set_path_override(id: &str, path: Option<PathBuf>) {
+    let mut overrides = PATH_OVERRIDES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    overrides.retain(|(key, _)| key != id);
+    if let Some(path) = path { overrides.push((id.to_string(), path)); }
+}
+
+fn path_override(id: &str) -> Option<PathBuf> {
+    PATH_OVERRIDES.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter().find(|(key, _)| key == id).map(|(_, path)| path.clone())
+}
+
+/// 用手动指定的程序构造解析结果。PATH 前面补上程序所在目录，让 npm 垫片能找到同目录的 node。
+fn resolved_from_override(id: &str, program: PathBuf, process_path: Option<OsString>) -> Option<ResolvedCli> {
+    let spec = KNOWN_CLIS.iter().find(|spec| spec.id == id)?;
+    if !program.is_absolute() || !program.is_file() { return None; }
+    let mut dirs: Vec<PathBuf> = program.parent().map(|parent| vec![parent.to_path_buf()]).unwrap_or_default();
+    if let Some(path) = &process_path { dirs.extend(std::env::split_paths(path)); }
+    let path_env = std::env::join_paths(dirs).ok()?;
+    Some(ResolvedCli {
+        info: CliInfo {
+            id: spec.id.to_string(),
+            label: spec.label.to_string(),
+            installed: true,
+            supported: is_supported(spec.id),
+            path: Some(program.to_string_lossy().into_owned()),
+            version: None,
+        },
+        program,
+        path_env,
+        environment_source: EnvironmentSource::Process,
+    })
+}
+
 /// 从 `--version` 输出里取出第一个以数字开头且含点的版本词。
 pub fn parse_version(output: &str) -> Option<String> {
     output
@@ -94,7 +132,7 @@ pub fn resolve_environment_with(
 }
 
 /// 输出写到私有临时文件，避免后代持有管道导致 reader 无界等待。
-fn probe_output(mut command: Command, timeout: Duration) -> Option<String> {
+pub(crate) fn probe_output(mut command: Command, timeout: Duration) -> Option<String> {
     use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom};
     let path = std::env::temp_dir().join(format!("imates-probe-{}", uuid::Uuid::new_v4()));
@@ -193,6 +231,12 @@ fn resolve_with_fallback(
 pub fn resolve_cli(id: &str) -> AppResult<ResolvedCli> {
     let spec = KNOWN_CLIS.iter().find(|spec| spec.id == id)
         .ok_or_else(|| AppError::Invalid(format!("未知 CLI：{id}")))?;
+    if let Some(program) = path_override(id) {
+        let mut resolved = resolved_from_override(id, program, std::env::var_os("PATH"))
+            .ok_or_else(|| AppError::Invalid(format!("手动指定的 {} 路径不可用，请在应用管理中重新指定", spec.label)))?;
+        resolved.info.version = run_version(&resolved.program, &resolved.path_env);
+        return Ok(resolved);
+    }
     let mut resolved = resolve_with_fallback(id, std::env::var_os("PATH"), login_shell_path, find_in_path)
         .ok_or_else(|| AppError::Invalid(format!("未找到 {}，请检查 PATH 或登录 shell 启动配置", spec.label)))?;
     resolved.info.version = run_version(&resolved.program, &resolved.path_env);
@@ -229,7 +273,9 @@ pub fn detect_all() -> Vec<CliInfo> {
     });
     let fallback = needs_fallback.then(|| login_shell_path(Duration::from_secs(3))).flatten();
     KNOWN_CLIS.iter().map(|spec| {
-        let resolved = resolve_with_fallback(spec.id, process_path.clone(), |_| fallback.clone(), find_in_path);
+        let resolved = path_override(spec.id)
+            .and_then(|program| resolved_from_override(spec.id, program, process_path.clone()))
+            .or_else(|| resolve_with_fallback(spec.id, process_path.clone(), |_| fallback.clone(), find_in_path));
         match resolved {
             Some(resolved) => CliInfo { version: run_version(&resolved.program, &resolved.path_env), ..resolved.info },
             None => CliInfo { id: spec.id.into(), label: spec.label.into(), installed: false,
@@ -407,4 +453,34 @@ mod tests {
         assert_eq!(version_command(&shim, &path_env), None);
     }
 
+    #[test]
+    fn override_resolves_an_existing_absolute_file_and_prepends_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join(if cfg!(windows) { "claude.exe" } else { "claude" });
+        std::fs::write(&program, b"").unwrap();
+        let resolved = resolved_from_override("claude", program.clone(), Some("/usr/bin".into())).unwrap();
+        assert!(resolved.info.installed && resolved.info.supported);
+        assert_eq!(resolved.program, program);
+        assert_eq!(resolved.info.path.as_deref(), Some(program.to_string_lossy().as_ref()));
+        let first = std::env::split_paths(&resolved.path_env).next().unwrap();
+        assert_eq!(first, dir.path());
+    }
+
+    #[test]
+    fn override_rejects_relative_or_missing_files() {
+        assert!(resolved_from_override("claude", PathBuf::from("claude"), None).is_none());
+        let missing = std::env::temp_dir().join("imates-no-such-cli-binary");
+        assert!(resolved_from_override("claude", missing, None).is_none());
+        assert!(resolved_from_override("unknown", std::env::temp_dir(), None).is_none());
+    }
+
+    #[test]
+    fn set_path_override_replaces_and_clears() {
+        // pi 没有适配器，其他测试不会用到它的覆盖
+        set_path_override("pi", Some(PathBuf::from("/a")));
+        set_path_override("pi", Some(PathBuf::from("/b")));
+        assert_eq!(path_override("pi"), Some(PathBuf::from("/b")));
+        set_path_override("pi", None);
+        assert_eq!(path_override("pi"), None);
+    }
 }
