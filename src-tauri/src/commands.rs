@@ -1279,14 +1279,17 @@ async fn drive_team(app: tauri::AppHandle, project_id: String, mut pending: Vec<
                     let state = app.state::<AppState>();
                     let Ok(conn) = state.db_lock() else { halted = true; continue };
                     let floor = max_message_id(&conn, &project_id).unwrap_or(0);
-                    let applied = crate::orchestrator::apply_outcome(&conn, &spec.run_id, &outcome);
+                    let applied = apply_team_outcome(&conn, &spec.run_id, &outcome);
+                    let saved = runs::get(&conn, &spec.run_id).ok();
                     emit_messages_after(&app, &conn, &project_id, &spec, floor);
                     drop(conn);
                     let error = match &applied {
-                        Ok(()) => outcome.error.clone(),
-                        Err(failure) => outcome.error.clone().or_else(|| Some(failure.to_string())),
+                        Ok(()) => saved.as_ref().and_then(|run| run.error.clone()).or_else(|| outcome.error.clone()),
+                        Err(failure) => Some(failure.to_string()),
                     };
-                    emit_run_finished(&app, &project_id, &spec, finished_status(&outcome.status, applied.is_ok()), error);
+                    let status = saved.as_ref().map(|run| run.status.as_str())
+                        .unwrap_or_else(|| finished_status(&outcome.status, applied.is_ok()));
+                    emit_run_finished(&app, &project_id, &spec, status, error);
                     if applied.is_err() { halted = true; }
                 }
                 Ok((spec, StepResult::NotStarted(reason))) => {
@@ -1464,6 +1467,22 @@ fn wait_instruction(conn: &Connection, project_id: &str, reason: &str) -> AppRes
     Ok(())
 }
 
+fn apply_team_outcome(conn: &Connection, run_id: &str, outcome: &crate::runner::RunOutcome) -> AppResult<()> {
+    // 迟到或重复的结果不进入兜底，避免把已恢复的指令再次置为等待。
+    if runs::get(conn, run_id)?.status != "running" {
+        return Err(AppError::Invalid("运行已结束".into()));
+    }
+    match crate::orchestrator::apply_outcome(conn, run_id, outcome) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if let Err(cleanup) = crate::orchestrator::fail_outcome(conn, run_id, outcome, &error.to_string()) {
+                return Err(AppError::Invalid(format!("回合结果处理失败：{error}；保存失败状态时出错：{cleanup}")));
+            }
+            Err(error)
+        }
+    }
+}
+
 #[tauri::command]
 pub fn list_instructions(state: State<'_, AppState>, project_id: String) -> AppResult<Vec<crate::store::instructions::Instruction>> {
     let conn = state.db_lock()?;
@@ -1586,6 +1605,85 @@ mod integration_tests {
         assert_eq!(owner.pid, Some(123456)); assert!(!owner.nonce.is_empty());
         assert!(!serde_json::to_string(&owner).unwrap().contains("执行任务"));
         assert!(crate::store::instructions::active_instruction(&state.db_lock().unwrap(), &first).unwrap().is_none());
+    }
+    #[test]
+    fn applying_team_outcome_failure_closes_run_and_allows_safe_retry() {
+        let (state, _folder, project_id, _, _) = setup();
+        let conn = state.db_lock().unwrap();
+        let source = messages::insert(&conn, &project_id, "user", None, "instruction", "做一次校验").unwrap();
+        let instruction = crate::store::instructions::insert_instruction(&conn, &project_id, source.id, "team", None, "triage").unwrap();
+        let turn = crate::orchestrator::advance(&conn, &project_id).unwrap().remove(0);
+        // 注入真正的落库错误，避免把协议校验失败误当成兜底路径。
+        conn.execute_batch("CREATE TEMP TRIGGER reject_batch BEFORE INSERT ON tasks BEGIN SELECT RAISE(ABORT, '派工写入故障'); END;").unwrap();
+        let mut result = outcome("ok");
+        let fence = char::from(96).to_string().repeat(3);
+        let action = json!({"action":"assign","decision":"校验","tasks":[{"to":"组长","title":"校验","detail":"补齐测试"}]}).to_string();
+        result.final_text = ["准备派工。", &format!("{fence}imates"), &action, &fence].join(&char::from(10).to_string());
+        assert!(apply_team_outcome(&conn, &turn.run_id, &result).is_err());
+        let run = runs::get(&conn, &turn.run_id).unwrap();
+        assert_eq!(run.status, "failed");
+        assert!(run.ended_at.is_some());
+        assert!(run.error.as_deref().unwrap().contains("派工写入故障"));
+        let waiting = crate::store::instructions::get(&conn, &instruction.id).unwrap();
+        assert_eq!(waiting.status, "waiting_user");
+        assert_eq!(waiting.turn_count, 1);
+        assert!(waiting.wait_reason.unwrap().contains("派工写入故障"));
+        assert_eq!(projects::get(&conn, &project_id).unwrap().status, "waiting_user");
+        let history = messages::list(&conn, &project_id, None, 200).unwrap();
+        assert!(history.iter().any(|m| m.sender_type == "system" && m.content.contains("派工写入故障")));
+        assert!(crate::store::instructions::list_tasks(&conn, &instruction.id).unwrap().is_empty());
+        // 重复结果不再写消息，也不覆盖已经保存的失败事实。
+        assert!(apply_team_outcome(&conn, &turn.run_id, &result).is_err());
+        assert_eq!(messages::list(&conn, &project_id, None, 200).unwrap(), history);
+        assert_eq!(runs::get(&conn, &turn.run_id).unwrap(), run);
+        conn.execute_batch("DROP TRIGGER reject_batch;").unwrap();
+        crate::orchestrator::resume_instruction(&conn, &instruction.id, "retry", None).unwrap();
+        let retry = crate::orchestrator::advance(&conn, &project_id).unwrap().remove(0);
+        apply_team_outcome(&conn, &retry.run_id, &result).unwrap();
+        assert_eq!(crate::store::instructions::get(&conn, &instruction.id).unwrap().phase, "execute");
+        assert_eq!(crate::store::instructions::get(&conn, &instruction.id).unwrap().turn_count, 2);
+        assert!(apply_team_outcome(&conn, &turn.run_id, &result).is_err());
+        assert_eq!(crate::store::instructions::get(&conn, &instruction.id).unwrap().status, "running");
+        assert_eq!(crate::store::instructions::get(&conn, &instruction.id).unwrap().phase, "execute");
+    }
+
+    #[test]
+    fn applying_execute_outcome_failure_preserves_report_and_blocks_replay() {
+        let (state, _folder, project_id, _, _) = setup();
+        let conn = state.db_lock().unwrap();
+        let source = messages::insert(&conn, &project_id, "user", None, "instruction", "校验").unwrap();
+        let instruction = crate::store::instructions::insert_instruction(&conn, &project_id, source.id, "team", None, "triage").unwrap();
+        let leader = agents::list(&conn, &project_id).unwrap().remove(0);
+        let tasks = (0..2).map(|i| crate::store::instructions::NewTask {
+            assignee_agent_id: leader.id.clone(), title: format!("任务 {i}"), detail: "执行".into(), replaces_task_id: None,
+        }).collect::<Vec<_>>();
+        let batch = crate::store::instructions::insert_batch(&conn, &instruction.id, Some(&leader.id), "按顺序执行", &tasks).unwrap();
+        conn.execute("UPDATE instructions SET phase='execute' WHERE id=?1", [&instruction.id]).unwrap();
+        let turn = crate::orchestrator::advance(&conn, &project_id).unwrap().remove(0);
+        conn.execute_batch("CREATE TEMP TRIGGER reject_report BEFORE UPDATE ON tasks WHEN NEW.status='done' BEGIN SELECT RAISE(ABORT, '任务收尾故障'); END;").unwrap();
+        assert!(apply_team_outcome(&conn, &turn.run_id, &outcome("ok")).is_err());
+        assert_eq!(runs::get(&conn, &turn.run_id).unwrap().status, "failed");
+        assert_eq!(crate::store::instructions::get_task(&conn, &batch.tasks[0].id).unwrap().status, "failed");
+        assert_eq!(crate::store::instructions::get_task(&conn, &batch.tasks[1].id).unwrap().status, "cancelled");
+        assert_eq!(crate::store::instructions::get(&conn, &instruction.id).unwrap().status, "waiting_user");
+        assert!(messages::list(&conn, &project_id, None, 200).unwrap().iter().any(|m| m.kind == "report" && m.content == "最终正文"));
+        assert!(crate::orchestrator::resume_instruction(&conn, &instruction.id, "retry", None).is_err());
+    }
+
+    #[test]
+    fn applying_stopped_team_outcome_does_not_revive_instruction() {
+        let (state, _folder, project_id, _, _) = setup();
+        let conn = state.db_lock().unwrap();
+        let source = messages::insert(&conn, &project_id, "user", None, "instruction", "校验").unwrap();
+        let instruction = crate::store::instructions::insert_instruction(&conn, &project_id, source.id, "team", None, "triage").unwrap();
+        let turn = crate::orchestrator::advance(&conn, &project_id).unwrap().remove(0);
+        crate::orchestrator::stop_instruction(&conn, &project_id).unwrap();
+        let before = messages::list(&conn, &project_id, None, 200).unwrap();
+        let waiting = crate::store::instructions::get(&conn, &instruction.id).unwrap();
+        assert!(apply_team_outcome(&conn, &turn.run_id, &outcome("ok")).is_err());
+        assert_eq!(runs::get(&conn, &turn.run_id).unwrap().status, "cancelled");
+        assert_eq!(crate::store::instructions::get(&conn, &instruction.id).unwrap(), waiting);
+        assert_eq!(messages::list(&conn, &project_id, None, 200).unwrap(), before);
     }
     #[test]
     fn idle_mention_records_a_direct_instruction_and_completion_closes_it() {

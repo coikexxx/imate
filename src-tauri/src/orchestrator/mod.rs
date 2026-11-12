@@ -262,6 +262,9 @@ pub fn apply_outcome(conn: &Connection, run_id: &str, outcome: &RunOutcome) -> A
         return Err(invalid("运行已结束"));
     }
     let instruction = instructions::get(conn, &run.instruction_id)?;
+    if instruction.status != "running" {
+        return Err(invalid("指令已暂停或结束"));
+    }
     let agent = agents::get(conn, &run.agent_id)?;
     if run.mode == "execute" && run.task_id.is_none() {
         apply_mention(conn, &run, &instruction, &agent, outcome)
@@ -272,6 +275,30 @@ pub fn apply_outcome(conn: &Connection, run_id: &str, outcome: &RunOutcome) -> A
     } else {
         apply_member_discuss(conn, &instruction, &agent, run_id, outcome)
     }
+}
+
+/// 结果处理失败后的兜底；由确认 run 原先仍在运行的调用方使用。
+pub fn fail_outcome(conn: &Connection, run_id: &str, outcome: &RunOutcome, error: &str) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    let run = load_run(&tx, run_id)?;
+    let instruction = instructions::get(&tx, &run.instruction_id)?;
+    let reason = format!("回合结果处理失败：{error}");
+    if run.status == "running" {
+        finish_run_with(&tx, run_id, outcome, "failed", &reason)?;
+    }
+    if instruction.status == "running" {
+        // 执行结果没有可靠落库时保留失败事实，不允许 retry 重放已经改过文件的任务。
+        tx.execute(
+            "UPDATE tasks SET status = 'failed', finished_at = ?1 WHERE id = ?2 AND status = 'running'",
+            params![now_ms(), run.task_id],
+        )?;
+        instructions::cancel_unstarted(&tx, &instruction.id)?;
+        mark_waiting(&tx, &instruction, &reason)?;
+        messages::insert(&tx, &instruction.project_id, "system", None, "system",
+            &format!("{reason}\n指令已暂停，请检查已有产出后重试、补充说明或放弃；执行过的任务不会自动重做。"))?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// 进程没能启动。只终结这次 run，不退回预留的回合数。
