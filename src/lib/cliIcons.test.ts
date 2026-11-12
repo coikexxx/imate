@@ -27,7 +27,14 @@ describe("CLI 图标映射", () => {
     }
   });
 
-  it("kimi 混有固定蓝色，不能整体反相", () => {
+  it("kimi 混有固定蓝色，不能整体反相，改用浅色底", () => {
     expect(cliIconInfo("kimi")!.mono).toBe(false);
+    expect(cliIconInfo("kimi")!.lightTile).toBe(true);
+  });
+
+  it("除 kimi 外都不用浅色底", () => {
+    for (const id of ALL_IDS.filter((x) => x !== "kimi")) {
+      expect(cliIconInfo(id)!.lightTile, id).toBe(false);
+    }
   });
 });
