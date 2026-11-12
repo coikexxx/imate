@@ -1,3 +1,4 @@
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import {
@@ -89,8 +90,8 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
     setRows((current) => addCustomModel(current, custom));
     setCustom("");
   }
-  function back() {
-    if (dirty && !window.confirm("放弃未保存的修改？")) return;
+  async function back() {
+    if (dirty && !(await confirm("放弃未保存的修改？", { title: "未保存的修改", kind: "warning" }))) return;
     onBack();
   }
 
@@ -113,7 +114,7 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
-        <button type="button" className="text-sm text-slate-400 hover:text-slate-100" onClick={back}>← 应用管理</button>
+        <button type="button" className="text-sm text-slate-400 hover:text-slate-100" onClick={() => void back()}>← 应用管理</button>
         <h3 className="text-lg font-semibold">{config.label}</h3>
         <span className="flex-1" />
         <Switch checked={enabled && config.installed} disabled={!config.installed} label={`${config.label} 开关`} onChange={editEnabled} />
@@ -179,7 +180,7 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
       {saved && <p role="status" className="text-sm text-emerald-400">已保存，从下一回合生效。</p>}
       <div className="flex items-center justify-end gap-2">
         {dirty && <span role="status" className="mr-1 text-xs text-amber-300">有未保存的修改</span>}
-        <Button onClick={back}>返回</Button>
+        <Button onClick={() => void back()}>返回</Button>
         <Button variant="primary" disabled={saving} onClick={() => void save()}>{saving ? "正在保存…" : "保存"}</Button>
       </div>
     </div>
