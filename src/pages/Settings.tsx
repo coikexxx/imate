@@ -1,18 +1,20 @@
 import { useState } from "react";
 import { Link } from "react-router";
+import { AppManager } from "../components/AppManager";
 import { DshSettingsPanel } from "../components/DshSettings";
 import { ProxySettingsPanel } from "../components/ProxySettings";
 
-type Section = "proxy" | "dsh";
+type Section = "apps" | "proxy" | "dsh";
 
 const sections: { key: Section; label: string }[] = [
+  { key: "apps", label: "应用管理" },
   { key: "proxy", label: "网络代理" },
   { key: "dsh", label: "Dsh 设置" },
 ];
 
 /** 系统设置整页：网络代理与 Dsh 设置都收在这里 */
 export default function Settings() {
-  const [section, setSection] = useState<Section>("proxy");
+  const [section, setSection] = useState<Section>("apps");
   const [savedTick, setSavedTick] = useState(0);
   // 面板保存成功后会调用 onClose；整页里不关闭，只提示已保存
   const saved = () => setSavedTick((n) => n + 1);
@@ -34,13 +36,15 @@ export default function Settings() {
             </button>
           ))}
         </nav>
-        <section className="max-w-2xl">
+        <section className="max-w-3xl">
           <h2 className="mb-4 text-lg font-semibold">{sections.find((s) => s.key === section)?.label}</h2>
           {/* 用 key 让切换分类、保存后都重新读取最新配置 */}
-          {section === "proxy"
-            ? <ProxySettingsPanel key={`proxy:${savedTick}`} embedded onClose={saved} />
-            : <DshSettingsPanel key={`dsh:${savedTick}`} embedded onClose={saved} />}
-          {savedTick > 0 && <p role="status" className="mt-3 text-sm text-emerald-400">已保存，从下一回合生效。</p>}
+          {section === "apps"
+            ? <AppManager />
+            : section === "proxy"
+              ? <ProxySettingsPanel key={`proxy:${savedTick}`} embedded onClose={saved} />
+              : <DshSettingsPanel key={`dsh:${savedTick}`} embedded onClose={saved} />}
+          {section !== "apps" && savedTick > 0 && <p role="status" className="mt-3 text-sm text-emerald-400">已保存，从下一回合生效。</p>}
         </section>
       </div>
     </main>
