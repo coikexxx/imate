@@ -67,12 +67,13 @@ fn validate_base_url(raw: &str) -> Result<(String, String), String> {
     let host = url.host_str().ok_or_else(|| "供应商地址缺少主机名".to_string())?.to_string();
     if !url.username().is_empty() || url.password().is_some() { return Err("供应商地址不能包含账号或密码".into()); }
     if url.query().is_some() || url.fragment().is_some() { return Err("供应商地址不能包含查询参数或片段".into()); }
-    Ok((value.trim_end_matches('/').to_string(), host))
+    // 用解析后的规整串，保证界面显示的 host 与真正请求的地址一致。
+    Ok((url.as_str().trim_end_matches('/').to_string(), host))
 }
 
 fn read_auth_json_key(dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(dir.join("auth.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let value: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
     non_empty(value.get("OPENAI_API_KEY").and_then(|key| key.as_str()).map(str::to_string))
 }
 
@@ -85,17 +86,24 @@ pub fn codex_endpoint(env: Env) -> Result<ProviderEndpoint, String> {
     let provider = table.get("model_providers").and_then(|value| value.get(provider_id)).and_then(|value| value.as_table()).ok_or(NO_PROVIDER)?;
     let base_url = provider.get("base_url").and_then(|value| value.as_str()).ok_or(NO_PROVIDER)?;
     let (base, host) = validate_base_url(base_url)?;
-    let token = non_empty(provider.get("experimental_bearer_token").and_then(|value| value.as_str()).map(str::to_string))
-        .or_else(|| provider.get("env_key").and_then(|value| value.as_str()).and_then(|name| non_empty(env(name))))
-        .or_else(|| read_auth_json_key(&dir))
-        .ok_or(NO_KEY)?;
+    let token = if let Some(token) = non_empty(provider.get("experimental_bearer_token").and_then(|value| value.as_str()).map(str::to_string)) {
+        token
+    } else if let Some(name) = non_empty(provider.get("env_key").and_then(|value| value.as_str()).map(str::to_string)) {
+        // 配了 env_key 就只认该变量，不回落到 auth.json，避免把 OpenAI 官方密钥发给第三方网关。
+        non_empty(env(&name)).ok_or_else(|| format!("环境变量 {name} 未设置（从图形界面启动的应用可能读不到 shell 里的变量），请手填模型"))?
+    } else if provider.get("requires_openai_auth").and_then(|value| value.as_bool()) == Some(true) {
+        // Codex 自己也会把 auth.json 里的密钥发给此类供应商。
+        read_auth_json_key(&dir).ok_or(NO_KEY)?
+    } else {
+        return Err(NO_KEY.to_string());
+    };
     Ok(ProviderEndpoint { url: format!("{base}/models"), host, auth: Auth::Bearer(token), kind: Kind::Codex })
 }
 
 /// 读 settings.json 的 `env` 对象，只取字符串值。文件缺失或损坏时视为空。
 fn claude_settings_env(dir: &Path) -> HashMap<String, String> {
     let Ok(text) = std::fs::read_to_string(dir.join("settings.json")) else { return HashMap::new(); };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return HashMap::new(); };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')) else { return HashMap::new(); };
     value.get("env").and_then(|env| env.as_object()).map(|object| {
         object.iter().filter_map(|(key, value)| value.as_str().map(|text| (key.clone(), text.to_string()))).collect()
     }).unwrap_or_default()
@@ -158,7 +166,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "auth.json", &format!("{{\"OPENAI_API_KEY\":\"{SECRET}-auth\"}}"));
         // 只有 auth.json
-        write(dir.path(), "config.toml", &codex_config(""));
+        write(dir.path(), "config.toml", &codex_config("requires_openai_auth = true\n"));
         let endpoint = codex_endpoint(&env_with(dir.path(), &[])).unwrap();
         assert!(endpoint.headers().contains(&("Authorization", format!("Bearer {SECRET}-auth"))));
         // env_key 优先于 auth.json
@@ -262,5 +270,91 @@ mod tests {
         assert!(err(claude_endpoint(&env_with(dir.path(), &[]))).contains("未找到该供应商的密钥"));
         write(dir.path(), "settings.json", &claude_settings(&format!("{{\"ANTHROPIC_BASE_URL\":\"ftp://x\",\"ANTHROPIC_AUTH_TOKEN\":\"{SECRET}\"}}")));
         assert!(!err(claude_endpoint(&env_with(dir.path(), &[]))).contains(SECRET));
+    }
+
+    #[test]
+    fn codex_env_key_unset_errors_instead_of_falling_back_to_auth_json() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "auth.json", &format!("{{\"OPENAI_API_KEY\":\"{SECRET}-auth\"}}"));
+        // 即使 requires_openai_auth = true，配了 env_key 就不能回落
+        write(dir.path(), "config.toml", &codex_config("env_key = \"MY_KEY\"\nrequires_openai_auth = true\n"));
+        for extra in [&[][..], &[("MY_KEY", "")][..], &[("MY_KEY", "  ")][..]] {
+            let message = err(codex_endpoint(&env_with(dir.path(), extra)));
+            assert!(message.contains("环境变量") && message.contains("MY_KEY"), "{message}");
+            assert!(!message.contains(SECRET), "{message}");
+        }
+    }
+
+    #[test]
+    fn codex_auth_json_needs_requires_openai_auth_true() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "auth.json", &format!("{{\"OPENAI_API_KEY\":\"{SECRET}-auth\"}}"));
+        // 没有 requires_openai_auth
+        write(dir.path(), "config.toml", &codex_config(""));
+        assert!(err(codex_endpoint(&env_with(dir.path(), &[]))).contains("未找到该供应商的密钥"));
+        // requires_openai_auth = false
+        write(dir.path(), "config.toml", &codex_config("requires_openai_auth = false\n"));
+        let message = err(codex_endpoint(&env_with(dir.path(), &[])));
+        assert!(message.contains("未找到该供应商的密钥") && !message.contains(SECRET), "{message}");
+        // 字符串 "true" 不算布尔 true
+        write(dir.path(), "config.toml", &codex_config("requires_openai_auth = \"true\"\n"));
+        assert!(err(codex_endpoint(&env_with(dir.path(), &[]))).contains("未找到该供应商的密钥"));
+        // requires_openai_auth = true
+        write(dir.path(), "config.toml", &codex_config("requires_openai_auth = true\n"));
+        let endpoint = codex_endpoint(&env_with(dir.path(), &[])).unwrap();
+        assert!(endpoint.headers().contains(&("Authorization", format!("Bearer {SECRET}-auth"))));
+    }
+
+    #[test]
+    fn codex_provider_table_without_base_url_is_reported_as_missing_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "config.toml", &format!("model_provider = \"custom\"\n[model_providers.custom]\nexperimental_bearer_token = \"{SECRET}\"\n"));
+        let message = err(codex_endpoint(&env_with(dir.path(), &[])));
+        assert!(message.contains("未找到自定义供应商配置") && !message.contains(SECRET), "{message}");
+    }
+
+    #[test]
+    fn files_with_a_utf8_bom_are_still_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        // config.toml 带 BOM
+        let config = format!("\u{feff}{}", codex_config(&format!("experimental_bearer_token = \"{SECRET}\"\n")));
+        write(dir.path(), "config.toml", &config);
+        let endpoint = codex_endpoint(&env_with(dir.path(), &[])).unwrap();
+        assert!(endpoint.headers().contains(&("Authorization", format!("Bearer {SECRET}"))));
+        // auth.json 带 BOM
+        write(dir.path(), "config.toml", &codex_config("requires_openai_auth = true\n"));
+        write(dir.path(), "auth.json", &format!("\u{feff}{{\"OPENAI_API_KEY\":\"{SECRET}-auth\"}}"));
+        let endpoint = codex_endpoint(&env_with(dir.path(), &[])).unwrap();
+        assert!(endpoint.headers().contains(&("Authorization", format!("Bearer {SECRET}-auth"))));
+        // settings.json 带 BOM
+        let settings = format!("\u{feff}{}", claude_settings(&format!("{{\"ANTHROPIC_BASE_URL\":\"https://gw.example.com\",\"ANTHROPIC_AUTH_TOKEN\":\"{SECRET}\"}}")));
+        write(dir.path(), "settings.json", &settings);
+        let endpoint = claude_endpoint(&env_with(dir.path(), &[])).unwrap();
+        assert!(endpoint.headers().contains(&("Authorization", format!("Bearer {SECRET}"))));
+    }
+
+    #[test]
+    fn default_directories_come_from_userprofile_or_home() {
+        for variable in ["USERPROFILE", "HOME"] {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+            std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+            write(&home.path().join(".codex"), "config.toml", &codex_config(&format!("experimental_bearer_token = \"{SECRET}\"\n")));
+            write(&home.path().join(".claude"), "settings.json", &claude_settings(&format!("{{\"ANTHROPIC_BASE_URL\":\"https://gw.example.com\",\"ANTHROPIC_AUTH_TOKEN\":\"{SECRET}\"}}")));
+            let path = home.path().to_string_lossy().into_owned();
+            let env = |name: &str| if name == variable { Some(path.clone()) } else { None };
+            assert_eq!(codex_endpoint(&env).unwrap().host, "gw.example.com", "{variable}");
+            assert_eq!(claude_endpoint(&env).unwrap().host, "gw.example.com", "{variable}");
+        }
+    }
+
+    #[test]
+    fn claude_process_env_api_key_beats_settings_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "settings.json", &claude_settings("{\"ANTHROPIC_BASE_URL\":\"https://gw.example.com\",\"ANTHROPIC_API_KEY\":\"sk-file-key\"}"));
+        let extra = [("ANTHROPIC_API_KEY", "sk-proc-key")];
+        let endpoint = claude_endpoint(&env_with(dir.path(), &extra)).unwrap();
+        assert!(endpoint.headers().contains(&("x-api-key", "sk-proc-key".to_string())));
+        assert!(!endpoint.headers().contains(&("x-api-key", "sk-file-key".to_string())));
     }
 }
