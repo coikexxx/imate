@@ -286,12 +286,13 @@ pub fn fail_outcome(conn: &Connection, run_id: &str, outcome: &RunOutcome, error
     if run.status == "running" {
         finish_run_with(&tx, run_id, outcome, "failed", &reason)?;
     }
+    // 护栏有时先暂停指令再收取结果，此时也必须结束仍在运行的任务。
+    tx.execute(
+        "UPDATE tasks SET status = 'failed', finished_at = ?1 WHERE id = ?2 AND status = 'running'",
+        params![now_ms(), run.task_id],
+    )?;
     if instruction.status == "running" {
         // 执行结果没有可靠落库时保留失败事实，不允许 retry 重放已经改过文件的任务。
-        tx.execute(
-            "UPDATE tasks SET status = 'failed', finished_at = ?1 WHERE id = ?2 AND status = 'running'",
-            params![now_ms(), run.task_id],
-        )?;
         instructions::cancel_unstarted(&tx, &instruction.id)?;
         mark_waiting(&tx, &instruction, &reason)?;
         messages::insert(&tx, &instruction.project_id, "system", None, "system",

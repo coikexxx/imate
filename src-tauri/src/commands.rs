@@ -1287,7 +1287,7 @@ async fn drive_team(app: tauri::AppHandle, project_id: String, mut pending: Vec<
                         Ok(()) => saved.as_ref().and_then(|run| run.error.clone()).or_else(|| outcome.error.clone()),
                         Err(failure) => Some(failure.to_string()),
                     };
-                    let status = saved.as_ref().map(|run| run.status.as_str())
+                    let status = saved.as_ref().filter(|run| run.status != "running").map(|run| run.status.as_str())
                         .unwrap_or_else(|| finished_status(&outcome.status, applied.is_ok()));
                     emit_run_finished(&app, &project_id, &spec, status, error);
                     if applied.is_err() { halted = true; }
@@ -1684,6 +1684,27 @@ mod integration_tests {
         assert_eq!(runs::get(&conn, &turn.run_id).unwrap().status, "cancelled");
         assert_eq!(crate::store::instructions::get(&conn, &instruction.id).unwrap(), waiting);
         assert_eq!(messages::list(&conn, &project_id, None, 200).unwrap(), before);
+    }
+    #[test]
+    fn applying_execution_result_after_guard_pause_closes_task_without_changing_wait_reason() {
+        let (state, _folder, project_id, _, _) = setup();
+        let conn = state.db_lock().unwrap();
+        let source = messages::insert(&conn, &project_id, "user", None, "instruction", "校验").unwrap();
+        let instruction = crate::store::instructions::insert_instruction(&conn, &project_id, source.id, "team", None, "triage").unwrap();
+        let leader = agents::list(&conn, &project_id).unwrap().remove(0);
+        let batch = crate::store::instructions::insert_batch(&conn, &instruction.id, Some(&leader.id), "校验", &[
+            crate::store::instructions::NewTask { assignee_agent_id: leader.id.clone(), title: "任务".into(), detail: "执行".into(), replaces_task_id: None },
+        ]).unwrap();
+        conn.execute("UPDATE instructions SET phase='execute' WHERE id=?1", [&instruction.id]).unwrap();
+        let turn = crate::orchestrator::advance(&conn, &project_id).unwrap().remove(0);
+        // 会话重建预留失败时，护栏会先暂停指令，再收取原回合结果。
+        conn.execute("UPDATE instructions SET status='waiting_user',wait_reason='回合上限' WHERE id=?1", [&instruction.id]).unwrap();
+        conn.execute("UPDATE projects SET status='waiting_user' WHERE id=?1", [&project_id]).unwrap();
+        assert!(apply_team_outcome(&conn, &turn.run_id, &outcome("failed")).is_err());
+        assert_eq!(runs::get(&conn, &turn.run_id).unwrap().status, "failed");
+        assert_eq!(crate::store::instructions::get_task(&conn, &batch.tasks[0].id).unwrap().status, "failed");
+        assert_eq!(crate::store::instructions::get(&conn, &instruction.id).unwrap().wait_reason.as_deref(), Some("回合上限"));
+        assert_eq!(projects::get(&conn, &project_id).unwrap().status, "waiting_user");
     }
     #[test]
     fn idle_mention_records_a_direct_instruction_and_completion_closes_it() {
