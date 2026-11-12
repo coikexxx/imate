@@ -2,7 +2,8 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import {
-  addCustomModel, isDetailDirty, mergeModels, reconcileDefault, selectedModels, toInput, type ModelRow,
+  addCustomModel, isDetailDirty, mergeModels, providerHint, reconcileDefault, selectedModels, supportsProviderQuery, toInput,
+  type ModelRow,
 } from "../lib/cliConfig";
 import { dshModelOptions } from "../lib/dsh";
 import type { CliConfig, CliModel } from "../types";
@@ -31,29 +32,35 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
   // 候选请求序号：只有最新一次请求的结果才写入状态，卸载时自增使在途请求作废
   const requestSeq = useRef(0);
   const [candidateError, setCandidateError] = useState<string | null>(null);
+  // 供应商主机名（后端上一次返回），用来告诉用户密钥会发给谁
+  const [providerHost, setProviderHost] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  const loadCandidates = useCallback(async () => {
+  const loadCandidates = useCallback(async (fromProvider = false) => {
     const seq = ++requestSeq.current;
     const latest = () => requestSeq.current === seq;
     setLoading(true); setCandidateError(null);
     try {
       let candidates: CliModel[];
       let failureText: string | null = null;
+      let host: string | null = null;
       if (config.id === "dsh") {
         const settings = await api.getDshSettings();
         const catalog = await api.listDshModels(settings.profile);
         candidates = dshModelOptions(catalog, "").map((o) => ({ id: o.value, label: o.label, custom: false }));
         failureText = catalog.failures.map((f) => `${f.provider}：${f.message}`).join("；") || null;
       } else {
-        const catalog = await api.listCliModels(config.id);
+        const catalog = await api.listCliModels(config.id, fromProvider);
         candidates = catalog.models;
         failureText = catalog.error;
+        host = catalog.providerHost;
       }
       if (!latest()) return;
       setCandidateError(failureText);
+      // 从供应商读取时以本次结果为准（包括 null）；普通刷新保持原值
+      if (fromProvider) setProviderHost(host);
       setRows((current) => mergeModels(selectedModels(current), candidates));
     } catch (failure) { if (latest()) setCandidateError(String(failure)); }
     finally { if (latest()) setLoading(false); }
@@ -144,8 +151,16 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
       <section className="space-y-3">
         <div className="flex items-center justify-between">
           <h4 className="text-sm font-medium">模型（勾选后，成员只能从这些里选；不勾选任何一个表示不限制）</h4>
-          <Button disabled={loading} onClick={() => void loadCandidates()}>{loading ? "正在读取…" : "刷新"}</Button>
+          <div className="flex items-center gap-2">
+            {supportsProviderQuery(config.id) && (
+              <Button disabled={loading} title={providerHint(providerHost)} onClick={() => void loadCandidates(true)}>从供应商读取</Button>
+            )}
+            <Button disabled={loading} onClick={() => void loadCandidates()}>{loading ? "正在读取…" : "刷新"}</Button>
+          </div>
         </div>
+        {supportsProviderQuery(config.id) && (
+          <p className="text-xs text-slate-500">「刷新」只读本地目录；{providerHint(providerHost)}。密钥只在本机后端使用，不会显示或保存。</p>
+        )}
         {candidateError && <p role="alert" className="text-xs text-amber-300">{candidateError}</p>}
         {!loading && !candidateError && rows.length === 0 && (
           <p className="text-xs text-slate-500">

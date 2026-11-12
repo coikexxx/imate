@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CliConfig } from "../types";
 import {
   addCustomModel, closedCliIds, defaultModelHint, filterDshOptions, groupClis, memberModelOptions, mergeModels,
-  isDetailDirty, reconcileDefault, selectableClis, selectedModels, toggleState, toInput,
+  isDetailDirty, providerHint, reconcileDefault, selectableClis, selectedModels, supportsProviderQuery, toggleState, toInput,
 } from "./cliConfig";
 
 function cli(patch: Partial<CliConfig> & { id: string }): CliConfig {
@@ -134,5 +134,16 @@ describe("应用管理 纯函数", () => {
     const config = cli({ id: "dsh", models: [{ id: "p1", label: "p1", custom: false }] });
     expect(filterDshOptions(options, config, "")).toEqual([{ value: "p1" }]);
     expect(filterDshOptions(options, config, "p2")).toEqual(options);
+  });
+
+  it("只有 Claude 和 Codex 支持从供应商读取", () => {
+    expect(supportsProviderQuery("claude")).toBe(true);
+    expect(supportsProviderQuery("codex")).toBe(true);
+    for (const id of ["grok", "dsh", "pi", ""]) expect(supportsProviderQuery(id)).toBe(false);
+  });
+
+  it("提示写明密钥发给谁：已知主机名时点名，否则泛指", () => {
+    expect(providerHint("gw.example.com")).toBe("点击后会把该 CLI 配置里的密钥发给 gw.example.com");
+    expect(providerHint(null)).toBe("点击后会把该 CLI 配置里的密钥发给它配置的供应商");
   });
 });

@@ -95,3 +95,13 @@ export function filterDshOptions<T extends { value: string }>(options: T[], conf
   const allowed = new Set(config.models.map((m) => m.id));
   return options.filter((o) => allowed.has(o.value) || o.value === saved);
 }
+
+/** 只有 Claude 和 Codex 能从自己配置的供应商读取模型列表 */
+export function supportsProviderQuery(id: string): boolean {
+  return id === "claude" || id === "codex";
+}
+
+/** 点「从供应商读取」前的提示：写明密钥会发给谁（主机名来自后端上一次返回） */
+export function providerHint(host: string | null): string {
+  return `点击后会把该 CLI 配置里的密钥发给${host ? ` ${host}` : "它配置的供应商"}`;
+}

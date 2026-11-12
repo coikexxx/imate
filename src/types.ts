@@ -37,7 +37,7 @@ export interface CliConfigInput {
   defaultModel: string | null;
 }
 
-export interface CliModelCatalog { models: CliModel[]; error: string | null }
+export interface CliModelCatalog { models: CliModel[]; error: string | null; providerHost: string | null }
 
 export type ProjectStatus = "idle" | "discussing" | "executing" | "waiting_user";
 
