@@ -69,6 +69,7 @@ pub fn create_full(conn: &Connection, input: &NewProject) -> AppResult<Project> 
     let tx = conn.unchecked_transaction()?;
     let project = projects::create(&tx, &input.name, &input.description, &input.folder_path)?;
     for agent in &input.agents {
+        crate::cli_config::ensure_selectable(&tx, &agent.cli)?;
         agents::create(&tx, &project.id, agent)?;
     }
     // 规章文件放在最后写：前面任何一步失败时磁盘上还没有东西
@@ -239,5 +240,19 @@ mod tests {
             .unwrap();
         assert_eq!(agent_count, 0);
         assert!(rules::list(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_members_whose_cli_was_closed_in_app_management() {
+        let conn = open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut closed = crate::cli_config::default_config("claude");
+        closed.enabled = false;
+        crate::cli_config::save(&conn, "claude", &closed).unwrap();
+
+        let error = create_full(&conn, &valid_input(dir.path())).unwrap_err();
+
+        assert!(error.to_string().contains("已在应用管理中关闭"));
+        assert_eq!(project_count(&conn), 0);
     }
 }

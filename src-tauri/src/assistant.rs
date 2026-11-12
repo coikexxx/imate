@@ -202,16 +202,17 @@ pub fn parse_persona(raw: &str) -> AppResult<String> {
     Ok(raw.trim().to_string())
 }
 
-pub fn choose_cli_id(explicit: Option<&str>, clis: &[crate::cli_registry::CliInfo]) -> AppResult<String> {
+pub fn choose_cli_id(explicit: Option<&str>, clis: &[crate::cli_registry::CliInfo], enabled: &dyn Fn(&str) -> bool) -> AppResult<String> {
     if let Some(id) = explicit.map(str::trim).filter(|id| !id.is_empty()) {
         if !crate::cli_registry::is_known(id) { return Err(invalid(format!("未知的助理 CLI：{id}"))); }
         if !crate::cli_registry::is_supported(id) { return Err(invalid(format!("助理 CLI「{id}」尚未接入，计划在 M5 实现"))); }
+        if !enabled(id) { return Err(invalid(format!("助理 CLI「{id}」已在应用管理中关闭，请先启用或更换助理 CLI"))); }
         return clis.iter().find(|cli| cli.id == id && cli.installed && cli.supported).map(|cli| cli.id.clone())
             .ok_or_else(|| invalid(format!("未找到已安装的助理 CLI：{id}")));
     }
     crate::cli_registry::KNOWN_CLIS.iter()
-        .find_map(|spec| clis.iter().find(|cli| cli.id == spec.id && cli.installed && cli.supported).map(|cli| cli.id.clone()))
-        .ok_or_else(|| invalid("没有已安装且已接入的助理 CLI，请先安装并登录 Claude Code、Codex、Grok 或 DeepSeek Harness 之一"))
+        .find_map(|spec| clis.iter().find(|cli| cli.id == spec.id && cli.installed && cli.supported && enabled(&cli.id)).map(|cli| cli.id.clone()))
+        .ok_or_else(|| invalid("没有已启用、已安装且已接入的助理 CLI，请先安装并登录 Claude Code、Codex、Grok 或 DeepSeek Harness 之一，并在应用管理中启用"))
 }
 
 impl AppState {
@@ -350,7 +351,8 @@ async fn resolve_assistant_cli(state: &AppState) -> AppResult<crate::cli_registr
     let explicit = assistant_cli_setting(state)?;
     let clis = tokio::task::spawn_blocking(crate::cli_registry::detect_all).await
         .map_err(|e| invalid(format!("CLI 探测失败：{e}")))?;
-    let id = choose_cli_id(explicit.as_deref(), &clis)?;
+    let disabled = { let conn = state.db_lock()?; crate::cli_config::disabled_ids(&conn)? };
+    let id = choose_cli_id(explicit.as_deref(), &clis, &|id| !disabled.contains(id))?;
     tokio::task::spawn_blocking(move || crate::cli_registry::resolve_cli(&id)).await
         .map_err(|e| invalid(format!("CLI 解析失败：{e}")))?
 }
@@ -456,15 +458,25 @@ mod tests {
     #[test]
     fn explicit_unsupported_cli_does_not_fall_back() {
         let mut clis = vec![cli().info]; let mut claude = clis[0].clone(); claude.id = "claude".into(); clis.push(claude);
-        assert_eq!(choose_cli_id(None, &clis).unwrap(), "claude");
-        assert!(choose_cli_id(Some("pi"), &clis).unwrap_err().to_string().contains("尚未接入"));
-        assert!(choose_cli_id(Some("grok"), &clis).unwrap_err().to_string().contains("未找到已安装"));
+        assert_eq!(choose_cli_id(None, &clis, &|_| true).unwrap(), "claude");
+        assert!(choose_cli_id(Some("pi"), &clis, &|_| true).unwrap_err().to_string().contains("尚未接入"));
+        assert!(choose_cli_id(Some("grok"), &clis, &|_| true).unwrap_err().to_string().contains("未找到已安装"));
         let mut grok = clis[0].clone(); grok.id = "grok".into();
         let mut dsh = clis[0].clone(); dsh.id = "dsh".into();
-        assert_eq!(choose_cli_id(Some("grok"), &[grok.clone()]).unwrap(), "grok");
-        assert_eq!(choose_cli_id(None, &[dsh.clone(), grok]).unwrap(), "grok", "默认按 claude、codex、grok、dsh 的顺序取");
-        assert_eq!(choose_cli_id(None, &[dsh]).unwrap(), "dsh");
-        assert!(choose_cli_id(None, &[]).is_err());
+        assert_eq!(choose_cli_id(Some("grok"), &[grok.clone()], &|_| true).unwrap(), "grok");
+        assert_eq!(choose_cli_id(None, &[dsh.clone(), grok], &|_| true).unwrap(), "grok", "默认按 claude、codex、grok、dsh 的顺序取");
+        assert_eq!(choose_cli_id(None, &[dsh], &|_| true).unwrap(), "dsh");
+        assert!(choose_cli_id(None, &[], &|_| true).is_err());
+    }
+    #[test]
+    fn closed_clis_are_skipped_for_auto_choice_and_rejected_when_explicit() {
+        let mut claude = cli().info; claude.id = "claude".into();
+        let mut codex = claude.clone(); codex.id = "codex".into();
+        let clis = vec![claude, codex];
+        let closed_claude = |id: &str| id != "claude";
+        assert_eq!(choose_cli_id(None, &clis, &closed_claude).unwrap(), "codex", "自动选择跳过已关闭的 CLI");
+        assert!(choose_cli_id(Some("claude"), &clis, &closed_claude).unwrap_err().to_string().contains("已在应用管理中关闭"));
+        assert!(choose_cli_id(None, &clis, &|_| false).is_err());
     }
     #[test]
     fn draft_runs_have_no_agent_or_chat_messages_and_feedback_resumes() {

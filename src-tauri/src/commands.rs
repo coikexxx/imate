@@ -162,6 +162,7 @@ pub fn create_agent(
     input: NewAgent,
 ) -> AppResult<Agent> {
     let conn = lock(&state)?;
+    crate::cli_config::ensure_selectable(&conn, &input.cli)?;
     let tx = conn.unchecked_transaction()?;
     let agent = agents::create(&tx, &project_id, &input)?;
     tx.commit()?;
@@ -173,6 +174,7 @@ pub fn update_agent(state: State<'_, AppState>, id: String, input: NewAgent) -> 
     let runtime = state.runtime_lock()?;
     let conn = lock(&state)?;
     let old = agents::get(&conn, &id)?;
+    if old.cli != input.cli { crate::cli_config::ensure_selectable(&conn, &input.cli)?; }
     if old.cli != input.cli || old.model.as_deref() != input.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
         runtime.ensure_project_idle(&old.project_id)?;
     }
@@ -1327,7 +1329,9 @@ async fn run_orchestrated(
     };
     let prepared: Result<(Agent, PathBuf, Option<String>), &'static str> = (|| {
         let conn = state.db_lock().map_err(|_| "数据库连接不可用")?;
-        let agent = agents::get(&conn, &spec.agent_id).map_err(|_| "成员不存在")?;
+        let mut agent = agents::get(&conn, &spec.agent_id).map_err(|_| "成员不存在")?;
+        agent.model = crate::cli_config::effective_model(&conn, &agent.cli, agent.model.as_deref())
+            .map_err(|_| "无法读取应用配置")?;
         let project = projects::get(&conn, project_id).map_err(|_| "项目不存在")?;
         let folder = Path::new(&project.folder_path).canonicalize().map_err(|_| "项目目录不存在或无法读取")?;
         let session = runs::resumable_session(&conn, &agent, &spec.mode)
