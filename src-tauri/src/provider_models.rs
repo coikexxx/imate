@@ -71,13 +71,13 @@ fn validate_base_url(raw: &str) -> Result<(String, String), String> {
     Ok((url.as_str().trim_end_matches('/').to_string(), host))
 }
 
-/// 等价于 `^[A-Za-z_][A-Za-z0-9_]{0,63}$`。
+/// 等价于 `^[A-Z_][A-Z0-9_]{0,63}$`：只认大写字母、数字、下划线。
 fn is_env_var_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else { return false; };
-    (first.is_ascii_alphabetic() || first == '_')
+    (first.is_ascii_uppercase() || first == '_')
         && name.len() <= 64
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
 fn read_auth_json_key(dir: &Path) -> Option<String> {
@@ -145,6 +145,13 @@ fn valid_model_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control)
 }
 
+/// 取显示名；缺失、为空、含控制字符或超过 200 字节时退回使用 id。
+fn model_label<'a>(item: &'a serde_json::Value, key: &str, id: &'a str) -> &'a str {
+    item.get(key).and_then(|name| name.as_str()).map(str::trim)
+        .filter(|name| !name.is_empty() && name.len() <= 200 && !name.chars().any(char::is_control))
+        .unwrap_or(id)
+}
+
 /// 读 Codex 的本地模型目录：`config.toml` 顶层 `model_catalog_json` 指向的文件。任何失败都返回空列表。
 pub fn codex_catalog(env: Env) -> Vec<CliModel> {
     const MAX_CATALOG_BYTES: u64 = 4 * 1024 * 1024;
@@ -154,7 +161,8 @@ pub fn codex_catalog(env: Env) -> Vec<CliModel> {
     let Some(path) = table.get("model_catalog_json").and_then(|value| value.as_str()) else { return vec![]; };
     let path = Path::new(path.trim());
     let path = if path.is_absolute() { path.to_path_buf() } else { dir.join(path) };
-    match std::fs::metadata(&path) { Ok(meta) if meta.len() <= MAX_CATALOG_BYTES => {} _ => return vec![] }
+    // 只读普通文件，避免 FIFO 或设备文件让读取挂起。
+    match std::fs::metadata(&path) { Ok(meta) if meta.is_file() && meta.len() <= MAX_CATALOG_BYTES => {} _ => return vec![] }
     let Ok(text) = std::fs::read_to_string(&path) else { return vec![]; };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')) else { return vec![]; };
     let Some(items) = value.get("models").and_then(|models| models.as_array()) else { return vec![]; };
@@ -162,7 +170,7 @@ pub fn codex_catalog(env: Env) -> Vec<CliModel> {
     for item in items {
         let Some(slug) = item.get("slug").and_then(|slug| slug.as_str()).map(str::trim) else { continue; };
         if !valid_model_id(slug) || models.iter().any(|model| model.id == slug) { continue; }
-        let label = item.get("display_name").and_then(|name| name.as_str()).map(str::trim).filter(|name| !name.is_empty()).unwrap_or(slug);
+        let label = model_label(item, "display_name", slug);
         models.push(CliModel { id: slug.to_string(), label: label.to_string(), custom: false });
         if models.len() >= MAX_MODELS { break; }
     }
@@ -180,9 +188,7 @@ pub fn parse_models_response(kind: Kind, body: &str) -> Result<(Vec<CliModel>, b
         let Some(id) = item.get("id").and_then(|id| id.as_str()).map(str::trim) else { continue; };
         if !valid_model_id(id) || models.iter().any(|model| model.id == id) { continue; }
         if models.len() >= MAX_MODELS { truncated = true; break; }
-        let label = if kind == Kind::Claude {
-            item.get("display_name").and_then(|name| name.as_str()).map(str::trim).filter(|name| !name.is_empty()).unwrap_or(id)
-        } else { id };
+        let label = if kind == Kind::Claude { model_label(item, "display_name", id) } else { id };
         models.push(CliModel { id: id.to_string(), label: label.to_string(), custom: false });
     }
     Ok((models, truncated))
@@ -233,8 +239,10 @@ pub fn fetch_models(endpoint: &ProviderEndpoint, proxy: &ProxyChoice, http: Http
     parse_models_response(endpoint.kind, &response.body)
 }
 
-/// 生产用的发送实现：禁止重定向，20 秒超时，响应体最多 1 MB。
+/// 生产用的发送实现：禁止重定向，20 秒超时，响应体最多 1 MB（按解码后的字节计）。
+/// 只有 2xx 才读响应体；其他状态码返回空 body，由调用方按状态码归类，不读取也不回显。
 pub fn ureq_http(request: &HttpRequest) -> Result<HttpResponse, String> {
+    use std::io::Read;
     use std::time::Duration;
     let mut builder = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(20)))
@@ -245,6 +253,10 @@ pub fn ureq_http(request: &HttpRequest) -> Result<HttpResponse, String> {
         ProxyChoice::FromEnvironment => {}
         ProxyChoice::Direct => { builder = builder.proxy(None); }
         ProxyChoice::Url(url) => {
+            // 未启用 ureq 的 socks-proxy 特性，遇到 SOCKS 代理会直接 panic，须在构建前拦下。
+            if url.trim().to_ascii_lowercase().starts_with("socks") {
+                return Err("供应商查询暂不支持 SOCKS5 代理，请改用 HTTP 代理或直连".to_string());
+            }
             let proxy = ureq::Proxy::new(url).map_err(|_| "代理地址无效".to_string())?;
             builder = builder.proxy(Some(proxy));
         }
@@ -252,14 +264,22 @@ pub fn ureq_http(request: &HttpRequest) -> Result<HttpResponse, String> {
     let agent: ureq::Agent = builder.build().into();
     let mut call = agent.get(&request.url);
     for (name, value) in &request.headers { call = call.header(name.as_str(), value.as_str()); }
+    // 不要压缩：1 MB 上限要落在真实响应体上，防止小体积 gzip 膨胀成巨大字符串。
+    call = call.header("Accept-Encoding", "identity");
     // 传输层错误只归类，不带 URL 或头，避免泄露任何内容。
     let mut response = call.call().map_err(|error| match error {
         ureq::Error::Timeout(_) => "连接超时".to_string(),
         _ => "无法连接供应商或请求失败".to_string(),
     })?;
     let status = response.status().as_u16();
-    let body = response.body_mut().with_config().limit(MAX_BODY as u64 + 1).read_to_string()
-        .map_err(|_| "读取响应失败或响应过大".to_string())?;
+    if !(200..=299).contains(&status) {
+        return Ok(HttpResponse { status, body: String::new() });
+    }
+    let too_large = || "读取响应失败或响应过大".to_string();
+    let mut bytes = Vec::new();
+    response.body_mut().as_reader().take(MAX_BODY as u64 + 1).read_to_end(&mut bytes).map_err(|_| too_large())?;
+    if bytes.len() > MAX_BODY { return Err(too_large()); }
+    let body = String::from_utf8(bytes).map_err(|_| too_large())?;
     Ok(HttpResponse { status, body })
 }
 
@@ -508,7 +528,11 @@ mod tests {
         let long = "A".repeat(65);
         write(dir.path(), "config.toml", &codex_config(&format!("env_key = \"{long}\"\n")));
         assert!(!err(codex_endpoint(&env_with(dir.path(), &[]))).contains(&long));
-        // 合法变量名仍回显
+        // 小写名也不回显（只认大写、数字、下划线）
+        write(dir.path(), "config.toml", &codex_config("env_key = \"mykey\"\n"));
+        let message = err(codex_endpoint(&env_with(dir.path(), &[])));
+        assert!(!message.contains("mykey") && message.contains("env_key"), "{message}");
+        // 合法的大写变量名仍回显
         write(dir.path(), "config.toml", &codex_config("env_key = \"MY_KEY_1\"\n"));
         let message = err(codex_endpoint(&env_with(dir.path(), &[])));
         assert!(message.contains("MY_KEY_1"), "{message}");
@@ -643,6 +667,11 @@ mod tests {
 
     /// 起一个只服务一次连接的回环 HTTP 服务，返回（端口，收到的请求文本的接收端）。
     fn serve_once(response: String) -> (u16, std::sync::mpsc::Receiver<String>) {
+        serve_once_bytes(response.into_bytes())
+    }
+
+    /// 同上，但响应是原始字节，可以很大或含非法 UTF-8。分块写出，客户端提前断开造成的写失败直接忽略。
+    fn serve_once_bytes(response: Vec<u8>) -> (u16, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -652,9 +681,23 @@ mod tests {
             let mut buffer = [0u8; 4096];
             let read = stream.read(&mut buffer).unwrap_or(0);
             let _ = sender.send(String::from_utf8_lossy(&buffer[..read]).into_owned());
-            let _ = stream.write_all(response.as_bytes());
+            for chunk in response.chunks(64 * 1024) {
+                if stream.write_all(chunk).is_err() { break; }
+            }
         });
         (port, receiver)
+    }
+
+    fn loopback_request(port: u16) -> HttpRequest {
+        HttpRequest {
+            url: format!("http://127.0.0.1:{port}/v1/models"),
+            headers: vec![("Authorization".into(), format!("Bearer {SECRET}"))],
+            proxy: ProxyChoice::Direct,
+        }
+    }
+
+    fn loopback_endpoint(port: u16) -> ProviderEndpoint {
+        ProviderEndpoint { url: format!("http://127.0.0.1:{port}/v1/models"), host: "127.0.0.1".into(), auth: Auth::Bearer(SECRET.to_string()), kind: Kind::Codex }
     }
 
     #[test]
@@ -676,12 +719,99 @@ mod tests {
 
     #[test]
     fn ureq_does_not_follow_redirects_so_the_key_is_never_forwarded() {
-        let (port, _received) = serve_once("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string());
-        let request = HttpRequest { url: format!("http://127.0.0.1:{port}/v1/models"), headers: vec![("Authorization".into(), format!("Bearer {SECRET}"))], proxy: ProxyChoice::Direct };
-        match ureq_http(&request) {
-            Ok(response) => assert_eq!(response.status, 302),
-            Err(message) => assert!(!message.contains(SECRET) && !message.is_empty()),
+        // B 是重定向目标，只用来检测是否被连接
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let (port, _received) = serve_once(format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"));
+        let response = ureq_http(&loopback_request(port)).unwrap();
+        assert_eq!(response.status, 302, "必须原样返回 302，而不是跟随");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            assert!(target.accept().is_err(), "重定向目标不应被连接，密钥会被转发");
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
+    }
+
+    #[test]
+    fn ureq_rejects_oversized_bodies_with_a_fixed_message() {
+        let size = MAX_BODY + 1_000;
+        let mut response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n").into_bytes();
+        response.extend(std::iter::repeat(b'x').take(size));
+        let (port, _received) = serve_once_bytes(response);
+        let message = ureq_http(&loopback_request(port)).err().expect("应当失败");
+        assert_eq!(message, "读取响应失败或响应过大");
+        assert!(!message.contains(SECRET));
+    }
+
+    #[test]
+    fn ureq_asks_for_identity_encoding_so_the_size_limit_is_on_the_real_body() {
+        let body = r#"{"data":[]}"#;
+        let (port, received) = serve_once(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()));
+        ureq_http(&loopback_request(port)).unwrap();
+        let text = received.recv_timeout(std::time::Duration::from_secs(5)).unwrap().to_lowercase();
+        assert!(text.contains("accept-encoding: identity"), "{text}");
+        assert_eq!(text.matches("accept-encoding").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn ureq_rejects_a_non_utf8_success_body_with_a_fixed_message() {
+        let mut response = b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\n".to_vec();
+        response.extend([0xff, 0xfe, 0xfd]);
+        let (port, _received) = serve_once_bytes(response);
+        let message = ureq_http(&loopback_request(port)).err().expect("应当失败");
+        assert_eq!(message, "读取响应失败或响应过大");
+    }
+
+    #[test]
+    fn error_statuses_are_reported_even_when_their_bodies_are_huge_or_not_utf8() {
+        // 401 带超过 1 MB 的响应体
+        let size = MAX_BODY + 1_000;
+        let mut huge = format!("HTTP/1.1 401 Unauthorized\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n").into_bytes();
+        huge.extend(std::iter::repeat(b'x').take(size));
+        // 500 带非法 UTF-8 响应体
+        let mut binary = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 3\r\nConnection: close\r\n\r\n".to_vec();
+        binary.extend([0xff, 0xfe, 0xfd]);
+        for (response, expected) in [(huge, "HTTP 401"), (binary, "HTTP 500")] {
+            let (port, _received) = serve_once_bytes(response);
+            let message = fetch_models(&loopback_endpoint(port), &ProxyChoice::Direct, &ureq_http).unwrap_err();
+            assert!(message.contains(expected), "{expected}: {message}");
+            assert!(!message.contains("读取响应失败") && !message.contains(SECRET) && !message.contains("127.0.0.1"), "{message}");
+        }
+    }
+
+    #[test]
+    fn ureq_refuses_socks_proxies_instead_of_failing_obscurely() {
+        for url in ["socks5://127.0.0.1:1", "socks5h://127.0.0.1:1", "SOCKS5://127.0.0.1:1"] {
+            let request = HttpRequest { url: "http://127.0.0.1:1/v1/models".into(), headers: vec![("Authorization".into(), format!("Bearer {SECRET}"))], proxy: ProxyChoice::Url(url.to_string()) };
+            let message = ureq_http(&request).err().expect("应当失败");
+            assert_eq!(message, "供应商查询暂不支持 SOCKS5 代理，请改用 HTTP 代理或直连", "{url}");
+        }
+    }
+
+    #[test]
+    fn codex_catalog_ignores_non_files_such_as_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("a-directory");
+        std::fs::create_dir(&sub).unwrap();
+        write(dir.path(), "config.toml", &format!("model_catalog_json = '{}'\n", sub.to_string_lossy()));
+        assert!(codex_catalog(&env_with(dir.path(), &[])).is_empty());
+    }
+
+    #[test]
+    fn labels_with_control_characters_or_excessive_length_fall_back_to_the_id() {
+        let long = "L".repeat(201);
+        let body = format!("{{\"data\":[{{\"id\":\"a\",\"display_name\":\"bad\\nlabel\"}},{{\"id\":\"b\",\"display_name\":\"{long}\"}},{{\"id\":\"c\",\"display_name\":\"Fine\"}}]}}");
+        let (models, _) = parse_models_response(Kind::Claude, &body).unwrap();
+        assert_eq!(models[0].label, "a");
+        assert_eq!(models[1].label, "b");
+        assert_eq!(models[2].label, "Fine");
+        // Codex 本地目录同理
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("c.json"), format!("{{\"models\":[{{\"slug\":\"s1\",\"display_name\":\"x\\u0007y\"}},{{\"slug\":\"s2\",\"display_name\":\"{long}\"}},{{\"slug\":\"s3\",\"display_name\":\"Ok\"}}]}}")).unwrap();
+        write(dir.path(), "config.toml", "model_catalog_json = 'c.json'\n");
+        let models = codex_catalog(&env_with(dir.path(), &[]));
+        assert_eq!(models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(), ["s1", "s2", "Ok"]);
     }
 
     #[test]
