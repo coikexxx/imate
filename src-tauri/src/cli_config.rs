@@ -228,12 +228,35 @@ fn view(info: cli_registry::CliInfo, config: CliConfig) -> CliConfigView {
     }
 }
 
-/// 探测要逐个启动 CLI 取版本号，放到后台线程。
+/// 常见但暂未接入的 CLI，只在应用管理里展示（id、名称，按显示顺序）。
+/// 它们不是已知 CLI：不进 `cli_registry`，不探测，不能保存或启用（`key` 会拒绝）。
+const PLACEHOLDER_CLIS: [(&str, &str); 8] = [
+    ("gemini", "Gemini CLI"),
+    ("opencode", "OpenCode"),
+    ("openclaw", "OpenClaw"),
+    ("hermes", "Hermes"),
+    ("cursor", "Cursor CLI"),
+    ("qwen", "Qwen Code"),
+    ("copilot", "GitHub Copilot CLI"),
+    ("kimi", "Kimi CLI"),
+];
+
+/// 暂未支持的占位条目：未安装、未支持、关闭，没有路径、版本和模型。
+pub fn placeholder_views() -> Vec<CliConfigView> {
+    PLACEHOLDER_CLIS.iter().map(|(id, label)| CliConfigView {
+        id: (*id).into(), label: (*label).into(), installed: false, supported: false, path: None, version: None,
+        enabled: false, custom_path: None, models: vec![], default_model: None, models_source: "none".into(),
+    }).collect()
+}
+
+/// 探测要逐个启动 CLI 取版本号，放到后台线程。已接入的在前，暂未支持的占位排在最后。
 #[tauri::command(async)]
 pub fn list_cli_configs(state: tauri::State<'_, crate::commands::AppState>) -> AppResult<Vec<CliConfigView>> {
     let infos = cli_registry::detect_all();
     let conn = state.db_lock()?;
-    infos.into_iter().map(|info| { let config = load(&conn, &info.id)?; Ok(view(info, config)) }).collect()
+    let mut views = infos.into_iter().map(|info| { let config = load(&conn, &info.id)?; Ok(view(info, config)) }).collect::<AppResult<Vec<_>>>()?;
+    views.extend(placeholder_views());
+    Ok(views)
 }
 
 /// 保存配置。默认模型变了，成员「模型留空」时实际模型随之改变，其会话要清空（手册：改模型清会话）。
@@ -413,6 +436,36 @@ mod tests {
         ];
         for (id, case) in cases {
             assert!(save(&conn, id, &case).is_err(), "{id} {case:?}");
+        }
+        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM settings WHERE key LIKE 'cli_config:%'", [], |row| row.get(0)).unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn placeholder_views_list_unsupported_clis_in_fixed_order() {
+        let views = placeholder_views();
+        let ids: Vec<&str> = views.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["gemini", "opencode", "openclaw", "hermes", "cursor", "qwen", "copilot", "kimi"]);
+        let labels: Vec<&str> = views.iter().map(|v| v.label.as_str()).collect();
+        assert_eq!(labels, ["Gemini CLI", "OpenCode", "OpenClaw", "Hermes", "Cursor CLI", "Qwen Code", "GitHub Copilot CLI", "Kimi CLI"]);
+        for v in &views {
+            assert!(!cli_registry::is_known(&v.id), "{} 不应是已知 CLI", v.id);
+            assert!(!v.supported && !v.enabled && !v.installed, "{}", v.id);
+            assert!(v.path.is_none() && v.version.is_none() && v.custom_path.is_none() && v.default_model.is_none(), "{}", v.id);
+            assert!(v.models.is_empty(), "{}", v.id);
+            assert_eq!(v.models_source, "none", "{}", v.id);
+        }
+    }
+
+    #[test]
+    fn placeholder_clis_can_neither_be_read_nor_saved() {
+        let conn = open_in_memory().unwrap();
+        for (id, _) in PLACEHOLDER_CLIS {
+            assert!(load(&conn, id).is_err(), "{id} 不应能读取");
+            let err = save(&conn, id, &config(&[], None)).unwrap_err().to_string();
+            assert!(err.contains("未知 CLI"), "{id}：{err}");
+            let mut enabled = config(&[], None); enabled.enabled = true;
+            assert!(save(&conn, id, &enabled).is_err(), "{id} 不应能启用");
         }
         let rows: i64 = conn.query_row("SELECT COUNT(*) FROM settings WHERE key LIKE 'cli_config:%'", [], |row| row.get(0)).unwrap();
         assert_eq!(rows, 0);

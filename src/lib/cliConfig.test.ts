@@ -13,10 +13,21 @@ function cli(patch: Partial<CliConfig> & { id: string }): CliConfig {
 }
 
 describe("应用管理 纯函数", () => {
-  it("按是否安装分组并保持顺序", () => {
-    const groups = groupClis([cli({ id: "a" }), cli({ id: "b", installed: false }), cli({ id: "c", supported: false })]);
-    expect(groups.installed.map((c) => c.id)).toEqual(["a", "c"]);
-    expect(groups.missing.map((c) => c.id)).toEqual(["b"]);
+  it("分三组：已安装、未安装、暂未支持，各组保持后端顺序", () => {
+    const groups = groupClis([
+      cli({ id: "a" }), cli({ id: "b", installed: false }), cli({ id: "c", supported: false }),
+      cli({ id: "d" }), cli({ id: "e", installed: false }), cli({ id: "f", supported: false, installed: false }),
+    ]);
+    expect(groups.installed.map((c) => c.id)).toEqual(["a", "d"]);
+    expect(groups.missing.map((c) => c.id)).toEqual(["b", "e"]);
+    expect(groups.unsupported.map((c) => c.id)).toEqual(["c", "f"]);
+  });
+
+  it("未支持的 CLI 不论是否探测到安装都只进暂未支持组", () => {
+    const groups = groupClis([cli({ id: "pi", supported: false, installed: true }), cli({ id: "gemini", supported: false, installed: false })]);
+    expect(groups.installed).toEqual([]);
+    expect(groups.missing).toEqual([]);
+    expect(groups.unsupported.map((c) => c.id)).toEqual(["pi", "gemini"]);
   });
 
   it("开关状态：未支持与未安装都置灰且显示关闭", () => {

@@ -7,6 +7,7 @@ import {
 } from "../lib/cliConfig";
 import { dshModelOptions } from "../lib/dsh";
 import type { CliConfig, CliModel } from "../types";
+import { CliIcon } from "./CliIcon";
 import { DshSettingsPanel } from "./DshSettings";
 import { Switch } from "./Switch";
 import { Button, Field, inputClass } from "./ui";
@@ -122,6 +123,7 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
     <div className="space-y-6">
       <div className="flex items-center gap-3">
         <button type="button" className="text-sm text-slate-400 hover:text-slate-100" onClick={() => void back()}>← 应用管理</button>
+        <CliIcon id={config.id} label={config.label} />
         <h3 className="text-lg font-semibold">{config.label}</h3>
         <span className="flex-1" />
         <Switch checked={enabled && config.installed} disabled={!config.installed} label={`${config.label} 开关`} onChange={editEnabled} />

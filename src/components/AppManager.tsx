@@ -3,6 +3,7 @@ import { api } from "../api";
 import { groupClis, toggleState, toInput } from "../lib/cliConfig";
 import type { CliConfig } from "../types";
 import { CliDetail } from "./CliDetail";
+import { CliIcon } from "./CliIcon";
 import { Switch } from "./Switch";
 import { Button } from "./ui";
 
@@ -68,6 +69,7 @@ export function AppManager() {
       {error && <p role="alert" className="mb-3 text-sm text-red-300">{error}</p>}
       {section("已安装", groups.installed)}
       {section("未安装", groups.missing)}
+      {section("暂未支持", groups.unsupported)}
     </div>
   );
 }
@@ -78,13 +80,13 @@ function Row({ config, busy, onOpen, onToggle }: { config: CliConfig; busy: bool
     <li className={`flex items-center gap-3 px-4 py-3 ${config.supported ? "" : "opacity-60"}`}>
       <button type="button" disabled={!config.supported} onClick={onOpen}
         className="flex min-w-0 flex-1 items-center gap-3 text-left disabled:cursor-not-allowed">
-        <span className="grid h-9 w-9 shrink-0 place-items-center rounded bg-slate-800 text-sm font-semibold">{config.label.slice(0, 1)}</span>
+        <CliIcon id={config.id} label={config.label} />
         <span className="min-w-0">
           <span className="block truncate font-medium">{config.label}</span>
-          <span className="block truncate text-xs text-slate-500" title={config.path ?? undefined}>{!config.supported ? state.hint : (config.path ?? state.hint ?? "未检测到")}</span>
+          <span className="block truncate text-xs text-slate-500" title={config.path ?? undefined}>{!config.supported ? "暂未支持" : (config.path ?? state.hint ?? "未检测到")}</span>
         </span>
       </button>
-      <span className="w-32 shrink-0 text-right font-mono text-xs text-slate-400">{config.version ?? (config.installed ? "" : "未安装")}</span>
+      <span className="w-32 shrink-0 text-right font-mono text-xs text-slate-400">{config.supported ? (config.version ?? (config.installed ? "" : "未安装")) : ""}</span>
       {config.supported
         ? <Switch checked={state.checked} disabled={state.disabled || busy} label={`${config.label} 开关`} onChange={onToggle} />
         : <span aria-hidden className="h-6 w-11 shrink-0" />}

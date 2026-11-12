@@ -553,7 +553,8 @@ agents: name_key                             -- trim().to_lowercase()，项目�
 
 **应用管理**登记并启用各个 CLI，并为每个 CLI 选出允许使用的模型：
 
-- 列表分「已安装 · N」「未安装 · N」两组，预设 `KNOWN_CLIS` 的 5 个：Claude Code、Codex、Grok、DeepSeek Harness、Pi。每行显示名称、路径、版本和开关，点击进入详情。未安装的 CLI 开关置灰，可在详情里手动指定路径。Pi 没有适配器，整行置灰并标「暂未支持」。
+- 列表分「已安装 · N」「未安装 · N」「暂未支持 · N」三组（空组不显示），预设 `KNOWN_CLIS` 的 5 个：Claude Code、Codex、Grok、DeepSeek Harness、Pi。每行显示 logo、名称、路径、版本和开关，点击进入详情。未安装的 CLI 开关置灰，可在详情里手动指定路径。Pi 没有适配器，归入「暂未支持」，整行置灰。
+- 应用管理里除已接入的 CLI 外，还列出 Gemini CLI、OpenCode、OpenClaw、Hermes、Cursor CLI、Qwen Code、GitHub Copilot CLI、Kimi CLI 作为「暂未支持」的占位，不探测、不可启用、不进入 `KNOWN_CLIS`。logo 来自 LobeHub Icons（MIT），详见 `src/assets/cli-icons/README.md`；Pi 没有对应 logo，用「π」徽标。
 - 开关：没有保存记录时，默认值为该 CLI 是否受支持（Pi 为关，其余为开）；界面上未安装的 CLI 一律显示为关闭且不可切换。
 - 手动路径：留空表示自动检测；填写时必须是存在的绝对路径文件，保存时校验，失败则整体不写入。有值时检测与启动都以该路径为准，不再搜索 PATH。详情页提供「重新检测」。Dsh 详情页额外嵌入认证方式与 profile 设置。
 - 模型白名单：每个 CLI 一份。候选来源为 Grok 读取 `grok models`，Dsh 沿用 Web/headless 已配置模型目录，Claude 使用内置的 `opus` / `sonnet` / `haiku`，Codex 读取本地的 `model_catalog_json` 目录；每个 CLI 都能手填自定义模型 ID。白名单为空表示不限制。
