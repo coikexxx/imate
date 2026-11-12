@@ -333,11 +333,12 @@ pub(crate) fn claude_codex_catalog(
         Err(message) => return merge_catalogs(local, Some(Err(message)), builtin, None),
     };
     let host = Some(endpoint.host.clone());
+    // resolve 返回 None 表示沿用进程环境：自己按目标协议与 NO_PROXY 选代理，不交给 ureq。
     let proxy_environment = match proxy.and_then(|settings| crate::proxy::resolve(&settings)) {
-        Ok(environment) => environment,
+        Ok(environment) => environment.unwrap_or_else(|| pm::environment_proxy(env)),
         Err(error) => return merge_catalogs(local, Some(Err(error.to_string())), builtin, host),
     };
-    let choice = pm::proxy_choice(endpoint.url.starts_with("https://"), proxy_environment.as_ref());
+    let choice = pm::proxy_choice(endpoint.url.starts_with("https://"), &endpoint.host, &proxy_environment);
     merge_catalogs(local, Some(pm::fetch_models(&endpoint, &choice, http)), builtin, host)
 }
 
@@ -693,6 +694,31 @@ mod tests {
         assert_eq!(seen.into_inner().as_deref(), Some("https://gw.example.com/v1/models"));
         let json = serde_json::to_string(&catalog).unwrap();
         assert!(json.contains("\"providerHost\":\"gw.example.com\"") && !json.contains(SECRET), "{json}");
+    }
+
+    #[test]
+    fn provider_read_goes_direct_for_loopback_gateways_even_with_a_manual_proxy() {
+        use crate::provider_models::ProxyChoice;
+        let manual = || Ok(ProxySettings { mode: ProxyMode::Manual, url: "http://127.0.0.1:7890".into() });
+        let gateway = |base: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("config.toml"), format!(
+                "model_provider = \"custom\"\n[model_providers.custom]\nbase_url = \"{base}\"\nexperimental_bearer_token = \"{SECRET}\"\n")).unwrap();
+            dir
+        };
+        let chosen = |base: &str| {
+            let dir = gateway(base);
+            let seen = RefCell::new(None);
+            let http = |request: &HttpRequest| {
+                *seen.borrow_mut() = Some(request.proxy.clone());
+                Ok(HttpResponse { status: 200, body: r#"{"data":[]}"#.into() })
+            };
+            claude_codex_catalog("codex", true, manual(), &env_for(dir.path()), &http);
+            seen.into_inner().unwrap()
+        };
+        assert_eq!(chosen("http://127.0.0.1:3456/v1"), ProxyChoice::Direct, "本机网关命中 bypass，密钥不经代理");
+        assert_eq!(chosen("http://localhost:3456/v1"), ProxyChoice::Direct);
+        assert_eq!(chosen("http://gw.example.com/v1"), ProxyChoice::Url("http://127.0.0.1:7890".into()));
     }
 
     #[test]

@@ -126,11 +126,19 @@ fn claude_settings_env(dir: &Path) -> HashMap<String, String> {
 pub fn claude_endpoint(env: Env) -> Result<ProviderEndpoint, String> {
     let dir = claude_home(env)?;
     let file_env = claude_settings_env(&dir);
-    // 进程环境变量覆盖 settings.json
-    let get = |name: &str| non_empty(env(name)).or_else(|| non_empty(file_env.get(name).cloned()));
-    let base_url = get("ANTHROPIC_BASE_URL").ok_or(NO_PROVIDER)?;
+    // 进程环境整套覆盖 settings.json；密钥只取 BASE_URL 所在的同一个来源，
+    // 绝不跨来源配对，避免把一个供应商的密钥发给另一个供应商。
+    let from_env = |name: &str| non_empty(env(name));
+    let from_file = |name: &str| non_empty(file_env.get(name).cloned());
+    let (base_url, token, key) = if let Some(base_url) = from_env("ANTHROPIC_BASE_URL") {
+        (base_url, from_env("ANTHROPIC_AUTH_TOKEN"), from_env("ANTHROPIC_API_KEY"))
+    } else if let Some(base_url) = from_file("ANTHROPIC_BASE_URL") {
+        (base_url, from_file("ANTHROPIC_AUTH_TOKEN"), from_file("ANTHROPIC_API_KEY"))
+    } else {
+        return Err(NO_PROVIDER.to_string());
+    };
     let (base, host) = validate_base_url(&base_url)?;
-    let auth = match (get("ANTHROPIC_AUTH_TOKEN"), get("ANTHROPIC_API_KEY")) {
+    let auth = match (token, key) {
         (Some(token), _) => Auth::Bearer(token),
         (None, Some(key)) => Auth::ApiKey(key),
         (None, None) => return Err(NO_KEY.to_string()),
@@ -197,11 +205,39 @@ pub fn parse_models_response(kind: Kind, body: &str) -> Result<(Vec<CliModel>, b
 // ---- 代理与请求发送 ----
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum ProxyChoice { FromEnvironment, Direct, Url(String) }
+pub enum ProxyChoice { Direct, Url(String) }
 
-/// 把应用的代理设置转成本次请求的代理选择。`None` 表示沿用进程环境；全空表示直连。
-pub fn proxy_choice(https_target: bool, environment: Option<&crate::proxy::ProxyEnvironment>) -> ProxyChoice {
-    let Some(environment) = environment else { return ProxyChoice::FromEnvironment; };
+/// `host` 是否命中 NO_PROXY 风格的 bypass 列表（逗号分隔，不区分大小写，忽略空白与空项）。
+/// 支持：精确主机、`.suffix`、`*.suffix`（主机等于 suffix 或以 `.suffix` 结尾）、`*`（全部）；IPv6 的方括号会被去掉再比。
+pub fn bypass_matches(host: &str, bypass: &str) -> bool {
+    let bare = |text: &str| text.trim().trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    let host = bare(host);
+    if host.is_empty() { return false; }
+    bypass.split(',').map(bare).filter(|rule| !rule.is_empty()).any(|rule| {
+        if rule == "*" { return true; }
+        match rule.strip_prefix("*.").or_else(|| rule.strip_prefix('.')) {
+            Some(suffix) => host == suffix || host.ends_with(&format!(".{suffix}")),
+            None => host == rule,
+        }
+    })
+}
+
+/// 从进程环境组装代理设置：大写变量优先，空值视为未设置。
+/// 自己选代理而不是交给 ureq，是因为 ureq 会先读 `ALL_PROXY` 且不区分目标协议，
+/// 会在 `https_proxy` 是 HTTP 代理、`all_proxy` 是 SOCKS 时选中 SOCKS 而忽略可用的 HTTP 代理。
+pub fn environment_proxy(env: Env) -> crate::proxy::ProxyEnvironment {
+    let get = |upper: &str, lower: &str| non_empty(env(upper)).or_else(|| non_empty(env(lower)));
+    crate::proxy::ProxyEnvironment {
+        http: get("HTTP_PROXY", "http_proxy"),
+        https: get("HTTPS_PROXY", "https_proxy"),
+        all: get("ALL_PROXY", "all_proxy"),
+        bypass: get("NO_PROXY", "no_proxy"),
+    }
+}
+
+/// 把代理设置转成本次请求的代理选择：目标主机命中 bypass 或没有对应代理则直连。
+pub fn proxy_choice(https_target: bool, host: &str, environment: &crate::proxy::ProxyEnvironment) -> ProxyChoice {
+    if environment.bypass.as_deref().is_some_and(|bypass| bypass_matches(host, bypass)) { return ProxyChoice::Direct; }
     let specific = if https_target { &environment.https } else { &environment.http };
     match specific.as_ref().or(environment.all.as_ref()) {
         Some(url) => ProxyChoice::Url(url.clone()),
@@ -249,8 +285,6 @@ pub fn ureq_http(request: &HttpRequest) -> Result<HttpResponse, String> {
         .max_redirects(0)
         .http_status_as_error(false);
     match &request.proxy {
-        // ureq 默认从环境变量读取代理
-        ProxyChoice::FromEnvironment => {}
         ProxyChoice::Direct => { builder = builder.proxy(None); }
         ProxyChoice::Url(url) => {
             // 未启用 ureq 的 socks-proxy 特性，遇到 SOCKS 代理会直接 panic，须在构建前拦下。
@@ -407,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_token_beats_api_key_and_process_env_beats_settings_file() {
+    fn claude_token_beats_api_key_within_a_source_and_process_env_set_beats_settings_file() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "settings.json", &claude_settings("{\"ANTHROPIC_BASE_URL\":\"https://file.example.com\",\"ANTHROPIC_AUTH_TOKEN\":\"sk-file-token\",\"ANTHROPIC_API_KEY\":\"sk-file-key\"}"));
         let from_file = claude_endpoint(&env_with(dir.path(), &[])).unwrap();
@@ -507,13 +541,44 @@ mod tests {
     }
 
     #[test]
-    fn claude_process_env_api_key_beats_settings_file() {
+    fn claude_process_env_set_with_api_key_overrides_the_settings_file_set() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "settings.json", &claude_settings("{\"ANTHROPIC_BASE_URL\":\"https://gw.example.com\",\"ANTHROPIC_API_KEY\":\"sk-file-key\"}"));
-        let extra = [("ANTHROPIC_API_KEY", "sk-proc-key")];
+        let extra = [("ANTHROPIC_BASE_URL", "https://proc.example.com"), ("ANTHROPIC_API_KEY", "sk-proc-key")];
         let endpoint = claude_endpoint(&env_with(dir.path(), &extra)).unwrap();
+        assert_eq!(endpoint.host, "proc.example.com");
         assert!(endpoint.headers().contains(&("x-api-key", "sk-proc-key".to_string())));
         assert!(!endpoint.headers().contains(&("x-api-key", "sk-file-key".to_string())));
+    }
+
+    #[test]
+    fn claude_never_pairs_a_key_from_one_source_with_a_base_url_from_the_other() {
+        let dir = tempfile::tempdir().unwrap();
+        // 进程环境只有旧供应商 A 的 token，settings.json 有供应商 B 的整套：来源是 settings.json，绝不能带上 sk-A
+        write(dir.path(), "settings.json", &claude_settings("{\"ANTHROPIC_BASE_URL\":\"https://b.example.com\",\"ANTHROPIC_AUTH_TOKEN\":\"sk-B\"}"));
+        let extra = [("ANTHROPIC_AUTH_TOKEN", "sk-A")];
+        let endpoint = claude_endpoint(&env_with(dir.path(), &extra)).unwrap();
+        assert_eq!(endpoint.host, "b.example.com");
+        assert!(endpoint.headers().contains(&("Authorization", "Bearer sk-B".to_string())));
+        assert!(!endpoint.headers().iter().any(|(_, value)| value.contains("sk-A")));
+        // 进程环境只有 API key、settings.json 有 base 与 token：同样只取 settings.json 里的
+        let extra = [("ANTHROPIC_API_KEY", "sk-A-key")];
+        let endpoint = claude_endpoint(&env_with(dir.path(), &extra)).unwrap();
+        assert!(endpoint.headers().contains(&("Authorization", "Bearer sk-B".to_string())));
+        assert!(!endpoint.headers().iter().any(|(_, value)| value.contains("sk-A")));
+        // 进程环境有 BASE_URL 却没有密钥：不去 settings.json 找密钥
+        let extra = [("ANTHROPIC_BASE_URL", "https://proc.example.com")];
+        let message = err(claude_endpoint(&env_with(dir.path(), &extra)));
+        assert!(message.contains("未找到该供应商的密钥") && !message.contains("sk-B"), "{message}");
+        // 进程环境整套覆盖 settings.json 的整套
+        let extra = [("ANTHROPIC_BASE_URL", "https://proc.example.com"), ("ANTHROPIC_AUTH_TOKEN", "sk-proc")];
+        let endpoint = claude_endpoint(&env_with(dir.path(), &extra)).unwrap();
+        assert_eq!(endpoint.host, "proc.example.com");
+        assert!(endpoint.headers().contains(&("Authorization", "Bearer sk-proc".to_string())));
+        // 两个来源都没有 BASE_URL
+        write(dir.path(), "settings.json", &claude_settings("{\"ANTHROPIC_AUTH_TOKEN\":\"sk-B\"}"));
+        let extra = [("ANTHROPIC_AUTH_TOKEN", "sk-A")];
+        assert!(err(claude_endpoint(&env_with(dir.path(), &extra))).contains("未找到自定义供应商配置"));
     }
 
     #[test]
@@ -603,15 +668,82 @@ mod tests {
     #[test]
     fn proxy_choice_follows_the_app_proxy_settings() {
         use crate::proxy::ProxyEnvironment;
-        assert_eq!(proxy_choice(true, None), ProxyChoice::FromEnvironment, "沿用进程环境");
-        assert_eq!(proxy_choice(true, Some(&ProxyEnvironment::default())), ProxyChoice::Direct, "直连");
+        let host = "gw.example.com";
+        assert_eq!(proxy_choice(true, host, &ProxyEnvironment::default()), ProxyChoice::Direct, "直连");
         let both = ProxyEnvironment { http: Some("http://p:1".into()), https: Some("http://s:2".into()), all: None, bypass: None };
-        assert_eq!(proxy_choice(true, Some(&both)), ProxyChoice::Url("http://s:2".into()));
-        assert_eq!(proxy_choice(false, Some(&both)), ProxyChoice::Url("http://p:1".into()));
+        assert_eq!(proxy_choice(true, host, &both), ProxyChoice::Url("http://s:2".into()));
+        assert_eq!(proxy_choice(false, host, &both), ProxyChoice::Url("http://p:1".into()));
         let all_only = ProxyEnvironment { http: None, https: None, all: Some("socks5://a:3".into()), bypass: None };
-        assert_eq!(proxy_choice(true, Some(&all_only)), ProxyChoice::Url("socks5://a:3".into()));
+        assert_eq!(proxy_choice(true, host, &all_only), ProxyChoice::Url("socks5://a:3".into()));
         let only_http = ProxyEnvironment { http: Some("http://p:1".into()), https: None, all: None, bypass: None };
-        assert_eq!(proxy_choice(true, Some(&only_http)), ProxyChoice::Direct, "https 目标没有对应代理则直连");
+        assert_eq!(proxy_choice(true, host, &only_http), ProxyChoice::Direct, "https 目标没有对应代理则直连");
+    }
+
+    #[test]
+    fn proxy_choice_honours_the_bypass_list() {
+        use crate::proxy::ProxyEnvironment;
+        // 与 proxy::manual_environment 固定写入的 bypass 一致
+        let manual = ProxyEnvironment { http: Some("http://p:1".into()), https: Some("http://p:1".into()), all: Some("http://p:1".into()), bypass: Some("localhost,127.0.0.1,::1".into()) };
+        for host in ["127.0.0.1", "localhost", "LOCALHOST", "[::1]", "::1"] {
+            assert_eq!(proxy_choice(false, host, &manual), ProxyChoice::Direct, "{host}");
+        }
+        assert_eq!(proxy_choice(false, "gw.example.com", &manual), ProxyChoice::Url("http://p:1".into()));
+        let corp = ProxyEnvironment { http: Some("http://p:1".into()), https: Some("http://p:1".into()), all: None, bypass: Some(".corp.example.com".into()) };
+        assert_eq!(proxy_choice(true, "llm.corp.example.com", &corp), ProxyChoice::Direct);
+        assert_eq!(proxy_choice(true, "llm.example.com", &corp), ProxyChoice::Url("http://p:1".into()));
+    }
+
+    #[test]
+    fn bypass_matches_follows_no_proxy_rules() {
+        assert!(bypass_matches("localhost", "localhost,127.0.0.1,::1"));
+        assert!(bypass_matches("127.0.0.1", "localhost,127.0.0.1,::1"));
+        assert!(bypass_matches("::1", "localhost,127.0.0.1,::1"));
+        assert!(bypass_matches("[::1]", "localhost,127.0.0.1,::1"), "IPv6 去掉方括号再比");
+        assert!(bypass_matches("::1", "[::1]"));
+        // .suffix 与 *.suffix
+        for rule in [".corp.example.com", "*.corp.example.com"] {
+            assert!(bypass_matches("a.corp.example.com", rule), "{rule}");
+            assert!(bypass_matches("a.b.corp.example.com", rule), "{rule}");
+            assert!(bypass_matches("corp.example.com", rule), "{rule}：主机等于 suffix 也命中");
+            assert!(!bypass_matches("xcorp.example.com", rule), "{rule}");
+            assert!(!bypass_matches("example.com", rule), "{rule}");
+        }
+        // 全部
+        assert!(bypass_matches("anything.example.org", "*"));
+        assert!(bypass_matches("anything.example.org", "a.com, * "));
+        // 大小写、空白、空项
+        assert!(bypass_matches("GW.Example.COM", "  gw.example.com  "));
+        assert!(bypass_matches("gw.example.com", "GW.EXAMPLE.COM"));
+        assert!(bypass_matches("gw.example.com", ",, ,gw.example.com,"));
+        // 不命中
+        assert!(!bypass_matches("gw.example.com", ""));
+        assert!(!bypass_matches("gw.example.com", " , ,"));
+        assert!(!bypass_matches("gw.example.com", "localhost,127.0.0.1"));
+        assert!(!bypass_matches("gw.example.com", "example.com"), "无通配的项只做精确匹配");
+        assert!(!bypass_matches("", "localhost"));
+    }
+
+    #[test]
+    fn environment_proxy_reads_process_variables_with_upper_case_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let extra = [("HTTPS_PROXY", "http://upper:1"), ("https_proxy", "http://lower:2"), ("http_proxy", "http://lowhttp:3"), ("ALL_PROXY", "  "), ("all_proxy", "socks5://a:4"), ("no_proxy", "localhost")];
+        let environment = environment_proxy(&env_with(dir.path(), &extra));
+        assert_eq!(environment.https.as_deref(), Some("http://upper:1"), "大写优先");
+        assert_eq!(environment.http.as_deref(), Some("http://lowhttp:3"));
+        assert_eq!(environment.all.as_deref(), Some("socks5://a:4"), "大写为空值时视为未设置，用小写");
+        assert_eq!(environment.bypass.as_deref(), Some("localhost"));
+        let empty = environment_proxy(&env_with(dir.path(), &[]));
+        assert!(empty.http.is_none() && empty.https.is_none() && empty.all.is_none() && empty.bypass.is_none());
+    }
+
+    #[test]
+    fn clash_style_environment_picks_the_http_proxy_for_https_targets_not_socks() {
+        let dir = tempfile::tempdir().unwrap();
+        let extra = [("https_proxy", "http://p:1"), ("http_proxy", "http://p:1"), ("all_proxy", "socks5://a:3"), ("no_proxy", "localhost,127.0.0.1")];
+        let environment = environment_proxy(&env_with(dir.path(), &extra));
+        assert_eq!(proxy_choice(true, "gw.example.com", &environment), ProxyChoice::Url("http://p:1".into()));
+        assert_eq!(proxy_choice(false, "gw.example.com", &environment), ProxyChoice::Url("http://p:1".into()));
+        assert_eq!(proxy_choice(false, "127.0.0.1", &environment), ProxyChoice::Direct, "NO_PROXY 命中则直连");
     }
 
     fn sample_endpoint(dir: &Path) -> ProviderEndpoint {
@@ -678,9 +810,17 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            // 读到请求头结束（\r\n\r\n）为止；设上限与读超时，防止挂起
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+            let mut request = Vec::new();
             let mut buffer = [0u8; 4096];
-            let read = stream.read(&mut buffer).unwrap_or(0);
-            let _ = sender.send(String::from_utf8_lossy(&buffer[..read]).into_owned());
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") && request.len() < 64 * 1024 {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&buffer[..read]),
+                }
+            }
+            let _ = sender.send(String::from_utf8_lossy(&request).into_owned());
             for chunk in response.chunks(64 * 1024) {
                 if stream.write_all(chunk).is_err() { break; }
             }

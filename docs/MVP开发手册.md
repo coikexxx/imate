@@ -559,9 +559,10 @@ agents: name_key                             -- trim().to_lowercase()，项目�
 - 模型白名单：每个 CLI 一份。候选来源为 Grok 读取 `grok models`，Dsh 沿用 Web/headless 已配置模型目录，Claude 使用内置的 `opus` / `sonnet` / `haiku`，Codex 读取本地的 `model_catalog_json` 目录；每个 CLI 都能手填自定义模型 ID。白名单为空表示不限制。
 - Claude、Codex 的「刷新」只读本地目录和内置候选，不联网。详情页另有「从供应商读取」，才会用该 CLI 自己配置的 Base URL 和密钥联网查询模型列表，结果与本地候选合并去重，不冲掉已勾选和手填的项：
   - Codex：读 `config.toml` 当前 `model_provider` 对应供应商的 `base_url`。密钥依次取 `experimental_bearer_token`；`env_key` 指向的环境变量（配置了 `env_key` 但变量未设置时直接报错，不再回落）；仅在该供应商 `requires_openai_auth = true` 时才读的 `auth.json`。
-  - Claude：读 `~/.claude/settings.json`（或 `CLAUDE_CONFIG_DIR` 指向的目录）的 `env` 与进程环境变量中的 `ANTHROPIC_BASE_URL`；密钥取 `ANTHROPIC_AUTH_TOKEN`（Bearer）或 `ANTHROPIC_API_KEY`（`x-api-key`）。
+  - Claude：读进程环境变量与 `~/.claude/settings.json`（或 `CLAUDE_CONFIG_DIR` 指向的目录）的 `env` 中的 `ANTHROPIC_BASE_URL`，进程环境优先。密钥按来源成对取值：只取 `ANTHROPIC_BASE_URL` 所在同一来源里的 `ANTHROPIC_AUTH_TOKEN`（Bearer）或 `ANTHROPIC_API_KEY`（`x-api-key`），绝不跨来源配对，避免把旧供应商遗留在进程环境里的密钥发给 settings.json 里的另一个供应商；该来源没有密钥就报「未找到该供应商的密钥」。
   - 安全：密钥只在后端使用，不显示、不保存、不写日志，只发给该 CLI 自己配置的地址；不跟随重定向，超时 20 秒，响应最多 1 MB、200 个模型。错误提示只含状态码或失败类别。首次点击前按钮旁只写「它配置的供应商」，读取后才显示具体主机名。
-  - 找不到供应商配置时提示手填。已知限制：供应商查询暂不支持 SOCKS5 代理（请改用 HTTP 代理或直连）。
+  - 找不到供应商配置时提示手填。目标主机命中网络代理设置的绕过列表（如 `localhost`、`127.0.0.1`）时直连，密钥不经代理。
+  - 已知限制：①供应商查询暂不支持 SOCKS5 代理（请改用 HTTP 代理或直连）；②供应商查询使用内置的根证书（webpki-roots），不读系统证书库，企业 TLS 中间人或私有 CA 的 https 网关会报「无法连接供应商或请求失败」；③Codex 只读顶层 `model_provider`，不读 `profile`。
 - 默认模型：可选，必须在白名单内。成员的模型留空时，回合使用该 CLI 的默认模型；成员自己填了则优先。两者都没有时，用 CLI 自带默认。
 - 关闭只影响新选：成员表单不再列出该 CLI，内置助理自动选择时跳过它；显式指定已关闭的 CLI 会报错并提示「在应用管理中启用」。新建成员或把成员改用另一个 CLI 时，目标 CLI 必须已启用；已有成员照常运行，也可以继续编辑其他字段。
 - 取消勾选一个已被成员使用的模型是允许的，该成员不受影响；成员表单里这个值显示为「不在白名单」并保留。

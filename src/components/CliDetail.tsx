@@ -59,7 +59,8 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
       }
       if (!latest()) return;
       setCandidateError(failureText);
-      if (host) setProviderHost(host);
+      // 从供应商读取时以本次结果为准（包括 null）；普通刷新保持原值
+      if (fromProvider) setProviderHost(host);
       setRows((current) => mergeModels(selectedModels(current), candidates));
     } catch (failure) { if (latest()) setCandidateError(String(failure)); }
     finally { if (latest()) setLoading(false); }
