@@ -81,7 +81,9 @@ impl ChatService {
         let recent = if recovery { messages::list(conn, project_id, Some(user_message_id), 20)? } else { vec![] };
         let prompt = build_turn_prompt(&TurnPromptSnapshot { request, agent_id: &agent.id, project: &project,
             rules: &rules, agent, roster: &roster, unread: &unread, recent: &recent, recovery });
-        Ok(PreparedTurn { agent: agent.clone(), prompt, request_text: request.into(), snapshot_message_id: user_message_id, unread, recovery })
+        let mut prepared_agent = agent.clone();
+        prepared_agent.model = crate::cli_config::effective_model(conn, &agent.cli, agent.model.as_deref())?;
+        Ok(PreparedTurn { agent: prepared_agent, prompt, request_text: request.into(), snapshot_message_id: user_message_id, unread, recovery })
     }
     pub fn request(prepared: &PreparedTurn, cwd: std::path::PathBuf) -> TurnRequest {
         TurnRequest { prompt: prepared.prompt.clone(), session_id: if prepared.recovery { None } else { prepared.agent.session_id.clone() }, cwd,
@@ -275,4 +277,18 @@ mod tests {
         assert!(!should_rebuild_session(&outcome, true, true));
     }
 
+    #[test]
+    fn prepared_turn_uses_cli_default_model_only_when_member_model_is_blank() {
+        let (conn, project_id, roster) = setup();
+        let mut config = crate::cli_config::default_config("claude");
+        config.models = vec![crate::cli_config::CliModel { id: "opus".into(), label: "opus".into(), custom: false }];
+        config.default_model = Some("opus".into());
+        crate::cli_config::save(&conn, "claude", &config).unwrap();
+        let current = crate::store::messages::insert(&conn, &project_id, "user", None, "chat", "做事").unwrap();
+        let prepared = ChatService::send(&conn, &project_id, current.id, false).unwrap();
+        assert_eq!(prepared.agent.model.as_deref(), Some("opus"));
+        conn.execute("UPDATE agents SET model='sonnet' WHERE id=?1", [&roster[0].id]).unwrap();
+        let again = ChatService::send(&conn, &project_id, current.id, false).unwrap();
+        assert_eq!(again.agent.model.as_deref(), Some("sonnet"));
+    }
 }

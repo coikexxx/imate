@@ -1,10 +1,11 @@
 import { DshModelSelect } from "./DshModelSelect";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
+import { defaultModelHint, memberModelOptions, selectableClis } from "../lib/cliConfig";
 import { composePersona, emptyPersona, parsePersona } from "../lib/persona";
 import { normalizeName } from "../lib/mentions";
 import { validateAgent } from "../lib/wizard";
-import type { AgentInput, CliInfo, DraftInput, PersonaTemplate } from "../types";
+import type { AgentInput, CliConfig, CliInfo, DraftInput, PersonaTemplate } from "../types";
 import { PersonaEditor } from "./PersonaEditor";
 import { AssistantDraftDialog } from "./AssistantDraftDialog";
 import { Button, Field, inputClass } from "./ui";
@@ -48,6 +49,20 @@ export function AgentForm({
   const [busy, setBusy] = useState(false);
   const [draftOpen, setDraftOpen] = useState(false);
 
+  // 应用管理里的开关与模型白名单；读不到时退回只看安装状态
+  const [configs, setConfigs] = useState<CliConfig[]>([]);
+  useEffect(() => { api.listCliConfigs().then(setConfigs).catch(() => setConfigs([])); }, []);
+  useEffect(() => {
+    if (configs.length === 0 || initial) return;
+    const allowed = selectableClis(configs).map((c) => c.id);
+    setCli((current) => (allowed.includes(current) ? current : allowed[0] ?? ""));
+  }, [configs, initial]);
+  const allowedIds = new Set(selectableClis(configs, initial?.cli).map((c) => c.id));
+  const visibleClis = configs.length === 0 ? clis : clis.filter((c) => allowedIds.has(c.id));
+  const cliConfig = configs.find((c) => c.id === cli);
+  const modelChoice = memberModelOptions(cliConfig, model);
+  const closed = (id: string) => configs.find((c) => c.id === id)?.enabled === false;
+
   const template = templates.find((t) => t.role === role.trim());
 
   function changeRole(next: string) {
@@ -69,7 +84,8 @@ export function AgentForm({
     };
     const selected = clis.find((c) => c.id === cli);
     const duplicate = takenNames.some((other) => normalizeName(other) === normalizeName(input.name));
-    const problem = duplicate ? `成员名「${input.name}」已存在` :
+    const problem = !cli ? "没有可选的 CLI（未启用或未安装），请先在系统设置的应用管理中启用" :
+      !initial && closed(cli) ? "该 CLI 已在应用管理中关闭，请先在系统设置里启用" : duplicate ? `成员名「${input.name}」已存在` :
       !selected?.supported ? "该 CLI 尚未接入" : !selected.installed ? "请先安装所选 CLI" : validateAgent(input, takenNames);
     if (problem) {
       setError(problem);
@@ -116,17 +132,23 @@ export function AgentForm({
             <option value="" disabled>
               请选择
             </option>
-            {clis.map((c) => (
+            {visibleClis.map((c) => (
               <option key={c.id} value={c.id} disabled={!c.installed || !c.supported}>
                 {c.label}
                 {!c.supported ? "（尚未接入）" : c.installed ? (c.version ? `（${c.version}）` : "") : "（未安装）"}
+                {closed(c.id) ? "（已关闭）" : ""}
               </option>
             ))}
           </select>
         </Field>
-        <Field label={cli === "dsh" ? "模型（读取 Dsh 已配置的模型）" : "模型（可选，留空用 CLI 默认）"}>
-          {cli === "dsh" ? <DshModelSelect value={model} onChange={setModel} /> :
-            <input className={inputClass} value={model} onChange={(e) => setModel(e.target.value)} />}
+        <Field label={cli === "dsh" ? "模型（读取 Dsh 已配置的模型）" : modelChoice.restricted ? "模型（从应用管理已启用的模型中选）" : "模型（可选，留空用 CLI 默认）"}>
+          {cli === "dsh" ? <DshModelSelect value={model} onChange={setModel} config={cliConfig} /> :
+            modelChoice.restricted ? (
+              <select className={inputClass} value={model} onChange={(e) => setModel(e.target.value)}>
+                <option value="">{defaultModelHint(cliConfig)}</option>
+                {modelChoice.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            ) : <input className={inputClass} value={model} onChange={(e) => setModel(e.target.value)} />}
         </Field>
       </div>
 

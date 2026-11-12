@@ -14,4 +14,12 @@ describe("CLI 可用性", () => {
     expect(assistantAvailable([cli("claude", false, true), cli("pi", true, false)])).toBe(false);
     expect(assistantAvailable([])).toBe(false);
   });
+  it("应用管理里已关闭的 CLI 不算；不传关闭集合则行为不变", () => {
+    const clis = [cli("claude", true, true), cli("grok", true, true)];
+    expect(assistantAvailable(clis, new Set(["claude"]))).toBe(true);
+    expect(assistantAvailable(clis, new Set(["claude", "grok"]))).toBe(false);
+    expect(assistantAvailable(clis, new Set())).toBe(true);
+    expect(assistantAvailable(clis, new Set(["codex"]))).toBe(true);
+    expect(assistantAvailable(clis)).toBe(true);
+  });
 });

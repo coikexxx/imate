@@ -1,4 +1,5 @@
 import { assistantAvailable } from "../lib/clis";
+import { closedCliIds } from "../lib/cliConfig";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
@@ -33,6 +34,7 @@ export default function Project() {
   const { id = "" } = useParams();
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [clis, setClis] = useState<CliInfo[]>([]);
+  const [closedClis, setClosedClis] = useState<ReadonlySet<string>>(new Set());
   const [templates, setTemplates] = useState<PersonaTemplate[]>([]);
   const [projectRules, setProjectRules] = useState<RuleDoc[]>([]);
   const [editing, setEditing] = useState<Editing>(null);
@@ -55,6 +57,8 @@ export default function Project() {
   useEffect(() => {
     reload().catch((e) => setError(String(e)));
     api.listClis().then(setClis);
+    // 应用管理里关闭的 CLI 不能当助理；读不到时当作没有关闭的
+    api.listCliConfigs().then((configs) => setClosedClis(closedCliIds(configs))).catch(() => setClosedClis(new Set()));
     api.listPersonaTemplates().then(setTemplates);
   }, [reload]);
 
@@ -126,7 +130,7 @@ export default function Project() {
   }
 
   const editingAgent = editing?.kind === "edit" ? editing.agent : null;
-  const assistantReady = assistantAvailable(clis);
+  const assistantReady = assistantAvailable(clis, closedClis);
   async function openAgentForm(target: Editing) {
     try { setProjectRules(await api.listRules(id)); setEditing(target); }
     catch (failure) { setError(String(failure)); }
@@ -157,7 +161,7 @@ export default function Project() {
       )}
       {error && <p className="px-4 py-2 text-sm text-red-400">{error}</p>}
 
-      <div className="grid min-h-0 flex-1 grid-cols-[240px_1fr_340px]">
+      <div className="grid min-h-0 flex-1 grid-cols-[240px_minmax(0,1fr)_minmax(360px,32%)]">
         <MemberList
           agents={agents}
           clis={clis}
@@ -167,36 +171,48 @@ export default function Project() {
           onEdit={(agent) => void openAgentForm({ kind: "edit", agent })}
         />
 
-        <section className="grid min-h-0 grid-rows-[2fr_3fr] gap-3 p-3">
+        {/* 中栏：办公室占 65%，下方是文件与规章 */}
+        <section className="grid min-h-0 grid-rows-[minmax(0,65fr)_minmax(0,35fr)] gap-3 p-3">
           <OfficeCanvas agents={agents} statuses={agentStatuses} />
-          <ChatPanel projectId={id} agents={agents} folderExists={detail.folderExists} mention={mention} onMentionUsed={consumeMention} onFinished={refreshAfterRun} />
+          <div className="flex min-h-0 flex-col overflow-hidden rounded border border-slate-800 bg-slate-950">
+            <div className="flex items-center gap-1 border-b border-slate-800 px-2 py-1.5 text-sm" role="tablist">
+              {(["files", "rules"] as const).map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === key}
+                  onClick={() => setTab(key)}
+                  className={`rounded px-3 py-1 ${
+                    tab === key ? "bg-sky-900/60 text-sky-100" : "text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+                  }`}
+                >
+                  {key === "files" ? "文件" : "规章"}
+                  {key === "files" && changedFiles.length > 0 && (
+                    <span className="ml-1.5 rounded-full bg-amber-500/20 px-1.5 text-xs text-amber-300">{changedFiles.length}</span>
+                  )}
+                </button>
+              ))}
+              <span className="ml-auto truncate pl-2 text-xs text-slate-500">
+                {tab === "files" ? "只读 · 点击文件用系统默认程序打开" : "保存在项目文件夹的 .imates/rules/"}
+              </span>
+            </div>
+            <div className="min-h-0 flex-1">
+              {tab === "rules" ? (
+                // 文件夹重新选定后路径会变，用 key 让规章面板重新读取，不必来回切页签
+                <RulesPanel key={`${detail.folderExists}:${project.folderPath}`} projectId={id} project={project} agents={agents} clis={clis} closedCliIds={closedClis} refreshTick={rulesTick} />
+              ) : detail.folderExists ? (
+                <FileTree key={project.folderPath} projectId={id} changed={changedFiles} tick={filesTick} />
+              ) : (
+                <p className="p-3 text-sm text-slate-500">项目文件夹不存在，无法列出文件。</p>
+              )}
+            </div>
+          </div>
         </section>
 
-        <aside className="flex min-h-0 flex-col border-l border-slate-800">
-          <div className="flex border-b border-slate-800 text-sm">
-            {(["files", "rules"] as const).map((key) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setTab(key)}
-                className={`flex-1 px-3 py-2 ${
-                  tab === key ? "border-b-2 border-sky-500 text-sky-300" : "text-slate-400"
-                }`}
-              >
-                {key === "files" ? "文件" : "规章"}
-              </button>
-            ))}
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            {tab === "rules" ? (
-              // 文件夹重新选定后路径会变，用 key 让规章面板重新读取，不必来回切页签
-              <RulesPanel key={`${detail.folderExists}:${project.folderPath}`} projectId={id} project={project} agents={agents} clis={clis} refreshTick={rulesTick} />
-            ) : detail.folderExists ? (
-              <FileTree key={project.folderPath} projectId={id} changed={changedFiles} tick={filesTick} />
-            ) : (
-              <p className="p-3 text-sm text-slate-500">项目文件夹不存在，无法列出文件。</p>
-            )}
-          </div>
+        {/* 右栏：群聊占满整列高度 */}
+        <aside className="flex min-h-0 flex-col border-l border-slate-800 p-3">
+          <ChatPanel projectId={id} agents={agents} folderExists={detail.folderExists} mention={mention} onMentionUsed={consumeMention} onFinished={refreshAfterRun} />
         </aside>
       </div>
 

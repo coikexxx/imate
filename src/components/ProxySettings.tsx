@@ -7,11 +7,12 @@ export function ProxySettingsButton() {
   const [open, setOpen] = useState(false);
   return <>
     <Button className="shrink-0" onClick={() => setOpen(true)}>网络代理</Button>
-    {open && <ProxySettingsDialog onClose={() => setOpen(false)} />}
+    {open && <Modal title="网络代理设置" onClose={() => setOpen(false)}><ProxySettingsPanel onClose={() => setOpen(false)} /></Modal>}
   </>;
 }
 
-function ProxySettingsDialog({ onClose }: { onClose: () => void }) {
+/** 网络代理设置表单，可嵌入任意容器（独立弹窗或系统设置） */
+export function ProxySettingsPanel({ onClose, embedded = false }: { onClose: () => void; embedded?: boolean }) {
   const [settings, setSettings] = useState<ProxySettings>({ mode: "system", url: "" });
   const [detected, setDetected] = useState<ProxyState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -33,7 +34,7 @@ function ProxySettingsDialog({ onClose }: { onClose: () => void }) {
     finally { setSaving(false); }
   }
 
-  return <Modal title="网络代理设置" onClose={onClose}>
+  return (
     <div className="space-y-4">
       <p className="text-sm text-slate-400">所有项目成员和内置助理共用此设置，适用于 Claude、Codex、Grok、Dsh 等已接入的 CLI。保存后从新回合生效，正在进行的回合继续使用原来的代理。</p>
       <Field label="连接方式">
@@ -56,9 +57,9 @@ function ProxySettingsDialog({ onClose }: { onClose: () => void }) {
       </Field>}
       {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
       <div className="flex justify-end gap-2">
-        <Button disabled={saving} onClick={onClose}>取消</Button>
+        {!embedded && <Button disabled={saving} onClick={onClose}>取消</Button>}
         <Button variant="primary" disabled={loading || saving} onClick={() => void save()}>{saving ? "正在保存…" : "保存代理设置"}</Button>
       </div>
     </div>
-  </Modal>;
+  );
 }

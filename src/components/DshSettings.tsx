@@ -8,11 +8,12 @@ export function DshSettingsButton({ onSaved }: { onSaved?: () => void }) {
   const [open, setOpen] = useState(false);
   return <>
     <Button onClick={() => setOpen(true)}>Dsh 设置</Button>
-    {open && createPortal(<DshSettingsDialog onClose={() => setOpen(false)} onSaved={onSaved} />, document.body)}
+    {open && createPortal(<Modal title="Dsh 认证与模型设置" onClose={() => setOpen(false)}><DshSettingsPanel onClose={() => setOpen(false)} onSaved={onSaved} /></Modal>, document.body)}
   </>;
 }
 
-function DshSettingsDialog({ onClose, onSaved }: { onClose: () => void; onSaved?: () => void }) {
+/** Dsh 认证与模型设置表单，可嵌入任意容器（独立弹窗或系统设置） */
+export function DshSettingsPanel({ onClose, onSaved, embedded = false }: { onClose: () => void; onSaved?: () => void; embedded?: boolean }) {
   const [settings, setSettings] = useState<Settings>({ authentication: "headless", profile: "web" });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -30,7 +31,7 @@ function DshSettingsDialog({ onClose, onSaved }: { onClose: () => void; onSaved?
     catch (failure) { setError(String(failure)); }
     finally { setSaving(false); }
   }
-  return <Modal title="Dsh 认证与模型设置" onClose={onClose}>
+  return (
     <div className="space-y-4">
       <p className="text-sm text-slate-400">所有项目和内置助理共用，从下一回合生效。账号登录、密钥和模型配置由 Dsh 管理。</p>
       <Field label="默认认证方式">
@@ -51,9 +52,9 @@ function DshSettingsDialog({ onClose, onSaved }: { onClose: () => void; onSaved?
       </Field>
       {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
       <div className="flex justify-end gap-2">
-        <Button disabled={saving} onClick={onClose}>取消</Button>
+        {!embedded && <Button disabled={saving} onClick={onClose}>取消</Button>}
         <Button variant="primary" disabled={loading || saving} onClick={() => void save()}>{saving ? "正在保存…" : "保存 Dsh 设置"}</Button>
       </div>
     </div>
-  </Modal>;
+  );
 }

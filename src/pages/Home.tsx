@@ -3,8 +3,6 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { api } from "../api";
 import { ProjectCard } from "../components/ProjectCard";
-import { ProxySettingsButton } from "../components/ProxySettings";
-import { DshSettingsButton } from "../components/DshSettings";
 import type { ProjectSummary } from "../types";
 
 export default function Home() {
@@ -44,8 +42,7 @@ export default function Home() {
           <p className="text-sm text-slate-400">
             {projects ? `${projects.length} 个项目 · ${agentTotal} 个 Agent` : "加载中…"}
           </p>
-          <ProxySettingsButton />
-          <DshSettingsButton />
+          <Link to="/settings" className="shrink-0 rounded border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800">系统设置</Link>
         </div>
       </header>
 
