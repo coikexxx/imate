@@ -147,6 +147,129 @@ pub fn load_path_overrides(conn: &Connection) {
     }
 }
 
+// ---- 模型候选 ----
+
+/// Claude Code 的 `--model` 接受的别名。Codex 没有列模型的命令，且本机常用自定义供应商，所以留空让用户手填。
+pub fn builtin_models(id: &str) -> Vec<CliModel> {
+    match id {
+        "claude" => ["opus", "sonnet", "haiku"].iter()
+            .map(|alias| CliModel { id: (*alias).into(), label: (*alias).into(), custom: false }).collect(),
+        _ => vec![],
+    }
+}
+
+/// 解析 `grok models` 的输出：取 `Available models:` 之后以 `*` 或 `-` 开头的行，第一个词是模型 ID。
+pub fn parse_grok_models(output: &str) -> Vec<CliModel> {
+    let mut in_list = false;
+    let mut models: Vec<CliModel> = vec![];
+    for line in output.lines().map(str::trim) {
+        if line.eq_ignore_ascii_case("Available models:") { in_list = true; continue; }
+        if !in_list { continue; }
+        let Some(rest) = line.strip_prefix('*').or_else(|| line.strip_prefix('-')) else { continue; };
+        let Some(id) = rest.split_whitespace().next() else { continue; };
+        if models.iter().any(|model| model.id == id) { continue; }
+        let label = if rest.contains("(default)") { format!("{id}（CLI 默认）") } else { id.to_string() };
+        models.push(CliModel { id: id.to_string(), label, custom: false });
+    }
+    models
+}
+
+/// 在临时目录运行 `grok models`，带上应用的代理环境。
+fn fetch_grok_models(environment: &[(String, Option<String>)]) -> Result<Vec<CliModel>, String> {
+    let cli = cli_registry::resolve_cli("grok").map_err(|error| error.to_string())?;
+    let (program, args) = crate::runner::platform::resolve_program(&cli.program, &["models".to_string()], Some(cli.path_env.as_os_str()))?;
+    let mut command = std::process::Command::new(program);
+    command.args(args).env("PATH", &cli.path_env).current_dir(std::env::temp_dir());
+    for (name, value) in environment {
+        match value { Some(value) => { command.env(name, value); } None => { command.env_remove(name); } }
+    }
+    let output = cli_registry::probe_output(command, std::time::Duration::from_secs(20))
+        .ok_or_else(|| "读取 Grok 模型失败或超时，请检查登录状态与网络代理".to_string())?;
+    let models = parse_grok_models(&output);
+    if models.is_empty() { return Err("Grok 没有返回可用模型，请先登录后重试".into()); }
+    Ok(models)
+}
+
+// ---- Tauri 命令 ----
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliConfigView {
+    pub id: String,
+    pub label: String,
+    pub installed: bool,
+    pub supported: bool,
+    pub path: Option<String>,
+    pub version: Option<String>,
+    pub enabled: bool,
+    pub custom_path: Option<String>,
+    pub models: Vec<CliModel>,
+    pub default_model: Option<String>,
+    /// `auto` 自动读取，`builtin` 内置候选加手填，`none` 暂不支持。
+    pub models_source: String,
+}
+
+fn view(info: cli_registry::CliInfo, config: CliConfig) -> CliConfigView {
+    let models_source = match info.id.as_str() {
+        "grok" | "dsh" => "auto",
+        "claude" | "codex" => "builtin",
+        _ => "none",
+    };
+    CliConfigView {
+        id: info.id, label: info.label, installed: info.installed, supported: info.supported, path: info.path, version: info.version,
+        enabled: config.enabled, custom_path: config.custom_path, models: config.models, default_model: config.default_model,
+        models_source: models_source.into(),
+    }
+}
+
+fn detect_one(id: &str) -> cli_registry::CliInfo {
+    cli_registry::resolve_cli(id).map(|cli| cli.info).unwrap_or_else(|_| {
+        let spec = cli_registry::KNOWN_CLIS.iter().find(|spec| spec.id == id);
+        cli_registry::CliInfo {
+            id: id.to_string(), label: spec.map(|spec| spec.label).unwrap_or(id).to_string(),
+            installed: false, supported: cli_registry::is_supported(id), path: None, version: None,
+        }
+    })
+}
+
+/// 探测要逐个启动 CLI 取版本号，放到后台线程。
+#[tauri::command(async)]
+pub fn list_cli_configs(state: tauri::State<'_, crate::commands::AppState>) -> AppResult<Vec<CliConfigView>> {
+    let infos = cli_registry::detect_all();
+    let conn = state.db_lock()?;
+    infos.into_iter().map(|info| { let config = load(&conn, &info.id)?; Ok(view(info, config)) }).collect()
+}
+
+#[tauri::command(async)]
+pub fn save_cli_config(state: tauri::State<'_, crate::commands::AppState>, id: String, config: CliConfig) -> AppResult<CliConfigView> {
+    let saved = { let conn = state.db_lock()?; save(&conn, &id, &config)? };
+    cli_registry::set_path_override(&id, saved.custom_path.clone().map(PathBuf::from));
+    Ok(view(detect_one(&id), saved))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliModelCatalog { pub models: Vec<CliModel>, pub error: Option<String> }
+
+/// 只服务 claude、codex、grok；Dsh 的候选由前端读 Dsh 目录得到。
+#[tauri::command]
+pub async fn list_cli_models(state: tauri::State<'_, crate::commands::AppState>, id: String) -> AppResult<CliModelCatalog> {
+    match id.as_str() {
+        "claude" | "codex" => Ok(CliModelCatalog { models: builtin_models(&id), error: None }),
+        "grok" => {
+            let proxy = { let conn = state.db_lock()?; crate::proxy::load(&conn)? };
+            let environment = crate::proxy::resolve(&proxy)?.map(|proxy| crate::proxy::overrides(&proxy)).unwrap_or_default();
+            let result = tauri::async_runtime::spawn_blocking(move || fetch_grok_models(&environment)).await
+                .map_err(|error| invalid(format!("读取模型失败：{error}")))?;
+            Ok(match result {
+                Ok(models) => CliModelCatalog { models, error: None },
+                Err(error) => CliModelCatalog { models: vec![], error: Some(error) },
+            })
+        }
+        _ => Err(invalid("该 CLI 的模型候选不由本命令提供")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +364,48 @@ b"], None)),
         assert_eq!(effective_model(&conn, "claude", Some("  ")).unwrap().as_deref(), Some("opus"));
         assert_eq!(effective_model(&conn, "claude", Some("sonnet")).unwrap().as_deref(), Some("sonnet"));
         assert_eq!(effective_model(&conn, "codex", None).unwrap(), None);
+    }
+
+    #[test]
+    fn parses_the_recorded_grok_models_sample() {
+        let models = parse_grok_models(include_str!("../tests/fixtures/grok/models.txt"));
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, ["grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"]);
+        assert!(models[0].label.contains("默认"));
+        assert!(models.iter().all(|model| !model.custom));
+    }
+
+    #[test]
+    fn grok_parser_ignores_noise_and_duplicates() {
+        assert!(parse_grok_models("").is_empty());
+        assert!(parse_grok_models("You are logged in.
+  - not-a-model-yet
+").is_empty(), "必须在 Available models 之后");
+        let models = parse_grok_models("Available models:
+  - a
+  - a
+
+  * b (default)
+垃圾行
+");
+        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+    }
+
+    #[test]
+    fn builtin_models_cover_claude_aliases_and_leave_codex_to_manual_entry() {
+        let claude: Vec<String> = builtin_models("claude").into_iter().map(|m| m.id).collect();
+        assert_eq!(claude, ["opus", "sonnet", "haiku"]);
+        assert!(builtin_models("codex").is_empty());
+        assert!(builtin_models("pi").is_empty());
+    }
+
+    #[test]
+    fn view_marks_models_source_per_cli() {
+        let info = |id: &str| cli_registry::CliInfo { id: id.into(), label: id.into(), installed: true, supported: id != "pi", path: None, version: None };
+        assert_eq!(view(info("grok"), default_config("grok")).models_source, "auto");
+        assert_eq!(view(info("dsh"), default_config("dsh")).models_source, "auto");
+        assert_eq!(view(info("claude"), default_config("claude")).models_source, "builtin");
+        assert_eq!(view(info("codex"), default_config("codex")).models_source, "builtin");
+        assert_eq!(view(info("pi"), default_config("pi")).models_source, "none");
     }
 }
