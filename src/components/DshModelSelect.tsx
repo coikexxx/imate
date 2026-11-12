@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { DshCatalog, DshProfile } from "../types";
+import type { CliConfig, DshCatalog, DshProfile } from "../types";
 import { dshModelOptions } from "../lib/dsh";
+import { filterDshOptions } from "../lib/cliConfig";
 import { Button, inputClass } from "./ui";
 import { DshSettingsButton } from "./DshSettings";
 
-export function DshModelSelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+export function DshModelSelect({ value, onChange, config }: { value: string; onChange: (value: string) => void; config?: CliConfig }) {
   const [profile, setProfile] = useState<DshProfile>("web");
   const [catalog, setCatalog] = useState<DshCatalog | null>(null);
   const [loading, setLoading] = useState(true);
@@ -24,7 +25,7 @@ export function DshModelSelect({ value, onChange }: { value: string; onChange: (
     finally { if (current === generation.current) setLoading(false); }
   }
   useEffect(() => { void refresh(); return () => { generation.current += 1; }; }, []);
-  const options = dshModelOptions(catalog, value);
+  const options = filterDshOptions(dshModelOptions(catalog, value), config, value);
   return <div className="space-y-2">
     <select className={inputClass} value={value} onChange={event => onChange(event.target.value)}>
       <option value="">使用 Dsh 默认模型与认证设置</option>
