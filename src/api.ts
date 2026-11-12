@@ -42,7 +42,7 @@ export const api = {
   listClis: () => invoke<CliInfo[]>("list_clis"),
   listCliConfigs: () => invoke<CliConfig[]>("list_cli_configs"),
   saveCliConfig: (id: string, config: CliConfigInput) => invoke<CliConfig>("save_cli_config", { id, config }),
-  listCliModels: (id: string) => invoke<CliModelCatalog>("list_cli_models", { id }),
+  listCliModels: (id: string, fromProvider = false) => invoke<CliModelCatalog>("list_cli_models", { id, fromProvider }),
   listMessages: (projectId: string, beforeId: number | null = null, limit = 50) =>
     invoke<Message[]>("list_messages", { projectId, beforeId, limit }),
   sendMessage: (projectId: string, content: string) => invoke<SendMessageResponse>("send_message", { projectId, content }),
