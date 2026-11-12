@@ -9,6 +9,7 @@ mod prompts;
 mod runner;
 mod cli_registry;
 mod cli_config;
+mod provider_models;
 mod commands;
 mod error;
 mod adapters;
