@@ -258,7 +258,12 @@ pub fn save_cli_config(state: tauri::State<'_, crate::commands::AppState>, id: S
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CliModelCatalog { pub models: Vec<CliModel>, pub error: Option<String> }
+pub struct CliModelCatalog {
+    pub models: Vec<CliModel>,
+    pub error: Option<String>,
+    /// 供应商的主机名（不含路径、查询、账号），只用于界面提示「密钥会发给谁」。
+    pub provider_host: Option<String>,
+}
 
 /// Grok 候选的决策：代理设置读取或解析失败、抓取失败，都返回空列表加错误说明，不让整个命令抛错。
 /// 抓取函数由调用方注入（真实实现会启动 `grok models`）。
@@ -266,22 +271,88 @@ fn grok_catalog(
     proxy: AppResult<crate::proxy::ProxySettings>,
     fetch: impl FnOnce(&[(String, Option<String>)]) -> Result<Vec<CliModel>, String>,
 ) -> CliModelCatalog {
-    let failed = |error: String| CliModelCatalog { models: vec![], error: Some(error) };
+    let failed = |error: String| CliModelCatalog { models: vec![], error: Some(error), provider_host: None };
     let environment = match proxy.and_then(|settings| crate::proxy::resolve(&settings)) {
         Ok(proxy) => proxy.map(|proxy| crate::proxy::overrides(&proxy)).unwrap_or_default(),
         Err(error) => return failed(error.to_string()),
     };
     match fetch(&environment) {
-        Ok(models) => CliModelCatalog { models, error: None },
+        Ok(models) => CliModelCatalog { models, error: None, provider_host: None },
         Err(error) => failed(error),
     }
 }
 
+fn append_unique(models: &mut Vec<CliModel>, list: Vec<CliModel>) {
+    for model in list {
+        if !models.iter().any(|existing| existing.id == model.id) { models.push(model); }
+    }
+}
+
+/// 合并 Claude/Codex 的候选：本地目录 → 供应商 → 内置，先出现者优先、按 id 去重。
+/// 供应商失败或被截断时给出说明，但仍保留其他来源的候选。
+pub fn merge_catalogs(
+    local: Vec<CliModel>,
+    provider: Option<Result<(Vec<CliModel>, bool), String>>,
+    builtin: Vec<CliModel>,
+    host: Option<String>,
+) -> CliModelCatalog {
+    let mut models = vec![];
+    let mut error = None;
+    append_unique(&mut models, local);
+    match provider {
+        Some(Ok((list, truncated))) => {
+            append_unique(&mut models, list);
+            if truncated {
+                let limit = crate::provider_models::MAX_MODELS;
+                error = Some(format!("供应商返回的模型超过 {limit} 个，只显示前 {limit} 个"));
+            }
+        }
+        Some(Err(message)) => error = Some(message),
+        None => {}
+    }
+    append_unique(&mut models, builtin);
+    CliModelCatalog { models, error, provider_host: host }
+}
+
+/// Claude/Codex 的候选。`from_provider` 为 false 时只读本地目录和内置候选，绝不联网、不读密钥。
+pub(crate) fn claude_codex_catalog(
+    id: &str,
+    from_provider: bool,
+    proxy: AppResult<crate::proxy::ProxySettings>,
+    env: crate::provider_models::Env,
+    http: crate::provider_models::HttpFn,
+) -> CliModelCatalog {
+    use crate::provider_models as pm;
+    let codex = id == "codex";
+    let local = if codex { pm::codex_catalog(env) } else { vec![] };
+    let builtin = builtin_models(id);
+    if !from_provider { return merge_catalogs(local, None, builtin, None); }
+    let endpoint = if codex { pm::codex_endpoint(env) } else { pm::claude_endpoint(env) };
+    let endpoint = match endpoint {
+        Ok(endpoint) => endpoint,
+        Err(message) => return merge_catalogs(local, Some(Err(message)), builtin, None),
+    };
+    let host = Some(endpoint.host.clone());
+    let proxy_environment = match proxy.and_then(|settings| crate::proxy::resolve(&settings)) {
+        Ok(environment) => environment,
+        Err(error) => return merge_catalogs(local, Some(Err(error.to_string())), builtin, host),
+    };
+    let choice = pm::proxy_choice(endpoint.url.starts_with("https://"), proxy_environment.as_ref());
+    merge_catalogs(local, Some(pm::fetch_models(&endpoint, &choice, http)), builtin, host)
+}
+
 /// 只服务 claude、codex、grok；Dsh 的候选由前端读 Dsh 目录得到。
+/// `from_provider` 仅对 claude、codex 有意义：为 true 时才联网向供应商查询（前端参数名 `fromProvider`）。
 #[tauri::command]
-pub async fn list_cli_models(state: tauri::State<'_, crate::commands::AppState>, id: String) -> AppResult<CliModelCatalog> {
+pub async fn list_cli_models(state: tauri::State<'_, crate::commands::AppState>, id: String, from_provider: bool) -> AppResult<CliModelCatalog> {
     match id.as_str() {
-        "claude" | "codex" => Ok(CliModelCatalog { models: builtin_models(&id), error: None }),
+        "claude" | "codex" => {
+            let proxy = { let conn = state.db_lock()?; crate::proxy::load(&conn) };
+            tauri::async_runtime::spawn_blocking(move || {
+                let env = |name: &str| std::env::var(name).ok();
+                claude_codex_catalog(&id, from_provider, proxy, &env, &crate::provider_models::ureq_http)
+            }).await.map_err(|error| invalid(format!("读取模型失败：{error}")))
+        }
         "grok" => {
             let proxy = { let conn = state.db_lock()?; crate::proxy::load(&conn) };
             tauri::async_runtime::spawn_blocking(move || grok_catalog(proxy, fetch_grok_models)).await
@@ -556,5 +627,94 @@ mod tests {
         assert!(save_and_reset_sessions(&conn, "claude", &config(&["opus"], Some("不存在"))).is_err());
         assert_eq!(session_of(&conn, &follows).as_deref(), Some("又一个"));
         assert_eq!(load(&conn, "claude").unwrap().default_model.as_deref(), Some("sonnet"));
+    }
+
+    use crate::provider_models::{HttpRequest, HttpResponse};
+    use crate::proxy::{ProxyMode, ProxySettings};
+    use std::cell::{Cell, RefCell};
+
+    const SECRET: &str = "sk-test-SECRET";
+
+    fn direct_proxy() -> AppResult<ProxySettings> { Ok(ProxySettings { mode: ProxyMode::Direct, url: String::new() }) }
+    fn env_for(dir: &Path) -> impl Fn(&str) -> Option<String> {
+        let dir = dir.to_string_lossy().into_owned();
+        move |name| matches!(name, "CODEX_HOME" | "CLAUDE_CONFIG_DIR").then(|| dir.clone())
+    }
+    fn ids(catalog: &CliModelCatalog) -> Vec<&str> { catalog.models.iter().map(|m| m.id.as_str()).collect() }
+
+    fn codex_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("catalog.json"), include_str!("../tests/fixtures/codex/model_catalog.json")).unwrap();
+        std::fs::write(dir.path().join("config.toml"), format!(
+            "model_provider = \"custom\"\nmodel_catalog_json = 'catalog.json'\n[model_providers.custom]\nbase_url = \"https://gw.example.com/v1\"\nexperimental_bearer_token = \"{SECRET}\"\n")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn merge_catalogs_orders_dedupes_and_reports_provider_outcome() {
+        let merged = merge_catalogs(vec![model("a"), model("b")], Some(Ok((vec![model("b"), model("c")], false))), vec![model("c"), model("d")], Some("h.example.com".into()));
+        assert_eq!(ids(&merged), ["a", "b", "c", "d"]);
+        assert_eq!(merged.error, None);
+        assert_eq!(merged.provider_host.as_deref(), Some("h.example.com"));
+        let truncated = merge_catalogs(vec![], Some(Ok((vec![model("x")], true))), vec![], None);
+        assert!(truncated.error.unwrap().contains("200"));
+        let failed = merge_catalogs(vec![model("a")], Some(Err("HTTP 401".into())), vec![model("d")], Some("h".into()));
+        assert_eq!(ids(&failed), ["a", "d"], "供应商失败时仍保留本地与内置候选");
+        assert_eq!(failed.error.as_deref(), Some("HTTP 401"));
+        let none = merge_catalogs(vec![model("a")], None, vec![], None);
+        assert_eq!((none.error, none.provider_host), (None, None));
+    }
+
+    #[test]
+    fn plain_refresh_reads_only_the_local_catalog_and_never_touches_the_network() {
+        let dir = codex_dir();
+        let calls = Cell::new(0);
+        let http = |_: &HttpRequest| { calls.set(calls.get() + 1); Err("不应被调用".to_string()) };
+        let codex = claude_codex_catalog("codex", false, direct_proxy(), &env_for(dir.path()), &http);
+        assert_eq!(ids(&codex), ["gpt-6.2-sol", "codex-auto-review", "gpt-6-astra", "gpt-6.1-sol"]);
+        assert_eq!((codex.error, codex.provider_host), (None, None));
+        let claude = claude_codex_catalog("claude", false, direct_proxy(), &env_for(dir.path()), &http);
+        assert_eq!(ids(&claude), ["opus", "sonnet", "haiku"], "Claude 没有本地目录，只有内置候选");
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn provider_read_merges_local_provider_and_builtin_and_exposes_only_the_host() {
+        let dir = codex_dir();
+        let seen = RefCell::new(None);
+        let http = |request: &HttpRequest| {
+            *seen.borrow_mut() = Some(request.url.clone());
+            Ok(HttpResponse { status: 200, body: r#"{"data":[{"id":"gpt-6.1-sol"},{"id":"vendor-only"}]}"#.into() })
+        };
+        let catalog = claude_codex_catalog("codex", true, direct_proxy(), &env_for(dir.path()), &http);
+        assert_eq!(ids(&catalog), ["gpt-6.2-sol", "codex-auto-review", "gpt-6-astra", "gpt-6.1-sol", "vendor-only"]);
+        assert_eq!(catalog.error, None);
+        assert_eq!(catalog.provider_host.as_deref(), Some("gw.example.com"));
+        assert_eq!(seen.into_inner().as_deref(), Some("https://gw.example.com/v1/models"));
+        let json = serde_json::to_string(&catalog).unwrap();
+        assert!(json.contains("\"providerHost\":\"gw.example.com\"") && !json.contains(SECRET), "{json}");
+    }
+
+    #[test]
+    fn provider_failures_keep_local_candidates_and_never_leak_the_key() {
+        let dir = codex_dir();
+        let http = |_: &HttpRequest| Ok(HttpResponse { status: 401, body: format!("bad key {SECRET}") });
+        let failed = claude_codex_catalog("codex", true, direct_proxy(), &env_for(dir.path()), &http);
+        assert_eq!(failed.models.len(), 4);
+        assert_eq!(failed.error.as_deref().map(|e| e.contains("HTTP 401")), Some(true));
+        assert!(!serde_json::to_string(&failed).unwrap().contains(SECRET));
+        // 没有供应商配置：给出手填提示，主机为空
+        let empty = tempfile::tempdir().unwrap();
+        let missing = claude_codex_catalog("claude", true, direct_proxy(), &env_for(empty.path()), &http);
+        assert_eq!(ids(&missing), ["opus", "sonnet", "haiku"]);
+        assert!(missing.error.unwrap().contains("未找到自定义供应商配置"));
+        assert_eq!(missing.provider_host, None);
+        // 代理设置本身无效：返回错误说明，不抛出，也不发请求
+        let calls = Cell::new(0);
+        let counting = |_: &HttpRequest| { calls.set(calls.get() + 1); Err("x".to_string()) };
+        let bad_proxy = Ok(ProxySettings { mode: ProxyMode::Manual, url: "not a url".into() });
+        let result = claude_codex_catalog("codex", true, bad_proxy, &env_for(dir.path()), &counting);
+        assert!(result.error.is_some());
+        assert_eq!(calls.get(), 0);
     }
 }
