@@ -120,7 +120,7 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="max-w-3xl space-y-6 rounded-xl border border-slate-800 bg-white p-6">
       <div className="space-y-4">
         <button type="button" className="rounded text-sm text-slate-400 hover:text-slate-100" onClick={() => void back()}>← 应用管理</button>
         <div className="flex items-center gap-3">
@@ -132,7 +132,7 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
         </div>
       </div>
 
-      <section className="space-y-4">
+      <section className="space-y-4 border-t border-slate-800 pt-6">
         <h4 className="text-base font-medium">接入</h4>
         <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-sm text-slate-400">
           <p>{config.installed ? `已检测到${config.version ? `，版本 ${config.version}` : ""}` : "未检测到。请先安装，或在下面手动指定可执行文件的完整路径。"}</p>
@@ -202,7 +202,7 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
       </section>
       {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
       {saved && <p role="status" className="text-sm text-emerald-400">已保存，从下一回合生效</p>}
-      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-800 pt-4">
+      <div className="sticky bottom-0 -mx-6 -mb-6 flex flex-wrap items-center justify-end gap-2 rounded-b-xl border-t border-slate-800 bg-white px-6 py-4">
         {dirty && <span role="status" className="mr-1 text-xs text-amber-300">有未保存的修改</span>}
         <Button onClick={() => void back()}>返回</Button>
         <Button variant="primary" disabled={saving} onClick={() => void save()}>{saving ? "正在保存…" : "保存"}</Button>

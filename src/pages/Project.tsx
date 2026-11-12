@@ -13,6 +13,8 @@ import { RulesPanel } from "../components/RulesPanel";
 import { FileTree } from "../components/FileTree";
 import { OfficeCanvas } from "../office/OfficeCanvas";
 import { Button, Modal } from "../components/ui";
+import { AppShell } from "../components/AppShell";
+import { Icon } from "../components/Icon";
 import {
   STATUS_LABELS,
   type Agent,
@@ -36,7 +38,7 @@ export default function Project() {
   const [templates, setTemplates] = useState<PersonaTemplate[]>([]);
   const [projectRules, setProjectRules] = useState<RuleDoc[]>([]);
   const [editing, setEditing] = useState<Editing>(null);
-  const [tab, setTab] = useState<"files" | "rules">("rules");
+  const [tab, setTab] = useState<"chat" | "files" | "rules">("chat");
   const [error, setError] = useState<string | null>(null);
   const [mention, setMention] = useState<string | undefined>();
   const activeRunId = useStore(projectStore, (state) => state.projectId === id ? state.activeRunId : null);
@@ -135,18 +137,10 @@ export default function Project() {
   }
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex min-h-14 items-center gap-4 border-b border-slate-800 px-4 py-3">
-        <Link to="/" className="text-sm text-slate-400 hover:text-slate-100">
-          ← 返回
-        </Link>
-        <h1 className="text-base font-semibold">{project.name}</h1>
-        <span className="flex items-center gap-2 rounded-md bg-slate-900 px-2 py-1 text-xs text-slate-400">
-          {activeRunId ? "执行中" : STATUS_LABELS[project.status]}
-        </span>
-        <span className="flex-1 truncate text-xs text-slate-500" title={project.folderPath}>
-          {project.folderPath}
-        </span>
+    <AppShell projectName={project.name}><div className="studio-project-layout">
+      <header className="studio-project-header">
+        <div className="min-w-0"><p className="studio-kicker"><Link to="/" className="hover:text-sky-300">项目总览</Link><span>/</span><span>项目工作台</span></p><h1 className="mt-2 truncate text-xl font-medium">{project.name}</h1></div>
+        <div className="min-w-0 text-right"><span className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-900 px-3 py-1 text-xs text-slate-400"><span className={`size-1.5 rounded-full ${activeRunId ? "bg-sky-400" : "bg-slate-500"}`} />{activeRunId ? "执行中" : STATUS_LABELS[project.status]}</span><p className="mt-2 max-w-64 truncate font-mono text-[11px] text-slate-500" title={project.folderPath}>{project.folderPath}</p></div>
       </header>
 
       {!detail.folderExists && (
@@ -157,58 +151,28 @@ export default function Project() {
       )}
       {error && <p className="px-4 py-2 text-sm text-red-400">{error}</p>}
 
-      <div className="grid min-h-0 flex-1 grid-cols-[240px_minmax(0,1fr)_minmax(360px,32%)]">
-        <MemberList
-          agents={agents}
-          clis={clis}
-          statuses={agentStatuses}
-          onMention={(agent) => setMention(agent.name)}
-          onAdd={() => void openAgentForm({ kind: "new" })}
-          onEdit={(agent) => void openAgentForm({ kind: "edit", agent })}
-        />
-
-        {/* 中栏：办公室占 65%，下方是文件与规章 */}
-        <section className="grid min-h-0 grid-rows-[minmax(0,65fr)_minmax(0,35fr)] gap-3 p-3">
-          <OfficeCanvas agents={agents} statuses={agentStatuses} />
-          <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-950">
-            <div className="flex items-center gap-1 border-b border-slate-800 px-2 py-1.5 text-sm" role="tablist">
-              {(["files", "rules"] as const).map((key) => (
-                <button
-                  key={key}
-                  type="button"
-                  role="tab"
-                  aria-selected={tab === key}
-                  onClick={() => setTab(key)}
-                  className={`min-h-8 rounded-lg px-3 py-1 ${
-                    tab === key ? "bg-slate-800 text-slate-100" : "text-slate-400 hover:bg-slate-900 hover:text-slate-200"
-                  }`}
-                >
-                  {key === "files" ? "文件" : "规章"}
-                  {key === "files" && changedFiles.length > 0 && (
-                    <span className="ml-2 font-mono text-xs tabular-nums text-amber-200">{changedFiles.length}</span>
-                  )}
-                </button>
-              ))}
-              <span className="ml-auto truncate pl-2 text-xs text-slate-500">
-                {tab === "files" ? "只读 · 点击文件用系统默认程序打开" : "保存在项目文件夹的 .imates/rules/"}
-              </span>
-            </div>
-            <div className="min-h-0 flex-1">
-              {tab === "rules" ? (
-                // 文件夹重新选定后路径会变，用 key 让规章面板重新读取，不必来回切页签
-                <RulesPanel key={`${detail.folderExists}:${project.folderPath}`} projectId={id} project={project} agents={agents} clis={clis} closedCliIds={closedClis} refreshTick={rulesTick} />
-              ) : detail.folderExists ? (
-                <FileTree key={project.folderPath} projectId={id} changed={changedFiles} tick={filesTick} />
-              ) : (
-                <p className="p-3 text-sm text-slate-500">项目文件夹不存在，无法列出文件。</p>
-              )}
-            </div>
+      <div className="studio-project-body">
+        <section className="studio-workspace">
+          <div className="studio-work-tabs" role="tablist" aria-label="项目工作区">
+            {(["chat", "files", "rules"] as const).map((key) => <button key={key} type="button" role="tab" id={`project-tab-${key}`} aria-controls={`project-panel-${key}`} aria-selected={tab === key} onClick={() => setTab(key)}><Icon name={key} />{key === "chat" ? "团队讨论" : key === "files" ? "项目文件" : "规章制度"}{key === "files" && changedFiles.length > 0 && <span className="font-mono text-xs text-amber-200">{changedFiles.length}</span>}</button>)}
           </div>
+          {/* 群聊始终挂载，切换视图时继续接收运行事件并保留输入。 */}
+          <div id="project-panel-chat" role="tabpanel" aria-labelledby="project-tab-chat" hidden={tab !== "chat"} className={tab === "chat" ? "studio-work-panel" : "hidden"}>
+            <ChatPanel projectId={id} agents={agents} folderExists={detail.folderExists} mention={mention} onMentionUsed={consumeMention} onFinished={refreshAfterRun} />
+          </div>
+          <div id="project-panel-rules" role="tabpanel" aria-labelledby="project-tab-rules" hidden={tab !== "rules"} className={tab === "rules" ? "studio-work-panel" : "hidden"}>
+            <div className="border-b border-slate-800 px-4 py-3 text-xs text-slate-500">团队共同遵守的工作约定 · 修改后从下一回合生效</div>
+            <div className="min-h-0 flex-1"><RulesPanel key={`${detail.folderExists}:${project.folderPath}`} projectId={id} project={project} agents={agents} clis={clis} closedCliIds={closedClis} refreshTick={rulesTick} /></div>
+          </div>
+          {tab === "files" && <div id="project-panel-files" role="tabpanel" aria-labelledby="project-tab-files" className="studio-work-panel">
+            <div className="border-b border-slate-800 px-4 py-3 text-xs text-slate-500">点击文件，在系统默认程序中打开 · 改动不区分修改者</div>
+            <div className="min-h-0 flex-1">{detail.folderExists ? <FileTree key={project.folderPath} projectId={id} changed={changedFiles} tick={filesTick} /> : <p className="p-4 text-sm text-slate-500">项目文件夹不存在，无法列出文件。</p>}</div>
+          </div>}
         </section>
-
-        {/* 右栏：群聊占满整列高度 */}
-        <aside className="flex min-h-0 flex-col border-l border-slate-800 p-3">
-          <ChatPanel projectId={id} agents={agents} folderExists={detail.folderExists} mention={mention} onMentionUsed={consumeMention} onFinished={refreshAfterRun} />
+        <aside className="studio-team-panel">
+          <div className="studio-team-title"><span className="flex items-center gap-2"><Icon name="team" />团队现场</span><span className="font-mono text-[11px]">{agents.length} / 8</span></div>
+          <div className="studio-office"><OfficeCanvas agents={agents} statuses={agentStatuses} /></div>
+          <MemberList agents={agents} clis={clis} statuses={agentStatuses} onMention={(agent) => { setTab("chat"); setMention(agent.name); }} onAdd={() => void openAgentForm({ kind: "new" })} onEdit={(agent) => void openAgentForm({ kind: "edit", agent })} />
         </aside>
       </div>
 
@@ -242,6 +206,6 @@ export default function Project() {
           )}
         </Modal>
       )}
-    </div>
+    </div></AppShell>
   );
 }

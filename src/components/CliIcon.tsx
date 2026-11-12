@@ -10,12 +10,12 @@ interface Props {
 /** CLI 的 logo。装饰性图片：名称已经写在旁边的文字里，所以不给 alt；Pi 没有对应 logo，用「π」 */
 export function CliIcon({ id, label, className = "" }: Props) {
   const icon = cliIconInfo(id);
-  const tile = icon?.lightTile ? "bg-white" : "bg-slate-800";
+  const tile = "bg-white border border-slate-800";
   const box = `grid h-9 w-9 shrink-0 place-items-center rounded-lg ${tile} ${className}`;
   if (icon) {
     return (
       <span className={box}>
-        <img src={icon.src} alt="" aria-hidden="true" className={`h-6 w-6${icon.mono ? " invert" : ""}`} />
+        <img src={icon.src} alt="" aria-hidden="true" className="h-6 w-6" />
       </span>
     );
   }

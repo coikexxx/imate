@@ -10,6 +10,8 @@ import { AgentForm } from "./AgentForm";
 import { AssistantDraftDialog } from "./AssistantDraftDialog";
 import { RulesEditor } from "./RulesEditor";
 import { Button, Field, inputClass } from "./ui";
+import { AppShell } from "./AppShell";
+import { Icon } from "./Icon";
 
 const STEPS = ["基本信息", "规章制度", "组建团队"];
 
@@ -111,20 +113,21 @@ export default function ProjectWizard() {
   }
 
   return (
-    <main className="mx-auto flex h-full max-w-4xl flex-col p-8">
-      <header className="mb-6 flex items-center justify-between">
-        <h1 className="text-xl font-bold">新建项目</h1>
+    <AppShell><main className="studio-page flex h-full max-w-5xl flex-col">
+      <header className="mb-8 flex items-center justify-between">
+        <div><p className="studio-kicker"><Icon name="plus" />工作空间 / 新建项目</p><h1 className="studio-page-title">组建一支新团队</h1></div>
         <Link to="/" className="text-sm text-slate-400 hover:text-slate-100">
           取消
         </Link>
       </header>
 
-      <ol className="mb-6 flex gap-2 text-sm">
+      <ol className="mb-6 grid grid-cols-3 gap-3 text-sm">
         {STEPS.map((label, i) => (
           <li
             key={label}
-            className={`rounded px-3 py-1 ${
-              i === step ? "bg-sky-700 text-white" : "bg-slate-800 text-slate-400"
+            aria-current={i === step ? "step" : undefined}
+            className={`flex items-center gap-3 rounded-lg border px-4 py-3 ${
+              i === step ? "border-sky-600 bg-white text-sky-300" : "border-slate-800 text-slate-500"
             }`}
           >
             {i + 1}. {label}
@@ -132,7 +135,7 @@ export default function ProjectWizard() {
         ))}
       </ol>
 
-      <section className="flex-1 overflow-y-auto">
+      <section className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-800 bg-white p-6">
         {step === 0 && (
           <div className="space-y-4">
             <Field label="项目名称">
@@ -250,6 +253,6 @@ export default function ProjectWizard() {
           </Button>
         )}
       </footer>
-    </main>
+    </main></AppShell>
   );
 }

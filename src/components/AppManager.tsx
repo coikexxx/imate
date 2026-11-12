@@ -58,7 +58,7 @@ export function AppManager() {
   const section = (title: string, items: CliConfig[]) => items.length > 0 && (
     <section className="mb-8">
       <h3 className="mb-3 flex items-center gap-2 text-sm font-medium text-slate-400">{title}<span className="font-mono text-xs tabular-nums text-slate-500">{items.length}</span></h3>
-      <ul className="divide-y divide-slate-800 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
+      <ul className={title === "暂未支持" ? "studio-app-unsupported" : "studio-app-grid"}>
         {items.map((config) => <Row key={config.id} config={config} busy={busyId === config.id} onOpen={() => openDetail(config.id)} onToggle={(next) => void toggle(config, next)} />)}
       </ul>
     </section>
@@ -86,7 +86,7 @@ function Row({ config, busy, onOpen, onToggle }: { config: CliConfig; busy: bool
           {config.supported && <span className="mt-1 block truncate text-xs text-slate-500" title={config.path ?? undefined}>{config.path ?? state.hint ?? "未检测到"}</span>}
         </span>
       </button>
-      <span className="hidden w-24 shrink-0 text-right font-mono text-xs tabular-nums text-slate-500 sm:block">{config.supported ? (config.version ?? (config.installed ? "" : "未安装")) : "暂未支持"}</span>
+      {config.supported && <span className="hidden shrink-0 text-right font-mono text-[11px] tabular-nums text-slate-500 xl:block">{config.version ?? (config.installed ? "" : "未安装")}</span>}
       {config.supported
         ? <Switch checked={state.checked} disabled={state.disabled || busy} label={`${config.label} 开关`} onChange={onToggle} />
         : <span aria-hidden className="h-6 w-11 shrink-0" />}

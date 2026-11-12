@@ -4,6 +4,8 @@ import { Link } from "react-router";
 import { api } from "../api";
 import { ProjectCard } from "../components/ProjectCard";
 import type { ProjectSummary } from "../types";
+import { AppShell } from "../components/AppShell";
+import { Icon } from "../components/Icon";
 
 export default function Home() {
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
@@ -35,33 +37,37 @@ export default function Home() {
   const agentTotal = (projects ?? []).reduce((sum, p) => sum + p.agentCount, 0);
 
   return (
-    <main className="mx-auto min-h-full max-w-6xl px-6 py-8 lg:px-8">
-      <header className="mb-8 flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-6">
+    <AppShell><main className="studio-page">
+      <header className="studio-page-head">
         <div>
-          <h1 className="text-2xl font-medium">imates</h1>
-          <p className="mt-2 text-sm text-slate-400">项目与团队</p>
+          <p className="studio-kicker"><Icon name="grid" />工作空间 / 项目</p>
+          <h1 className="studio-page-title">项目总览</h1>
+          <p className="studio-subtitle mt-2">把目标交给团队，让每一项工作都有着落</p>
         </div>
-        <div className="flex items-center gap-4">
-          <p className="text-sm text-slate-400">
-            {projects ? `${projects.length} 个项目 · ${agentTotal} 个 Agent` : "加载中…"}
-          </p>
-          <Link to="/settings" className="inline-flex min-h-9 shrink-0 items-center rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm hover:bg-slate-800">系统设置</Link>
-        </div>
+        <Link to="/new" className="studio-primary-link"><Icon name="plus" />新建项目</Link>
       </header>
+      <section className="studio-summary" aria-label="工作空间总览">
+        <div><strong>{projects?.length ?? "—"}</strong><span>全部项目</span></div>
+        <div><strong>{projects ? agentTotal : "—"}</strong><span>团队成员</span></div>
+        <div><strong>{projects ? projects.filter((p) => p.status === "discussing" || p.status === "executing").length : "—"}</strong><span>正在协作的项目</span></div>
+      </section>
+      <div className="mb-5 flex items-center justify-between"><h2 className="text-base font-medium">我的项目</h2><span className="text-xs text-slate-500">本地项目 · 文件保存在你的电脑上</span></div>
 
       {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
 
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,280px),1fr))] gap-4">
+      <div className="studio-project-grid">
         {(projects ?? []).map((project) => (
           <ProjectCard key={project.id} project={project} onDelete={() => remove(project)} />
         ))}
         <Link
           to="/new"
-          className="flex min-h-44 items-center justify-center gap-2 rounded-xl border border-dashed border-slate-700 text-sm text-slate-400 hover:border-slate-500 hover:bg-slate-900 hover:text-slate-100"
+          className="studio-project-new"
         >
-          ＋ 新建项目
+          <span className="grid size-10 place-items-center rounded-full border border-slate-700"><Icon name="plus" /></span>
+          <span className="text-sm font-medium">开始一个新项目</span>
+          <span className="text-xs text-slate-500">选择文件夹，组建你的团队</span>
         </Link>
       </div>
-    </main>
+    </main></AppShell>
   );
 }
