@@ -2,6 +2,7 @@ import type { Agent } from "../types";
 import { hashOf, idleAct, shirtColor } from "./layout";
 import { CHARACTER_SCALE, officeFrame, ROOM_HEIGHT, ROOM_WIDTH, STATUS_TEXT, type OfficeActor, type OfficeViewport } from "./openOffice";
 import type { OfficeAssets } from "./openOfficeAssets";
+import { OFFICE_REGIONS } from "./gbaOfficeMap";
 
 export interface ActorHit { id: string; x: number; y: number; width: number; height: number }
 interface DrawOptions {
@@ -17,9 +18,23 @@ export function drawOpenOffice(ctx: CanvasRenderingContext2D, options: DrawOptio
   ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#2c222d";
+  ctx.fillStyle = "#9ab18c";
   ctx.fillRect(0, 0, width, height);
   ctx.drawImage(assets.background, offsetX, offsetY, ROOM_WIDTH * scale, ROOM_HEIGHT * scale);
+  // 区域牌保持屏幕字号，确保全景缩略图也能看清五个区域。
+  for (const region of OFFICE_REGIONS) {
+    const font = scale < 0.75 ? 9 : 11;
+    ctx.font = `600 ${font}px ui-sans-serif, system-ui, sans-serif`;
+    const signW = ctx.measureText(region.name).width + 18;
+    const signH = font + 8;
+    const sx = Math.round(offsetX + (region.col + 0.5) * 16 * scale);
+    const sy = Math.round(offsetY + (region.row + 0.1) * 16 * scale);
+    ctx.fillStyle = "#3d6264"; ctx.fillRect(sx, sy, signW, signH);
+    ctx.fillStyle = "#fbf5dcef"; ctx.fillRect(sx + 1, sy + 1, signW - 2, signH - 2);
+    ctx.fillStyle = region.color; ctx.fillRect(sx + 4, sy + 5, 3, signH - 10);
+    ctx.fillStyle = "#375258"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    ctx.fillText(region.name, sx + 11, sy + signH / 2 + 0.5);
+  }
   const people = new Map(members.map((member) => [member.id, member]));
   const hits: ActorHit[] = [];
   const ordered = [...actors.values()].sort((a, b) => a.y - b.y);
@@ -28,8 +43,7 @@ export function drawOpenOffice(ctx: CanvasRenderingContext2D, options: DrawOptio
     const member = people.get(actor.id);
     if (!member) continue;
     const moving = actor.path.length > 0;
-    const direction = actor.status === "talking" && !moving ? "down" : actor.facing;
-    const frame = officeFrame(actor.status, tick, direction, moving);
+    const frame = officeFrame(actor.status, tick, actor.facing, moving);
     const w = frame.width * CHARACTER_SCALE * scale;
     const h = frame.height * CHARACTER_SCALE * scale;
     const x = Math.round(offsetX + actor.x * scale);
@@ -48,39 +62,46 @@ export function drawOpenOffice(ctx: CanvasRenderingContext2D, options: DrawOptio
     ctx.drawImage(assets.characters[hashOf(actor.id) % assets.characters.length], frame.sx, frame.sy, frame.width, frame.height, -w / 2, -h, w, h);
     ctx.restore();
 
-    if (actor.status === "talking" && !moving && motion) {
+    if (actor.status === "talking" && actor.facing === "down" && !moving && motion) {
       ctx.fillStyle = "#603f38";
-      ctx.fillRect(x - scale, y - h + 25 * scale, 3 * scale, (tick % 2 + 1) * scale);
+      ctx.fillRect(x - scale, y - h + 19 * scale, 2 * scale, (tick % 2 + 1) * scale);
     }
 
     const name = Array.from(member.name);
     const text = `${member.isLeader ? "组长 · " : ""}${name.length > 6 ? `${name.slice(0, 5).join("")}…` : member.name}`;
+    const showName = scale >= 0.75 || actor.id === hoveredId;
     ctx.font = "500 10px ui-sans-serif, system-ui, sans-serif";
     const plateW = Math.ceil(ctx.measureText(text).width) + 12;
     const plateX = Math.max(2, Math.min(width - plateW - 2, Math.round(x - plateW / 2)));
     const plateY = Math.max(2, Math.min(height - 18, y + 3));
-    ctx.fillStyle = actor.status === "error" ? "#fff0eb" : "#fff8e9f2";
-    ctx.fillRect(plateX, plateY, plateW, 16);
-    ctx.fillStyle = shirtColor(actor.id);
-    ctx.fillRect(plateX, plateY, 3, 16);
+    if (showName) {
+      ctx.fillStyle = actor.status === "error" ? "#fff0eb" : "#fff8e9f2";
+      ctx.fillRect(plateX, plateY, plateW, 16);
+      ctx.fillStyle = shirtColor(actor.id); ctx.fillRect(plateX, plateY, 3, 16);
+    } else {
+      ctx.fillStyle = "#3b4d62"; ctx.fillRect(x - 3, y + 2, 6, 4);
+      ctx.fillStyle = shirtColor(actor.id); ctx.fillRect(x - 2, y + 3, 4, 2);
+    }
     ctx.fillStyle = "#473a37";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(text, plateX + plateW / 2 + 1, plateY + 8);
+    if (showName) ctx.fillText(text, plateX + plateW / 2 + 1, plateY + 8);
 
     if (actor.status !== "idle") {
-      const status = actor.status === "thinking" ? ["·", "··", "···"][tick % 3]
-        : actor.status === "talking" ? "讨论" : actor.status === "working" ? "工作" : "!";
-      ctx.font = "600 10px ui-sans-serif, system-ui, sans-serif";
-      const bubbleW = Math.max(20, ctx.measureText(status).width + 12);
+      const compact = scale < 0.75;
+      const status = actor.status === "thinking" ? (compact ? "·" : ["·", "··", "···"][tick % 3])
+        : actor.status === "talking" ? compact ? "聊" : "讨论" : actor.status === "working" ? compact ? "工" : "工作" : "!";
+      ctx.font = `600 ${compact ? 8 : 10}px ui-sans-serif, system-ui, sans-serif`;
+      const bubbleH = compact ? 12 : 16;
+      const bubbleW = Math.max(compact ? 12 : 20, ctx.measureText(status).width + (compact ? 6 : 12));
       const bubbleX = Math.max(2, Math.min(width - bubbleW - 2, x - bubbleW / 2));
-      const bubbleY = Math.max(2, y - h - 19);
+      const bubbleY = Math.max(2, y - 24 * scale - bubbleH - 4);
       ctx.fillStyle = actor.status === "error" ? "#b6493c" : actor.status === "working" ? "#3c6e51" : "#fff8e9";
-      ctx.fillRect(bubbleX, bubbleY, bubbleW, 16);
-      ctx.fillRect(x - 2, bubbleY + 16, 4, 3);
+      ctx.fillRect(bubbleX, bubbleY, bubbleW, bubbleH);
+      ctx.fillRect(x - 1, bubbleY + bubbleH, 2, 2);
       ctx.fillStyle = actor.status === "error" || actor.status === "working" ? "#fff8e9" : "#473a37";
-      ctx.fillText(status, bubbleX + bubbleW / 2, bubbleY + 8);
-    } else if (!moving && motion) {
+      ctx.fillText(status, bubbleX + bubbleW / 2, bubbleY + bubbleH / 2);
+    } else if (!moving && motion && scale >= 0.75) {
       const act = idleAct(actor.id, tick * 250);
       const left = x + w / 2 + 2;
       const top = y - h / 2;
@@ -95,8 +116,8 @@ export function drawOpenOffice(ctx: CanvasRenderingContext2D, options: DrawOptio
         ctx.fillRect(left + 1, top + 1, Math.max(1, 3 * scale), Math.max(1, 3 * scale));
       }
     }
-    const hitLeft = Math.min(plateX, x - w / 2);
-    const hitRight = Math.max(plateX + plateW, x + w / 2);
+    const hitLeft = showName ? Math.min(plateX, x - w / 2) : x - Math.max(6, w / 2);
+    const hitRight = showName ? Math.max(plateX + plateW, x + w / 2) : x + Math.max(6, w / 2);
     hits.push({ id: actor.id, x: hitLeft, y: y - h - 20, width: hitRight - hitLeft, height: h + 40 });
   }
 

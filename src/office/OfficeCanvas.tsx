@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
 import type { Agent, AgentStatus } from "../types";
-import license from "../assets/openoffice/LICENSE?raw";
 import { Icon } from "../components/Icon";
-import { getOfficeViewport, STATUS_TEXT, stepActor, syncActors, type OfficeActor, type Position } from "./openOffice";
+import { getOfficeViewport, getRegionCamera, ROOM_HEIGHT, ROOM_WIDTH, STATUS_TEXT, stepActor, syncActors, type OfficeActor, type Position } from "./openOffice";
 import { loadOfficeAssets, type OfficeAssets } from "./openOfficeAssets";
 import { drawOpenOffice, type ActorHit } from "./openOfficeRenderer";
+import { OFFICE_REGIONS, type OfficeRegion, type RegionId } from "./gbaOfficeMap";
 
 interface Props { agents: Agent[]; statuses: Record<string, AgentStatus> }
 interface OfficeSimulation { actors: Map<string, OfficeActor>; elapsed: number }
@@ -17,11 +17,12 @@ function OfficeView({ agents, statuses, simulation, paused = false, expanded = f
   const canvas = useRef<HTMLCanvasElement>(null);
   const latest = useRef({ agents, statuses, paused });
   latest.current = { agents, statuses, paused };
-  const camera = useRef({ zoom: 1, center: { x: 512, y: 512 } });
+  const camera = useRef({ zoom: 1, center: { x: ROOM_WIDTH / 2, y: ROOM_HEIGHT / 2 } });
   const hits = useRef<ActorHit[]>([]);
   const hovered = useRef<string | null>(null);
   const drag = useRef<{ pointer: number; x: number; y: number; center: Position } | null>(null);
   const [zoom, setZoom] = useState(1);
+  const [regionId, setRegionId] = useState<RegionId | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -82,8 +83,17 @@ function OfficeView({ agents, statuses, simulation, paused = false, expanded = f
   function changeZoom(next: number) {
     const value = Math.min(8, Math.max(1, next));
     camera.current.zoom = value;
-    if (value === 1) camera.current.center = { x: 512, y: 512 };
+    if (value === 1) camera.current.center = { x: ROOM_WIDTH / 2, y: ROOM_HEIGHT / 2 };
     setZoom(value);
+    setRegionId(null);
+  }
+
+  function focusRegion(region: OfficeRegion) {
+    if (!host.current) return;
+    const next = getRegionCamera(host.current.clientWidth, host.current.clientHeight, region);
+    camera.current = next;
+    setZoom(next.zoom);
+    setRegionId(region.id);
   }
 
   function move(event: PointerEvent<HTMLCanvasElement>) {
@@ -103,6 +113,7 @@ function OfficeView({ agents, statuses, simulation, paused = false, expanded = f
 
   function startDrag(event: PointerEvent<HTMLCanvasElement>) {
     if (zoom === 1 || event.button !== 0) return;
+    setRegionId(null);
     drag.current = { pointer: event.pointerId, x: event.clientX, y: event.clientY, center: { ...camera.current.center } };
     event.currentTarget.setPointerCapture(event.pointerId);
     hovered.current = null;
@@ -111,11 +122,11 @@ function OfficeView({ agents, statuses, simulation, paused = false, expanded = f
   const activeCount = agents.filter((agent) => { const status = statuses[agent.id] ?? "idle"; return status !== "idle" && status !== "error"; }).length;
   const errorCount = agents.filter((agent) => statuses[agent.id] === "error").length;
   const activity = activeCount > 0 ? `${activeCount} 位正在工作` : errorCount > 0 ? `${errorCount} 位出错` : agents.length > 0 ? "团队待命" : "等待成员加入";
-  const summary = agents.length === 0 ? "像素办公室：还没有成员"
-    : `像素办公室：${agents.map((agent) => `${agent.name}${STATUS_TEXT[statuses[agent.id] ?? "idle"]}`).join("，")}`;
+  const summary = `像素办公室，包含办公区、摸鱼区、阳台、会议室和前台。${agents.length === 0 ? "还没有成员"
+    : agents.map((agent) => `${agent.name}${STATUS_TEXT[statuses[agent.id] ?? "idle"]}`).join("，")}`;
   return <div className={`office-scene${expanded ? " office-scene-expanded" : ""}`}>
     <div className="office-toolbar">
-      <span className="office-title">复古办公室<span>{agents.length} 位成员</span></span>
+      <span className="office-title"><i className="office-title-mark" aria-hidden="true" />像素工作室<span>{agents.length} 位成员</span></span>
       <div className="office-tools">
         <button type="button" aria-label="缩小办公室" title="缩小" disabled={zoom === 1} onClick={() => changeZoom(zoom / 1.5)}>−</button>
         <button type="button" aria-label="适应窗口" title="适应窗口" onClick={() => changeZoom(1)}><span className="office-fit-icon" aria-hidden="true" /></button>
@@ -133,10 +144,15 @@ function OfficeView({ agents, statuses, simulation, paused = false, expanded = f
       {error && <div className="office-feedback" role="alert"><p>办公室素材加载失败</p><button type="button" onClick={() => setAttempt((value) => value + 1)}>重新加载</button></div>}
       {!loading && !error && agents.length === 0 && <div className="office-empty">添加成员，让办公室开始运转</div>}
     </div>
-    <div className="office-caption"><span>{activity}</span><span>{zoom > 1 ? "拖动画面 · 点击方框复位" : expanded ? "放大后可拖动画面" : "展开查看团队现场"}</span></div>
+    <div className="office-caption"><span>{activity}</span><span>{zoom > 1 ? "拖动画面 · 点击方框复位" : expanded ? "选择区域，查看团队现场" : "展开查看成员详情"}</span></div>
     {expanded && <div className="office-bottom">
+      <nav className="office-region-nav" aria-label="办公室区域">
+        <button type="button" aria-pressed={regionId === null && zoom === 1} onClick={() => changeZoom(1)}>全景</button>
+        {OFFICE_REGIONS.map((region) => <button key={region.id} type="button" aria-pressed={regionId === region.id} onClick={() => focusRegion(region)}>
+          <span style={{ backgroundColor: region.color }} aria-hidden="true" />{region.name}
+        </button>)}
+      </nav>
       <div className="office-legend"><span><i className="office-dot-idle" />空闲</span><span><i className="office-dot-thinking" />思考 / 发言</span><span><i className="office-dot-working" />工作</span><span><i className="office-dot-error" />出错</span></div>
-      <details className="office-attribution"><summary>OpenOffice · MIT</summary><div><p>场景与角色素材源自 longyangxi/OpenOffice 的默认 Retro 办公室。</p><pre>{license}</pre></div></details>
     </div>}
   </div>;
 }

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  ROOM, ROOM_WIDTH, ROOM_HEIGHT, WORK_SEATS, cellPoint, createActor, findRoomPath, getOfficeViewport,
+  ROOM, ROOM_WIDTH, ROOM_HEIGHT, WORK_SEATS, cellPoint, createActor, findRoomPath, getOfficeViewport, getRegionCamera,
   isWalkable, officeFrame, stepActor, syncActors,
 } from "./openOffice";
-import { MEETING_SEATS, REST_SEATS } from "./gbaOfficeMap";
+import { MEETING_SEATS, OFFICE_REGIONS, REST_SEATS } from "./gbaOfficeMap";
 
 describe("GBA 办公室角色", () => {
   it("八个固定工位集中在办公区，按 seatIndex 对应四列两行", () => {
@@ -144,5 +144,18 @@ describe("办公室相机", () => {
     expect(view.offsetY + ROOM_HEIGHT * view.scale).toBe(512);
     const reset = getOfficeViewport(512, 512, 1, view.center);
     expect(reset.center).toEqual({ x: ROOM_WIDTH / 2, y: ROOM_HEIGHT / 2 });
+  });
+
+  it("区域定位在横竖窗口中都完整保留所选区域，且可复位全景", () => {
+    for (const [width, height] of [[960, 600], [400, 700], [237, 217]]) {
+      for (const region of OFFICE_REGIONS) {
+        const camera = getRegionCamera(width, height, region);
+        const view = getOfficeViewport(width, height, camera.zoom, camera.center);
+        expect(view.offsetX + region.col * 16 * view.scale).toBeGreaterThanOrEqual(-1);
+        expect(view.offsetY + region.row * 16 * view.scale).toBeGreaterThanOrEqual(-1);
+        expect(view.offsetX + (region.col + region.cols) * 16 * view.scale).toBeLessThanOrEqual(width + 1);
+        expect(view.offsetY + (region.row + region.rows) * 16 * view.scale).toBeLessThanOrEqual(height + 1);
+      }
+    }
   });
 });

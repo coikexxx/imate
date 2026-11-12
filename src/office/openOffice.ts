@@ -1,6 +1,6 @@
 import type { Agent, AgentStatus } from "../types";
 import { hashOf } from "./layout";
-import { GBA_ROOM as room, MEETING_SEATS, REST_SEATS, WORK_SEATS } from "./gbaOfficeMap";
+import { GBA_ROOM as room, MEETING_SEATS, REST_SEATS, WORK_SEATS, type OfficeRegion } from "./gbaOfficeMap";
 
 export const ROOM = room;
 export const ROOM_WIDTH = room.cols * room.cellSize;
@@ -157,7 +157,7 @@ export function stepActor(actor: OfficeActor, deltaSeconds: number, motion: bool
     : actor.destination === "meeting" ? MEETING_SEATS[actor.seatIndex].facing : REST_SEATS[actor.seatIndex].facing;
 }
 
-/** 帧排列与 OpenOffice 的 assetLoader / spriteData 一致。 */
+/** 保留既有三方向、七列帧接口，角色素材替换不影响状态调用方。 */
 export function officeFrame(status: AgentStatus, tick: number, facing: Facing, moving: boolean) {
   const frame = Math.max(0, Math.floor(tick));
   const column = moving ? [0, 1, 2, 1][frame % 4]
@@ -182,4 +182,12 @@ export function getOfficeViewport(width: number, height: number, zoom: number, c
   const x = halfW >= ROOM_WIDTH / 2 ? ROOM_WIDTH / 2 : clamp(center.x, halfW, ROOM_WIDTH - halfW);
   const y = halfH >= ROOM_HEIGHT / 2 ? ROOM_HEIGHT / 2 : clamp(center.y, halfH, ROOM_HEIGHT - halfH);
   return { scale, offsetX: w / 2 - x * scale, offsetY: h / 2 - y * scale, center: { x, y } };
+}
+
+/** 在当前容器内完整框住目标区域，留一格边距；仍由相机统一约束地图边界。 */
+export function getRegionCamera(width: number, height: number, region: OfficeRegion) {
+  const w = Math.max(1, width); const h = Math.max(1, height);
+  const base = Math.min(w / ROOM_WIDTH, h / ROOM_HEIGHT);
+  const fit = Math.min(w / ((region.cols + 2) * room.cellSize), h / ((region.rows + 2) * room.cellSize));
+  return { zoom: clamp(fit / base, 1, 8), center: { x: (region.col + region.cols / 2) * room.cellSize, y: (region.row + region.rows / 2) * room.cellSize } };
 }
