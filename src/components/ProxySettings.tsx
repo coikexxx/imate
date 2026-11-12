@@ -1,17 +1,9 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { ProxySettings, ProxyState } from "../types";
-import { Button, Field, inputClass, Modal } from "./ui";
+import { Button, Field, inputClass } from "./ui";
 
-export function ProxySettingsButton() {
-  const [open, setOpen] = useState(false);
-  return <>
-    <Button className="shrink-0" onClick={() => setOpen(true)}>网络代理</Button>
-    {open && <Modal title="网络代理设置" onClose={() => setOpen(false)}><ProxySettingsPanel onClose={() => setOpen(false)} /></Modal>}
-  </>;
-}
-
-/** 网络代理设置表单，可嵌入任意容器（独立弹窗或系统设置） */
+/** 网络代理设置表单，嵌入系统设置页 */
 export function ProxySettingsPanel({ onClose, embedded = false }: { onClose: () => void; embedded?: boolean }) {
   const [settings, setSettings] = useState<ProxySettings>({ mode: "system", url: "" });
   const [detected, setDetected] = useState<ProxyState | null>(null);

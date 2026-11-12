@@ -9,8 +9,6 @@ import { projectStore } from "../stores/project";
 import { api } from "../api";
 import { AgentForm } from "../components/AgentForm";
 import { MemberList } from "../components/MemberList";
-import { ProxySettingsButton } from "../components/ProxySettings";
-import { DshSettingsButton } from "../components/DshSettings";
 import { RulesPanel } from "../components/RulesPanel";
 import { FileTree } from "../components/FileTree";
 import { OfficeCanvas } from "../office/OfficeCanvas";
@@ -149,8 +147,6 @@ export default function Project() {
         <span className="flex-1 truncate text-xs text-slate-500" title={project.folderPath}>
           {project.folderPath}
         </span>
-        <ProxySettingsButton />
-        <DshSettingsButton />
       </header>
 
       {!detail.folderExists && (
