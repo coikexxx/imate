@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { applyDelta, createProjectStore } from "./project";
 
 const message = (id: number, content: string, senderType = "assistant") => ({
-  id, projectId: "甲", senderType, senderAgentId: null, kind: "chat", content, round: null, createdAt: id,
+  id, projectId: "甲", senderType, senderAgentId: null, kind: "chat", content, round: null, createdAt: id, modelInfo: null,
 });
 
 describe("运行输出归并", () => {

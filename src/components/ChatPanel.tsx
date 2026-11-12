@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useStore } from "zustand";
 import { api } from "../api";
 import { mentionCandidates, parseMention, shouldSendOnEnter } from "../lib/mentions";
+import { modelNote } from "../lib/modelNote";
 import { attachProjectEvents, projectStore } from "../stores/project";
 import type { Agent, Instruction, ProjectStatus, TaskItem } from "../types";
 import { InstructionBar } from "./InstructionBar";
@@ -81,7 +82,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       projectStore.getState().applyEvent("message:new", { projectId, runId: result.runId, message: result.userMessage });
       if (result.agentMessageId > 0) {
         projectStore.getState().mergeHistory(projectId, [{ id: result.agentMessageId, projectId, senderType: "assistant",
-          senderAgentId: recipient.agent.id, kind: "chat", content: "", round: null, createdAt: Date.now() }]);
+          senderAgentId: recipient.agent.id, kind: "chat", content: "", round: null, createdAt: Date.now(), modelInfo: null }]);
         projectStore.getState().registerRun(projectId, result.runId, recipient.agent.id, result.agentMessageId);
       }
       setInput("");
@@ -152,8 +153,10 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       {visibleMessages.map((message) => {
         const stream = visibleStreams.find((s) => s.messageId === message.id);
         const content = stream && !stream.final ? stream.text : message.content;
+        const note = message.senderType === "user" || message.senderType === "system" ? null : modelNote(message.modelInfo);
         return <article key={message.id} className={`mb-3 rounded px-3 py-2 ${message.senderType === "user" ? "bg-sky-950/50" : message.senderType === "system" ? "bg-amber-950/30" : "bg-slate-900"}`}>
-          <p className="mb-1 text-xs text-slate-400">{sender(message.senderAgentId, message.senderType)}</p>
+          <p className="mb-1 text-xs text-slate-400">{sender(message.senderAgentId, message.senderType)}
+            {note && <span className="ml-2 text-xs text-slate-500" title={`使用模型：${note}`}>{note}</span>}</p>
           <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">{content || (stream?.finished ? "（本回合没有正文）" : "等待成员回复…")}</div>
         </article>;
       })}

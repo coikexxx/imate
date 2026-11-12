@@ -113,6 +113,7 @@ export interface NewProjectInput {
   agents: AgentInput[];
 }
 
+export interface ModelInfo { requestedModel: string | null; reportedModel: string | null }
 export interface Message {
   id: number;
   projectId: string;
@@ -122,6 +123,7 @@ export interface Message {
   content: string;
   round: number | null;
   createdAt: number;
+  modelInfo: ModelInfo | null;
 }
 export type AgentStatus = "idle" | "thinking" | "talking" | "working" | "error";
 export interface MessageDelta { projectId: string; runId: string; seq: number; agentId: string; text: string }
