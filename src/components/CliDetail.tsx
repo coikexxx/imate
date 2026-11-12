@@ -11,6 +11,7 @@ import { CliIcon } from "./CliIcon";
 import { DshSettingsPanel } from "./DshSettings";
 import { Switch } from "./Switch";
 import { Button, Field, inputClass } from "./ui";
+import { Select } from "./Select";
 
 interface Props {
   config: CliConfig;
@@ -193,10 +194,8 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
           <Button className="shrink-0" disabled={custom.trim() === ""} onClick={addCustom}>添加</Button>
         </div>
         <Field label="默认模型">
-          <select className={inputClass} value={effectiveDefault ?? ""} onChange={(event) => editDefaultModel(event.target.value || null)}>
-            <option value="">使用 CLI 自带默认</option>
-            {checkedRows.map((row) => <option key={row.id} value={row.id}>{row.label}</option>)}
-          </select>
+          <Select aria-label="默认模型" value={effectiveDefault ?? ""} onChange={(value) => editDefaultModel(value || null)}
+            options={[{ value: "", label: "使用 CLI 自带默认" }, ...checkedRows.map((row) => ({ value: row.id, label: row.label }))]} />
         </Field>
         <p className="text-sm text-slate-500">成员未单独指定模型时，使用默认模型。</p>
       </section>

@@ -3,7 +3,8 @@ import { api } from "../api";
 import type { CliConfig, DshCatalog, DshProfile } from "../types";
 import { dshModelOptions } from "../lib/dsh";
 import { defaultModelHint, filterDshOptions } from "../lib/cliConfig";
-import { Button, inputClass } from "./ui";
+import { Button } from "./ui";
+import { Select } from "./Select";
 import { DshSettingsButton } from "./DshSettings";
 
 export function DshModelSelect({ value, onChange, config }: { value: string; onChange: (value: string) => void; config?: CliConfig }) {
@@ -27,10 +28,8 @@ export function DshModelSelect({ value, onChange, config }: { value: string; onC
   useEffect(() => { void refresh(); return () => { generation.current += 1; }; }, []);
   const options = filterDshOptions(dshModelOptions(catalog, value), config, value);
   return <div className="space-y-2">
-    <select className={inputClass} value={value} onChange={event => onChange(event.target.value)}>
-      <option value="">{config?.defaultModel ? defaultModelHint(config) : "使用 Dsh 默认模型与认证设置"}</option>
-      {options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-    </select>
+    <Select aria-label="Dsh 模型" value={value} onChange={onChange}
+      options={[{ value: "", label: config?.defaultModel ? defaultModelHint(config) : "使用 Dsh 默认模型与认证设置" }, ...options]} />
     <div className="flex flex-wrap items-center gap-2">
       <Button disabled={loading} onClick={() => void refresh()}>{loading ? "正在读取模型…" : "刷新模型"}</Button>
       <DshSettingsButton onSaved={() => void refresh()} />

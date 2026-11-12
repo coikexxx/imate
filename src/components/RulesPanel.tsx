@@ -6,6 +6,7 @@ import { isValidRuleFilename } from "../lib/wizard";
 import type { Agent, CliInfo, DraftInput, DraftMember, Project, RuleDoc } from "../types";
 import { AssistantDraftDialog } from "./AssistantDraftDialog";
 import { Button, inputClass } from "./ui";
+import { Select } from "./Select";
 
 /** 项目页的规章面板。直接读写项目文件夹里的 .imates/rules/。 */
 export function RulesPanel({ projectId, project, agents, clis, closedCliIds, refreshTick = 0 }: { projectId: string; project: Project; agents: Agent[]; clis: CliInfo[]; closedCliIds?: ReadonlySet<string>; refreshTick?: number }) {
@@ -138,22 +139,12 @@ export function RulesPanel({ projectId, project, agents, clis, closedCliIds, ref
           )}
         </ul>
         <div className="space-y-1.5 border-t border-slate-800 p-2">
-          <select
-            className={compactInput}
-            aria-label="从模板添加规章"
-            value=""
-            onChange={(e) => {
-              const template = templates.find((t) => t.filename === e.target.value);
+          <Select size="compact" aria-label="从模板添加规章" value="" placeholder="从模板添加…"
+            options={unusedTemplates.map((template) => ({ value: template.filename, label: template.filename }))}
+            onChange={(value) => {
+              const template = templates.find((t) => t.filename === value);
               if (template) create(template.filename, template.content);
-            }}
-          >
-            <option value="">从模板添加…</option>
-            {unusedTemplates.map((t) => (
-              <option key={t.filename} value={t.filename}>
-                {t.filename}
-              </option>
-            ))}
-          </select>
+            }} />
           <div className="flex gap-1.5">
             <input
               className={compactInput}

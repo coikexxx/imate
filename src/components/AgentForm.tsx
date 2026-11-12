@@ -9,6 +9,7 @@ import type { AgentInput, CliConfig, CliInfo, DraftInput, PersonaTemplate } from
 import { PersonaEditor } from "./PersonaEditor";
 import { AssistantDraftDialog } from "./AssistantDraftDialog";
 import { Button, Field, inputClass } from "./ui";
+import { Select } from "./Select";
 
 interface Props {
   /** 编辑已有成员时传入；新建时不传 */
@@ -128,26 +129,15 @@ export function AgentForm({
           </datalist>
         </Field>
         <Field label="CLI">
-          <select className={inputClass} value={cli} onChange={(e) => { setCli(e.target.value); setModel(""); }}>
-            <option value="" disabled>
-              请选择
-            </option>
-            {visibleClis.map((c) => (
-              <option key={c.id} value={c.id} disabled={!c.installed || !c.supported}>
-                {c.label}
-                {!c.supported ? "（尚未接入）" : c.installed ? (c.version ? `（${c.version}）` : "") : "（未安装）"}
-                {closed(c.id) ? "（已关闭）" : ""}
-              </option>
-            ))}
-          </select>
+          <Select aria-label="CLI" value={cli} onChange={(value) => { setCli(value); setModel(""); }}
+            options={[{ value: "", label: "请选择", disabled: true }, ...visibleClis.map((c) => ({ value: c.id, disabled: !c.installed || !c.supported,
+              label: `${c.label}${!c.supported ? "（尚未接入）" : c.installed ? (c.version ? `（${c.version}）` : "") : "（未安装）"}${closed(c.id) ? "（已关闭）" : ""}` }))]} />
         </Field>
         <Field label={cli === "dsh" ? "模型（读取 Dsh 已配置的模型）" : modelChoice.restricted ? "模型（从应用管理已启用的模型中选）" : "模型（可选，留空用 CLI 默认）"}>
           {cli === "dsh" ? <DshModelSelect value={model} onChange={setModel} config={cliConfig} /> :
             modelChoice.restricted ? (
-              <select className={inputClass} value={model} onChange={(e) => setModel(e.target.value)}>
-                <option value="">{defaultModelHint(cliConfig)}</option>
-                {modelChoice.options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
+              <Select aria-label="模型" value={model} onChange={setModel}
+                options={[{ value: "", label: defaultModelHint(cliConfig) }, ...modelChoice.options]} />
             ) : <input className={inputClass} value={model} onChange={(e) => setModel(e.target.value)} />}
         </Field>
       </div>

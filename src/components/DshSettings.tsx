@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "../api";
 import type { DshSettings as Settings } from "../types";
-import { Button, Field, inputClass, Modal } from "./ui";
+import { Button, Field, Modal } from "./ui";
+import { Select } from "./Select";
 
 export function DshSettingsButton({ onSaved }: { onSaved?: () => void }) {
   const [open, setOpen] = useState(false);
@@ -35,19 +36,15 @@ export function DshSettingsPanel({ onClose, onSaved, embedded = false }: { onClo
     <div className="space-y-4">
       <p className="text-sm text-slate-400">所有项目和内置助理共用，从下一回合生效。账号登录、密钥和模型配置由 Dsh 管理。</p>
       <Field label="默认认证方式">
-        <select className={inputClass} disabled={loading || saving} value={settings.authentication}
-          onChange={event => setSettings({ ...settings, authentication: event.target.value as Settings["authentication"] })}>
-          <option value="headless">沿用 Dsh headless 配置</option>
-          <option value="account">使用已登录的 DeepSeek 账号</option>
-        </select>
+        <Select aria-label="默认认证方式" disabled={loading || saving} value={settings.authentication}
+          onChange={authentication => setSettings({ ...settings, authentication: authentication as Settings["authentication"] })}
+          options={[{ value: "headless", label: "沿用 Dsh headless 配置" }, { value: "account", label: "使用已登录的 DeepSeek 账号" }]} />
         <p className="text-xs text-slate-500">未指定成员模型时使用此方式；指定自定义模型后，使用该供应商在 Dsh 中配置的凭据。</p>
       </Field>
       <Field label="读取模型配置的位置">
-        <select className={inputClass} disabled={loading || saving} value={settings.profile}
-          onChange={event => setSettings({ ...settings, profile: event.target.value as Settings["profile"] })}>
-          <option value="web">Dsh Web（dsh web）</option>
-          <option value="headless">Dsh headless</option>
-        </select>
+        <Select aria-label="读取模型配置的位置" disabled={loading || saving} value={settings.profile}
+          onChange={profile => setSettings({ ...settings, profile: profile as Settings["profile"] })}
+          options={[{ value: "web", label: "Dsh Web（dsh web）" }, { value: "headless", label: "Dsh headless" }]} />
         <p className="text-xs text-slate-500">成员模型列表从这里读取。使用账号认证时，也从这里读取账号服务配置。</p>
       </Field>
       {error && <p role="alert" className="text-sm text-red-300">{error}</p>}

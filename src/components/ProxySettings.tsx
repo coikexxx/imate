@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { ProxySettings, ProxyState } from "../types";
 import { Button, Field, inputClass } from "./ui";
+import { Select } from "./Select";
 
 /** 网络代理设置表单，嵌入系统设置页 */
 export function ProxySettingsPanel({ onClose, embedded = false }: { onClose: () => void; embedded?: boolean }) {
@@ -30,12 +31,9 @@ export function ProxySettingsPanel({ onClose, embedded = false }: { onClose: () 
     <div className="space-y-4">
       <p className="text-sm text-slate-400">所有项目成员和内置助理共用此设置，适用于 Claude、Codex、Grok、Dsh 等已接入的 CLI。保存后从新回合生效，正在进行的回合继续使用原来的代理。</p>
       <Field label="连接方式">
-        <select className={inputClass} disabled={loading || saving} value={settings.mode}
-          onChange={(event) => setSettings({ ...settings, mode: event.target.value as ProxySettings["mode"] })}>
-          <option value="system">跟随本机代理</option>
-          <option value="manual">手动代理</option>
-          <option value="direct">直连</option>
-        </select>
+        <Select aria-label="连接方式" disabled={loading || saving} value={settings.mode}
+          onChange={(mode) => setSettings({ ...settings, mode: mode as ProxySettings["mode"] })}
+          options={[{ value: "system", label: "跟随本机代理" }, { value: "manual", label: "手动代理" }, { value: "direct", label: "直连" }]} />
       </Field>
       {settings.mode === "system" && <div className="rounded border border-slate-700 p-3 text-xs text-slate-400">
         <p>{loading ? "正在读取本机代理…" : detected?.detectedProxy ?? "读取失败，请重试或使用手动代理"}</p>

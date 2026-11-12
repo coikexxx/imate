@@ -2,6 +2,7 @@ import { useState } from "react";
 import { uniqueRuleFilename } from "../lib/wizard";
 import type { RuleDoc } from "../types";
 import { Button, inputClass } from "./ui";
+import { Select } from "./Select";
 
 interface Props {
   rules: RuleDoc[];
@@ -48,21 +49,12 @@ export function RulesEditor({ rules, templates, onChange }: Props) {
             </li>
           ))}
         </ul>
-        <select
-          className={inputClass}
-          value=""
-          onChange={(e) => {
-            const template = templates.find((t) => t.filename === e.target.value);
+        <Select aria-label="从模板添加规章" value="" placeholder="从模板添加…"
+          options={unusedTemplates.map((template) => ({ value: template.filename, label: template.filename }))}
+          onChange={(value) => {
+            const template = templates.find((t) => t.filename === value);
             if (template) add(template);
-          }}
-        >
-          <option value="">从模板添加…</option>
-          {unusedTemplates.map((t) => (
-            <option key={t.filename} value={t.filename}>
-              {t.filename}
-            </option>
-          ))}
-        </select>
+          }} />
         <Button
           className="w-full"
           onClick={() =>
