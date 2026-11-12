@@ -1,18 +1,17 @@
 import { useState } from "react";
 import { Link } from "react-router";
 import { AppManager } from "../components/AppManager";
-import { DshSettingsPanel } from "../components/DshSettings";
 import { ProxySettingsPanel } from "../components/ProxySettings";
 
-type Section = "apps" | "proxy" | "dsh";
+type Section = "apps" | "proxy";
 
+// Dsh 的认证与配置来源设置已并入「应用管理」里 Dsh 的详情页，这里不再单列
 const sections: { key: Section; label: string }[] = [
   { key: "apps", label: "应用管理" },
   { key: "proxy", label: "网络代理" },
-  { key: "dsh", label: "Dsh 设置" },
 ];
 
-/** 系统设置整页：网络代理与 Dsh 设置都收在这里 */
+/** 系统设置整页：应用管理（含 Dsh 设置）与网络代理 */
 export default function Settings() {
   const [section, setSection] = useState<Section>("apps");
   const [savedTick, setSavedTick] = useState(0);
@@ -41,10 +40,8 @@ export default function Settings() {
           {/* 用 key 让切换分类、保存后都重新读取最新配置 */}
           {section === "apps"
             ? <AppManager />
-            : section === "proxy"
-              ? <ProxySettingsPanel key={`proxy:${savedTick}`} embedded onClose={saved} />
-              : <DshSettingsPanel key={`dsh:${savedTick}`} embedded onClose={saved} />}
-          {section !== "apps" && savedTick > 0 && <p role="status" className="mt-3 text-sm text-emerald-400">已保存，从下一回合生效。</p>}
+            : <ProxySettingsPanel key={`proxy:${savedTick}`} embedded onClose={saved} />}
+          {section !== "apps" && savedTick > 0 &&<p role="status" className="mt-3 text-sm text-emerald-400">已保存，从下一回合生效。</p>}
         </section>
       </div>
     </main>
