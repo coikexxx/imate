@@ -95,7 +95,7 @@ export function OfficeCanvas({ agents, statuses }: Props) {
     ? "像素办公室：还没有成员"
     : `像素办公室：${agents.map((agent) => `${agent.name}${STATUS_TEXT[statuses[agent.id] ?? "idle"]}`).join("，")}`;
   return (
-    <div ref={wrap} className="relative h-full min-h-0 overflow-hidden rounded border border-slate-800 bg-slate-950">
+    <div ref={wrap} className="relative h-full min-h-0 overflow-hidden rounded-xl border border-slate-800 bg-slate-950">
       <canvas ref={canvas} role="img" aria-label={summary} className="absolute inset-0 block h-full w-full" style={{ imageRendering: "pixelated" }} />
     </div>
   );

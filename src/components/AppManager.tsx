@@ -56,16 +56,16 @@ export function AppManager() {
 
   const groups = groupClis(configs);
   const section = (title: string, items: CliConfig[]) => items.length > 0 && (
-    <section className="mb-6">
-      <h3 className="mb-2 text-sm text-slate-400">{title} · {items.length}</h3>
-      <ul className="divide-y divide-slate-800 rounded-lg border border-slate-800 bg-slate-900/60">
+    <section className="mb-8">
+      <h3 className="mb-3 flex items-center gap-2 text-sm font-medium text-slate-400">{title}<span className="font-mono text-xs tabular-nums text-slate-500">{items.length}</span></h3>
+      <ul className="divide-y divide-slate-800 overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
         {items.map((config) => <Row key={config.id} config={config} busy={busyId === config.id} onOpen={() => openDetail(config.id)} onToggle={(next) => void toggle(config, next)} />)}
       </ul>
     </section>
   );
   return (
     <div>
-      <p className="mb-4 text-sm text-slate-400">开关决定该 CLI 能否被新选：关闭后不再出现在成员表单，内置助理也不会自动选用；已有成员不受影响。</p>
+      <p className="mb-6 max-w-prose text-sm leading-6 text-slate-400">启用后，可为新成员和内置助理选用该 CLI。关闭不影响已有成员。</p>
       {error && <p role="alert" className="mb-3 text-sm text-red-300">{error}</p>}
       {section("已安装", groups.installed)}
       {section("未安装", groups.missing)}
@@ -77,16 +77,16 @@ export function AppManager() {
 function Row({ config, busy, onOpen, onToggle }: { config: CliConfig; busy: boolean; onOpen: () => void; onToggle: (next: boolean) => void }) {
   const state = toggleState(config);
   return (
-    <li className={`flex items-center gap-3 px-4 py-3 ${config.supported ? "" : "opacity-60"}`}>
+    <li className={`flex items-center gap-3 px-4 ${config.supported ? "min-h-18 py-4 hover:bg-slate-800/40" : "min-h-12 py-2"}`}>
       <button type="button" disabled={!config.supported} onClick={onOpen}
-        className="flex min-w-0 flex-1 items-center gap-3 text-left disabled:cursor-not-allowed">
-        <CliIcon id={config.id} label={config.label} />
+        className="flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left disabled:cursor-not-allowed">
+        <CliIcon id={config.id} label={config.label} className={config.supported ? "" : "!h-8 !w-8 [&_img]:size-5"} />
         <span className="min-w-0">
-          <span className="block truncate font-medium">{config.label}</span>
-          <span className="block truncate text-xs text-slate-500" title={config.path ?? undefined}>{!config.supported ? "暂未支持" : (config.path ?? state.hint ?? "未检测到")}</span>
+          <span className={`block truncate font-medium ${config.supported ? "text-slate-100" : "text-slate-400"}`}>{config.label}</span>
+          {config.supported && <span className="mt-1 block truncate text-xs text-slate-500" title={config.path ?? undefined}>{config.path ?? state.hint ?? "未检测到"}</span>}
         </span>
       </button>
-      <span className="w-32 shrink-0 text-right font-mono text-xs text-slate-400">{config.supported ? (config.version ?? (config.installed ? "" : "未安装")) : ""}</span>
+      <span className="hidden w-24 shrink-0 text-right font-mono text-xs tabular-nums text-slate-500 sm:block">{config.supported ? (config.version ?? (config.installed ? "" : "未安装")) : "暂未支持"}</span>
       {config.supported
         ? <Switch checked={state.checked} disabled={state.disabled || busy} label={`${config.label} 开关`} onChange={onToggle} />
         : <span aria-hidden className="h-6 w-11 shrink-0" />}

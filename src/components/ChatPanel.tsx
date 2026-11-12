@@ -4,6 +4,7 @@ import { useStore } from "zustand";
 import { api } from "../api";
 import { mentionCandidates, parseMention, shouldSendOnEnter } from "../lib/mentions";
 import { modelNote } from "../lib/modelNote";
+import { shirtColor } from "../office/layout";
 import { attachProjectEvents, projectStore } from "../stores/project";
 import type { Agent, Instruction, ProjectStatus, TaskItem } from "../types";
 import { InstructionBar } from "./InstructionBar";
@@ -143,26 +144,28 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
     } catch (error) { state.setError(String(error)); }
   }
   const sender = (id: string | null, type: string) => type === "user" ? "你" : type === "system" ? "系统" : agents.find((a) => a.id === id)?.name ?? "成员";
-  return <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded border border-slate-800 bg-slate-950" aria-label="项目群聊">
-    <header className="flex items-center justify-between border-b border-slate-800 px-3 py-2 text-sm">
-      <span>项目群聊</span><span className="text-xs text-slate-500">普通消息交给组长 · @ 点名单个成员</span>
+  return <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-950" aria-label="项目群聊">
+    <header className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-4 py-3 text-sm">
+      <span className="font-medium">项目群聊</span><span className="text-xs text-slate-500">消息交给组长 · @ 点名成员</span>
     </header>
-    <div className="min-h-0 flex-1 overflow-y-auto p-3" aria-live="polite">
+    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-2" aria-live="polite">
       {hasMore && <Button disabled={loadingHistory} onClick={older}>{loadingHistory ? "加载中…" : "加载更早消息"}</Button>}
       {!visibleMessages.length && !busy && <p className="py-6 text-center text-sm text-slate-500">下发第一条任务，或从成员列表点名。</p>}
       {visibleMessages.map((message) => {
         const stream = visibleStreams.find((s) => s.messageId === message.id);
         const content = stream && !stream.final ? stream.text : message.content;
         const note = message.senderType === "user" || message.senderType === "system" ? null : modelNote(message.modelInfo);
-        return <article key={message.id} className={`mb-3 rounded px-3 py-2 ${message.senderType === "user" ? "bg-sky-950/50" : message.senderType === "system" ? "bg-amber-950/30" : "bg-slate-900"}`}>
-          <p className="mb-1 text-xs text-slate-400">{sender(message.senderAgentId, message.senderType)}
+        return <article key={message.id} className={`border-b border-slate-800/60 px-1 py-4 ${message.senderType === "user" ? "my-2 rounded-lg border-b-0 bg-slate-900 px-3" : message.senderType === "system" ? "text-slate-400" : ""}`}>
+          <p className="mb-2 flex flex-wrap items-baseline gap-y-1 text-xs text-slate-400">
+            {message.senderAgentId && <span aria-hidden className="mr-2 inline-block h-2 w-1 shrink-0 rounded-sm" style={{ backgroundColor: shirtColor(message.senderAgentId) }} />}
+            <span className="font-medium text-slate-300">{sender(message.senderAgentId, message.senderType)}</span>
             {note && <span className="ml-2 max-w-full break-words text-xs text-slate-500" title={`使用模型：${note}`}>{note}</span>}</p>
           <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">{content || (stream?.finished ? "（本回合没有正文）" : "等待成员回复…")}</div>
         </article>;
       })}
-      {visibleStreams.filter((stream) => stream.messageId === null && !stream.final && Boolean(stream.text)).map((stream) => <article key={stream.runId} className="mb-3 rounded bg-slate-900 px-3 py-2">
-        <p className="mb-1 text-xs text-slate-400">{sender(stream.agentId, "assistant")}</p>
-        <div className="whitespace-pre-wrap break-words text-sm">{stream.text}</div>
+      {visibleStreams.filter((stream) => stream.messageId === null && !stream.final && Boolean(stream.text)).map((stream) => <article key={stream.runId} className="border-b border-slate-800/60 px-1 py-4">
+        <p className="mb-2 flex items-center gap-2 text-xs font-medium text-slate-300"><span aria-hidden className="h-2 w-1 rounded-sm" style={{ backgroundColor: shirtColor(stream.agentId) }} />{sender(stream.agentId, "assistant")}</p>
+        <div className="whitespace-pre-wrap break-words text-sm leading-relaxed">{stream.text}</div>
       </article>)}
       <div ref={tail} />
     </div>
@@ -174,17 +177,18 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
     {projectMatches && <InstructionBar projectStatus={projectStatus} instruction={instruction} tasks={tasks} agents={agents}
       supplement={supplement} busy={acting || busy} onSupplementChange={setSupplement}
       onRetry={() => void resume("retry")} onSupplement={() => void resume("supplement", supplement)} onAbandon={() => void resume("abandon")} />}
-    <div className="border-t border-slate-800 p-3">
+    <div className="border-t border-slate-800 p-4">
       {candidates.length > 0 && <div className="mb-2 flex flex-wrap gap-1">{candidates.map((agent) => <Button key={agent.id} onClick={() => { setInput(`@${agent.name} `); textarea.current?.focus(); }}>@{agent.name}</Button>)}</div>}
-      <textarea ref={textarea} className={`${inputClass} resize-none`} rows={3} aria-label="消息内容" placeholder="给组长下发任务，或 @成员 发言；Shift+Enter 换行" value={input}
+      <textarea ref={textarea} className={`${inputClass} resize-none`} rows={3} aria-label="消息内容" placeholder="给组长下发任务，或 @成员" value={input}
         disabled={!folderExists} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => {
           if (shouldSendOnEnter({ key: event.key, shiftKey: event.shiftKey, isComposing: event.nativeEvent.isComposing, keyCode: event.nativeEvent.keyCode })) { event.preventDefault(); void send(); }
         }} />
-      <div className="mt-2 flex items-center justify-between gap-3">
-        <p className="text-xs text-slate-500">执行模式自动运行工具，可能写出项目目录。CLI 配置会被继承。</p>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs text-slate-500">Enter 发送 · Shift+Enter 换行</p>
         <div className="flex shrink-0 gap-2"><Button variant="danger" disabled={!projectMatches || !state.activeRunId || stopping} onClick={stop}>{stopping ? "正在停止…" : "停止"}</Button>
           <Button variant="primary" disabled={!ready || busy || !input.trim() || !folderExists || state.cleanupRequired.length > 0} onClick={send}>发送</Button></div>
       </div>
+      <p className="mt-3 text-xs leading-5 text-slate-500">执行自动运行工具，可能写出项目目录；沿用 CLI 配置。</p>
     </div>
   </section>;
 }

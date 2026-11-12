@@ -35,26 +35,29 @@ export default function Home() {
   const agentTotal = (projects ?? []).reduce((sum, p) => sum + p.agentCount, 0);
 
   return (
-    <main className="mx-auto max-w-6xl p-8">
-      <header className="mb-6 flex items-baseline justify-between">
-        <h1 className="text-2xl font-bold">imates</h1>
+    <main className="mx-auto min-h-full max-w-6xl px-6 py-8 lg:px-8">
+      <header className="mb-8 flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-6">
+        <div>
+          <h1 className="text-2xl font-medium">imates</h1>
+          <p className="mt-2 text-sm text-slate-400">项目与团队</p>
+        </div>
         <div className="flex items-center gap-4">
           <p className="text-sm text-slate-400">
             {projects ? `${projects.length} 个项目 · ${agentTotal} 个 Agent` : "加载中…"}
           </p>
-          <Link to="/settings" className="shrink-0 rounded border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800">系统设置</Link>
+          <Link to="/settings" className="inline-flex min-h-9 shrink-0 items-center rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm hover:bg-slate-800">系统设置</Link>
         </div>
       </header>
 
       {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
 
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-4">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,280px),1fr))] gap-4">
         {(projects ?? []).map((project) => (
           <ProjectCard key={project.id} project={project} onDelete={() => remove(project)} />
         ))}
         <Link
           to="/new"
-          className="flex min-h-36 items-center justify-center rounded-lg border border-dashed border-slate-600 text-slate-400 hover:border-sky-500 hover:text-sky-400"
+          className="flex min-h-44 items-center justify-center gap-2 rounded-xl border border-dashed border-slate-700 text-sm text-slate-400 hover:border-slate-500 hover:bg-slate-900 hover:text-slate-100"
         >
           ＋ 新建项目
         </Link>

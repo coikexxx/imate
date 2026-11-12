@@ -112,8 +112,8 @@ export function RulesPanel({ projectId, project, agents, clis, closedCliIds, ref
     });
   }
 
-  const compactInput = `${inputClass} !px-2 !py-1 !text-xs`;
-  const compactButton = "shrink-0 !px-2 !py-1 !text-xs";
+  const compactInput = `${inputClass} !min-h-8 !px-2 !py-1 !text-xs`;
+  const compactButton = "!min-h-8 shrink-0 !px-2 !py-1 !text-xs";
   return (
     <div className="grid h-full min-h-0 grid-cols-[minmax(170px,26%)_minmax(0,1fr)]">
       {/* 左：规章列表与新增 */}
@@ -125,8 +125,8 @@ export function RulesPanel({ projectId, project, agents, clis, closedCliIds, ref
                 type="button"
                 onClick={() => choose(rule)}
                 title={rule.filename}
-                className={`w-full truncate rounded px-2 py-1 text-left text-sm ${
-                  rule.filename === selected ? "bg-sky-900/60 text-sky-100" : "text-slate-300 hover:bg-slate-800"
+                className={`min-h-8 w-full truncate rounded-lg px-2 py-1 text-left text-sm ${
+                  rule.filename === selected ? "bg-slate-800 text-slate-100" : "text-slate-300 hover:bg-slate-900"
                 }`}
               >
                 {rule.filename}

@@ -136,12 +136,12 @@ export default function Project() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center gap-4 border-b border-slate-800 px-4 py-3">
+      <header className="flex min-h-14 items-center gap-4 border-b border-slate-800 px-4 py-3">
         <Link to="/" className="text-sm text-slate-400 hover:text-slate-100">
           ← 返回
         </Link>
         <h1 className="text-base font-semibold">{project.name}</h1>
-        <span className="rounded bg-slate-800 px-2 py-0.5 text-xs">
+        <span className="flex items-center gap-2 rounded-md bg-slate-900 px-2 py-1 text-xs text-slate-400">
           {activeRunId ? "执行中" : STATUS_LABELS[project.status]}
         </span>
         <span className="flex-1 truncate text-xs text-slate-500" title={project.folderPath}>
@@ -170,7 +170,7 @@ export default function Project() {
         {/* 中栏：办公室占 65%，下方是文件与规章 */}
         <section className="grid min-h-0 grid-rows-[minmax(0,65fr)_minmax(0,35fr)] gap-3 p-3">
           <OfficeCanvas agents={agents} statuses={agentStatuses} />
-          <div className="flex min-h-0 flex-col overflow-hidden rounded border border-slate-800 bg-slate-950">
+          <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-950">
             <div className="flex items-center gap-1 border-b border-slate-800 px-2 py-1.5 text-sm" role="tablist">
               {(["files", "rules"] as const).map((key) => (
                 <button
@@ -179,13 +179,13 @@ export default function Project() {
                   role="tab"
                   aria-selected={tab === key}
                   onClick={() => setTab(key)}
-                  className={`rounded px-3 py-1 ${
-                    tab === key ? "bg-sky-900/60 text-sky-100" : "text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+                  className={`min-h-8 rounded-lg px-3 py-1 ${
+                    tab === key ? "bg-slate-800 text-slate-100" : "text-slate-400 hover:bg-slate-900 hover:text-slate-200"
                   }`}
                 >
                   {key === "files" ? "文件" : "规章"}
                   {key === "files" && changedFiles.length > 0 && (
-                    <span className="ml-1.5 rounded-full bg-amber-500/20 px-1.5 text-xs text-amber-300">{changedFiles.length}</span>
+                    <span className="ml-2 font-mono text-xs tabular-nums text-amber-200">{changedFiles.length}</span>
                   )}
                 </button>
               ))}

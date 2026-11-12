@@ -120,25 +120,28 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <button type="button" className="text-sm text-slate-400 hover:text-slate-100" onClick={() => void back()}>← 应用管理</button>
-        <CliIcon id={config.id} label={config.label} />
-        <h3 className="text-lg font-semibold">{config.label}</h3>
-        <span className="flex-1" />
-        <Switch checked={enabled && config.installed} disabled={!config.installed} label={`${config.label} 开关`} onChange={editEnabled} />
+    <div className="space-y-8">
+      <div className="space-y-4">
+        <button type="button" className="rounded text-sm text-slate-400 hover:text-slate-100" onClick={() => void back()}>← 应用管理</button>
+        <div className="flex items-center gap-3">
+          <CliIcon id={config.id} label={config.label} />
+          <h3 className="text-lg font-medium">{config.label}</h3>
+          <span className="flex-1" />
+          <span className="text-sm text-slate-400">{enabled && config.installed ? "已启用" : "未启用"}</span>
+          <Switch checked={enabled && config.installed} disabled={!config.installed} label={`${config.label} 开关`} onChange={editEnabled} />
+        </div>
       </div>
 
-      <section className="space-y-3">
-        <h4 className="text-sm font-medium">接入</h4>
-        <div className="rounded border border-slate-800 p-3 text-xs text-slate-400">
+      <section className="space-y-4">
+        <h4 className="text-base font-medium">接入</h4>
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-sm text-slate-400">
           <p>{config.installed ? `已检测到${config.version ? `，版本 ${config.version}` : ""}` : "未检测到。请先安装，或在下面手动指定可执行文件的完整路径。"}</p>
           {config.path && <p className="mt-1 break-all font-mono text-slate-500">{config.path}</p>}
         </div>
-        <Field label="手动指定路径（可选，留空自动检测）">
+        <Field label="手动指定路径">
           <input className={inputClass} value={customPath} placeholder="可执行文件的绝对路径" onChange={(event) => editCustomPath(event.target.value)} />
         </Field>
-        <p className="text-xs text-slate-500">路径保存后生效；保存后会按新路径重新检测</p>
+        <p className="text-sm leading-5 text-slate-500">留空自动检测。保存后按新路径重新检测。</p>
         <div className="flex gap-2">
           <Button disabled={saving || refreshing} onClick={() => void redetect()}>{refreshing ? "正在检测…" : "重新检测"}</Button>
         </div>
@@ -150,18 +153,19 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
         )}
       </section>
 
-      <section className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h4 className="text-sm font-medium">模型（勾选后，成员只能从这些里选；不勾选任何一个表示不限制）</h4>
-          <div className="flex items-center gap-2">
+      <section className="space-y-4 border-t border-slate-800 pt-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h4 className="text-base font-medium">可用模型</h4>
+          <div className="flex flex-wrap items-center gap-2">
             {supportsProviderQuery(config.id) && (
               <Button disabled={loading} title={providerHint(providerHost)} onClick={() => void loadCandidates(true)}>从供应商读取</Button>
             )}
             <Button disabled={loading} onClick={() => void loadCandidates()}>{loading ? "正在读取…" : "刷新"}</Button>
           </div>
         </div>
+        <p className="text-sm leading-6 text-slate-400">勾选后，新选模型限于这些选项；全部不选表示不限制。</p>
         {supportsProviderQuery(config.id) && (
-          <p className="text-xs text-slate-500">「刷新」只读本地目录；{providerHint(providerHost)}。密钥只在本机后端使用，不会显示或保存。</p>
+          <p className="text-sm leading-6 text-slate-500">「刷新」只读本地目录；{providerHint(providerHost)}。密钥只在本机后端使用，不会显示或保存。</p>
         )}
         {candidateError && <p role="alert" className="text-xs text-amber-300">{candidateError}</p>}
         {!loading && !candidateError && rows.length === 0 && (
@@ -169,13 +173,16 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
             {config.modelsSource === "builtin" ? "该 CLI 没有可读取的模型列表，请在下面手填模型 ID。" : "暂无可用模型。"}
           </p>
         )}
-        <ul className="divide-y divide-slate-800 rounded border border-slate-800">
+        <ul className="divide-y divide-slate-800 overflow-hidden rounded-xl border border-slate-800">
           {rows.map((row) => (
-            <li key={row.id} className="flex items-center gap-3 px-3 py-2 text-sm">
-              <input type="checkbox" aria-label={`启用 ${row.label}`} checked={row.checked}
-                onChange={(event) => toggleRow(row.id, event.target.checked)} />
-              <span className="min-w-0 flex-1 truncate" title={row.id}>{row.label}</span>
-              {row.custom && <span className="shrink-0 rounded bg-slate-800 px-1.5 text-xs text-slate-400">手填</span>}
+            <li key={row.id} className={row.checked ? "bg-slate-900" : ""}>
+              <label className="flex min-h-11 cursor-pointer items-center gap-3 px-4 py-3 text-sm hover:bg-slate-800/50">
+                <input type="checkbox" className="size-4 shrink-0" aria-label={`启用 ${row.label}`} checked={row.checked}
+                  onChange={(event) => toggleRow(row.id, event.target.checked)} />
+                <span className="min-w-0 flex-1 break-words" title={row.id}>{row.label}</span>
+                {row.id === effectiveDefault && <span className="shrink-0 text-xs text-sky-200">默认</span>}
+                {row.custom && <span className="shrink-0 text-xs text-slate-500">手填</span>}
+              </label>
             </li>
           ))}
         </ul>
@@ -185,17 +192,17 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
             onKeyDown={(event) => { if (event.key === "Enter") addCustom(); }} />
           <Button className="shrink-0" disabled={custom.trim() === ""} onClick={addCustom}>添加</Button>
         </div>
-        <Field label="默认模型（成员没有单独指定模型时使用）">
+        <Field label="默认模型">
           <select className={inputClass} value={effectiveDefault ?? ""} onChange={(event) => editDefaultModel(event.target.value || null)}>
             <option value="">使用 CLI 自带默认</option>
             {checkedRows.map((row) => <option key={row.id} value={row.id}>{row.label}</option>)}
           </select>
         </Field>
+        <p className="text-sm text-slate-500">成员未单独指定模型时，使用默认模型。</p>
       </section>
-
       {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
-      {saved && <p role="status" className="text-sm text-emerald-400">已保存，从下一回合生效。</p>}
-      <div className="flex items-center justify-end gap-2">
+      {saved && <p role="status" className="text-sm text-emerald-400">已保存，从下一回合生效</p>}
+      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-800 pt-4">
         {dirty && <span role="status" className="mr-1 text-xs text-amber-300">有未保存的修改</span>}
         <Button onClick={() => void back()}>返回</Button>
         <Button variant="primary" disabled={saving} onClick={() => void save()}>{saving ? "正在保存…" : "保存"}</Button>

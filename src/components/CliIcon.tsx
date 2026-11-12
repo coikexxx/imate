@@ -11,7 +11,7 @@ interface Props {
 export function CliIcon({ id, label, className = "" }: Props) {
   const icon = cliIconInfo(id);
   const tile = icon?.lightTile ? "bg-white" : "bg-slate-800";
-  const box = `grid h-9 w-9 shrink-0 place-items-center rounded ${tile} ${className}`;
+  const box = `grid h-9 w-9 shrink-0 place-items-center rounded-lg ${tile} ${className}`;
   if (icon) {
     return (
       <span className={box}>

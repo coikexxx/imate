@@ -1,14 +1,80 @@
 @import "tailwindcss";
 
+/* 沿用 slate / sky 色系，降低界面底色饱和度，保证辅助文字可读。 */
+@theme {
+  --color-slate-50: #f5f7fa;
+  --color-slate-100: #edf0f5;
+  --color-slate-200: #edf0f5;
+  --color-slate-300: #b1bac8;
+  --color-slate-400: #b1bac8;
+  --color-slate-500: #929eaf;
+  --color-slate-600: #929eaf;
+  --color-slate-700: #3e4858;
+  --color-slate-800: #2b3442;
+  --color-slate-900: #1b222d;
+  --color-slate-950: #12171f;
+  --color-sky-500: #0c739f;
+  --color-sky-600: #08688f;
+  --color-sky-700: #075b7d;
+  --ease-interface: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 html,
 body,
 #root {
   height: 100%;
 }
 
+html {
+  color-scheme: dark;
+}
+
 body {
   margin: 0;
-  background: #020617;
-  color: #f1f5f9;
+  background: var(--color-slate-950);
+  color: var(--color-slate-100);
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+button:not(:disabled),
+a,
+select:not(:disabled),
+input[type="checkbox"]:not(:disabled) {
+  cursor: pointer;
+}
+
+:where(button, a, input, select, textarea):focus-visible {
+  outline: 2px solid #7dd3fc;
+  outline-offset: 3px;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--color-sky-600);
+}
+
+:where(a, button, input, select, textarea) {
+  transition-property: color, background-color, border-color;
+  transition-duration: 140ms;
+  transition-timing-function: var(--ease-interface);
+}
+
+/* 共享输入样式不限制正文编辑器的高度。 */
+.ui-input:not(textarea) {
+  min-height: 36px;
+}
+
+.ui-input::placeholder {
+  color: var(--color-slate-500);
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0ms !important;
+  }
 }
