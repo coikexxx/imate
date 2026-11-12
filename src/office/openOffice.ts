@@ -7,7 +7,7 @@ export const ROOM_WIDTH = room.cols * room.cellSize;
 export const ROOM_HEIGHT = room.rows * room.cellSize;
 export const CHARACTER_SCALE = 2;
 export const STATUS_TEXT: Record<AgentStatus, string> = {
-  idle: "空闲", thinking: "思考中", talking: "发言中", working: "执行中", error: "出错",
+  idle: "空闲", thinking: "思考中", talking: "发言中", working: "工作中", error: "出错",
 };
 
 export interface Cell { col: number; row: number }
