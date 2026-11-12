@@ -142,7 +142,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
     } catch (error) { state.setError(String(error)); }
   }
   const sender = (id: string | null, type: string) => type === "user" ? "你" : type === "system" ? "系统" : agents.find((a) => a.id === id)?.name ?? "成员";
-  return <section className="flex min-h-0 flex-col overflow-hidden rounded border border-slate-800 bg-slate-950" aria-label="项目群聊">
+  return <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded border border-slate-800 bg-slate-950" aria-label="项目群聊">
     <header className="flex items-center justify-between border-b border-slate-800 px-3 py-2 text-sm">
       <span>项目群聊</span><span className="text-xs text-slate-500">普通消息交给组长 · @ 点名单个成员</span>
     </header>

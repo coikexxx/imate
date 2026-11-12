@@ -112,88 +112,102 @@ export function RulesPanel({ projectId, project, agents, clis, refreshTick = 0 }
     });
   }
 
+  const compactInput = `${inputClass} !px-2 !py-1 !text-xs`;
+  const compactButton = "shrink-0 !px-2 !py-1 !text-xs";
   return (
-    <div className="flex h-full flex-col gap-3 p-3">
-      <ul className="space-y-1">
-        {rules.map((rule) => (
-          <li key={rule.filename}>
-            <button
-              type="button"
-              onClick={() => choose(rule)}
-              className={`w-full truncate rounded px-2 py-1.5 text-left text-sm ${
-                rule.filename === selected ? "bg-sky-900/60 text-sky-100" : "hover:bg-slate-800"
-              }`}
+    <div className="grid h-full min-h-0 grid-cols-[minmax(170px,26%)_minmax(0,1fr)]">
+      {/* 左：规章列表与新增 */}
+      <div className="flex min-h-0 flex-col border-r border-slate-800">
+        <ul className="min-h-0 flex-1 space-y-0.5 overflow-y-auto p-2">
+          {rules.map((rule) => (
+            <li key={rule.filename}>
+              <button
+                type="button"
+                onClick={() => choose(rule)}
+                title={rule.filename}
+                className={`w-full truncate rounded px-2 py-1 text-left text-sm ${
+                  rule.filename === selected ? "bg-sky-900/60 text-sky-100" : "text-slate-300 hover:bg-slate-800"
+                }`}
+              >
+                {rule.filename}
+              </button>
+            </li>
+          ))}
+          {rules.length === 0 && (
+            <li className="px-1 py-2 text-xs text-amber-300">本项目暂无规章，请补充至少一份。</li>
+          )}
+        </ul>
+        <div className="space-y-1.5 border-t border-slate-800 p-2">
+          <select
+            className={compactInput}
+            aria-label="从模板添加规章"
+            value=""
+            onChange={(e) => {
+              const template = templates.find((t) => t.filename === e.target.value);
+              if (template) create(template.filename, template.content);
+            }}
+          >
+            <option value="">从模板添加…</option>
+            {unusedTemplates.map((t) => (
+              <option key={t.filename} value={t.filename}>
+                {t.filename}
+              </option>
+            ))}
+          </select>
+          <div className="flex gap-1.5">
+            <input
+              className={compactInput}
+              aria-label="新规章文件名"
+              placeholder="新文件名.md"
+              title="新规章文件名，如 测试规范.md"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+            />
+            <Button
+              className={compactButton}
+              disabled={newName.trim() === ""}
+              onClick={() => create(newName.trim(), `# ${newName.trim().replace(/\.md$/, "")}\n\n`)}
             >
-              {rule.filename}
-            </button>
-          </li>
-        ))}
-      </ul>
-
-      {rules.length === 0 && (
-        <p className="text-sm text-amber-300">本项目暂无规章，请补充至少一份。</p>
-      )}
-
-      {selected !== null && (
-        <>
-          <Button disabled={!assistantReady || !saved} title={!assistantReady ? "没有已安装且已接入的 CLI" : "只重写当前选中规章"}
-            onClick={() => setDraftOpen(true)}>AI 重写当前规章</Button>
-          <textarea
-            className={`${inputClass} min-h-40 flex-1 font-mono`}
-            aria-label="规章正文"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-          />
-          <div className="flex justify-end gap-2">
-            <Button variant="danger" onClick={remove}>
-              删除
-            </Button>
-            <Button variant="primary" disabled={!dirty} onClick={() => { save(); setAssistantDraftPending(false); }}>
-              {assistantDraftPending ? "确认并保存草稿" : "保存"}
+              新增
             </Button>
           </div>
-        </>
-      )}
-
-      {error && <p className="text-sm text-red-400">{error}</p>}
-      {stale && (
-        <div className="flex items-center justify-between gap-2 rounded border border-amber-900 bg-amber-950/40 px-2 py-1 text-xs text-amber-200">
-          <span>规章文件已在别处变化，当前编辑内容尚未保存。</span>
-          <Button onClick={() => { setStale(false); reload(selected).catch((e) => setError(String(e))); }}>放弃编辑并重新载入</Button>
         </div>
-      )}
+      </div>
 
-      <div className="space-y-2 border-t border-slate-800 pt-3">
-        <select
-          className={inputClass}
-          value=""
-          onChange={(e) => {
-            const template = templates.find((t) => t.filename === e.target.value);
-            if (template) create(template.filename, template.content);
-          }}
-        >
-          <option value="">从模板添加…</option>
-          {unusedTemplates.map((t) => (
-            <option key={t.filename} value={t.filename}>
-              {t.filename}
-            </option>
-          ))}
-        </select>
-        <div className="flex gap-2">
-          <input
-            className={inputClass}
-            aria-label="新规章文件名"
-            placeholder="新规章文件名，如 测试规范.md"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-          />
-          <Button
-            disabled={newName.trim() === ""}
-            onClick={() => create(newName.trim(), `# ${newName.trim().replace(/\.md$/, "")}\n\n`)}
-          >
-            新增
-          </Button>
-        </div>
+      {/* 右：工具栏与正文编辑 */}
+      <div className="flex min-h-0 flex-col gap-2 p-2">
+        {selected !== null ? (
+          <>
+            <div className="flex items-center gap-2">
+              <span className="truncate text-sm text-slate-200" title={selected}>{selected}</span>
+              {dirty && <span className="shrink-0 rounded bg-amber-500/20 px-1.5 text-xs text-amber-300">未保存</span>}
+              <span className="flex-1" />
+              <Button className={compactButton} disabled={!assistantReady || !saved} title={!assistantReady ? "没有已安装且已接入的 CLI" : "只重写当前选中规章"}
+                onClick={() => setDraftOpen(true)}>AI 重写</Button>
+              <Button className={compactButton} variant="danger" onClick={remove}>
+                删除
+              </Button>
+              <Button className={compactButton} variant="primary" disabled={!dirty} onClick={() => { save(); setAssistantDraftPending(false); }}>
+                {assistantDraftPending ? "确认并保存草稿" : "保存"}
+              </Button>
+            </div>
+            <textarea
+              className={`${inputClass} min-h-0 flex-1 resize-none font-mono leading-relaxed`}
+              aria-label="规章正文"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+            />
+          </>
+        ) : (
+          <p className="m-auto text-sm text-slate-500">从左侧选择一份规章，或新增一份。</p>
+        )}
+        {error && <p className="text-xs text-red-400">{error}</p>}
+        {stale && (
+          <div className="flex items-center justify-between gap-2 rounded border border-amber-900 bg-amber-950/40 px-2 py-1 text-xs text-amber-200">
+            <span>规章文件已在别处变化，当前编辑内容尚未保存。</span>
+            <Button className={compactButton} onClick={() => { setStale(false); reload(selected).catch((e) => setError(String(e))); }}>放弃编辑并重新载入</Button>
+          </div>
+        )}
       </div>
       {draftOpen && saved && selected && <AssistantDraftDialog kind="rules" context={context({ memberName: null, role: null, targetFilename: saved.filename })}
         initialDraft={[{ filename: saved.filename, content: draft }]} acceptLabel="确认并应用到编辑器"
