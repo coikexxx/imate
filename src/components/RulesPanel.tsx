@@ -8,7 +8,7 @@ import { AssistantDraftDialog } from "./AssistantDraftDialog";
 import { Button, inputClass } from "./ui";
 
 /** 项目页的规章面板。直接读写项目文件夹里的 .imates/rules/。 */
-export function RulesPanel({ projectId, project, agents, clis, refreshTick = 0 }: { projectId: string; project: Project; agents: Agent[]; clis: CliInfo[]; refreshTick?: number }) {
+export function RulesPanel({ projectId, project, agents, clis, closedCliIds, refreshTick = 0 }: { projectId: string; project: Project; agents: Agent[]; clis: CliInfo[]; closedCliIds?: ReadonlySet<string>; refreshTick?: number }) {
   const [rules, setRules] = useState<RuleDoc[]>([]);
   const [templates, setTemplates] = useState<RuleDoc[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -44,7 +44,7 @@ export function RulesPanel({ projectId, project, agents, clis, refreshTick = 0 }
     if (dirty) { setStale(true); return; }
     reload(selected).catch((e) => setError(String(e)));
   }, [refreshTick]);
-  const assistantReady = assistantAvailable(clis);
+  const assistantReady = assistantAvailable(clis, closedCliIds);
   const context = (extra: Pick<DraftInput, "memberName" | "role" | "targetFilename">): Omit<DraftInput, "draftId" | "currentText" | "feedback"> => ({
     ...extra, folderPath: project.folderPath, projectName: project.name, description: project.description,
     rules: rules.map((rule) => rule.filename === selected ? { ...rule, content: draft } : rule),

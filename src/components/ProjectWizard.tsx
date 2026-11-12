@@ -1,4 +1,5 @@
 import { assistantAvailable } from "../lib/clis";
+import { closedCliIds } from "../lib/cliConfig";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router";
@@ -28,7 +29,8 @@ export default function ProjectWizard() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [rulesDraftOpen, setRulesDraftOpen] = useState(false);
-  const assistantReady = assistantAvailable(clis);
+  const [closedClis, setClosedClis] = useState<ReadonlySet<string>>(new Set());
+  const assistantReady = assistantAvailable(clis, closedClis);
   const assistantReason = assistantReady ? undefined : "没有已安装且已接入的 CLI";
   const draftContext = (extra: Pick<DraftInput, "memberName" | "role" | "targetFilename">): Omit<DraftInput, "draftId" | "currentText" | "feedback"> => ({
     ...extra, folderPath, projectName: name.trim(), description: description.trim(), rules,
@@ -45,6 +47,8 @@ export default function ProjectWizard() {
     });
     api.listPersonaTemplates().then(setPersonaTemplates);
     api.listClis().then(setClis);
+    // 应用管理里关闭的 CLI 不能当助理；读不到时当作没有关闭的
+    api.listCliConfigs().then((configs) => setClosedClis(closedCliIds(configs))).catch(() => setClosedClis(new Set()));
   }, []);
 
   async function pickFolder() {

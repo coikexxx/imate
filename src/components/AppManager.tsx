@@ -4,6 +4,7 @@ import { groupClis, toggleState, toInput } from "../lib/cliConfig";
 import type { CliConfig } from "../types";
 import { CliDetail } from "./CliDetail";
 import { Switch } from "./Switch";
+import { Button } from "./ui";
 
 /** 系统设置 → 应用管理：列出预设 CLI，每个有开关，点进去是详情 */
 export function AppManager() {
@@ -29,18 +30,26 @@ export function AppManager() {
     finally { setBusyId(null); }
   }
 
+  function openDetail(id: string) { setError(null); setOpenId(id); }
+  function closeDetail() { setError(null); setOpenId(null); }
+
   const opened = configs?.find((c) => c.id === openId);
   if (opened) {
     return (
       <>
         {error && <p role="alert" className="mb-3 text-sm text-red-300">{error}</p>}
-        <CliDetail config={opened} onBack={() => setOpenId(null)} onSaved={replace} onRefresh={load} />
+        <CliDetail config={opened} onBack={closeDetail} onSaved={replace} onRefresh={load} />
       </>
     );
   }
   if (!configs) {
     return error
-      ? <p role="alert" className="text-sm text-red-300">{error}</p>
+      ? (
+        <div className="flex items-center gap-3">
+          <p role="alert" className="text-sm text-red-300">{error}</p>
+          <Button onClick={() => void load()}>重试</Button>
+        </div>
+      )
       : <p className="text-sm text-slate-400">正在检测本机已安装的 CLI…</p>;
   }
 
@@ -49,7 +58,7 @@ export function AppManager() {
     <section className="mb-6">
       <h3 className="mb-2 text-sm text-slate-400">{title} · {items.length}</h3>
       <ul className="divide-y divide-slate-800 rounded-lg border border-slate-800 bg-slate-900/60">
-        {items.map((config) => <Row key={config.id} config={config} busy={busyId === config.id} onOpen={() => setOpenId(config.id)} onToggle={(next) => void toggle(config, next)} />)}
+        {items.map((config) => <Row key={config.id} config={config} busy={busyId === config.id} onOpen={() => openDetail(config.id)} onToggle={(next) => void toggle(config, next)} />)}
       </ul>
     </section>
   );

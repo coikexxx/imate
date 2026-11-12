@@ -121,6 +121,12 @@ pub fn ensure_selectable(conn: &Connection, id: &str) -> AppResult<()> {
     Err(invalid(format!("{} 已在应用管理中关闭，请先在系统设置里启用", label_of(id))))
 }
 
+/// 编辑成员时：CLI 没变就不检查（已关闭的 CLI 上的老成员仍可改名字、人设）；换了 CLI 才要求新 CLI 已启用。
+pub fn ensure_cli_change_allowed(conn: &Connection, old_cli: &str, new_cli: &str) -> AppResult<()> {
+    if old_cli == new_cli { return Ok(()); }
+    ensure_selectable(conn, new_cli)
+}
+
 /// 所有已关闭的已知 CLI（含没有适配器、默认关闭的 Pi）。
 pub fn disabled_ids(conn: &Connection) -> AppResult<HashSet<String>> {
     let mut disabled = HashSet::new();
@@ -222,16 +228,6 @@ fn view(info: cli_registry::CliInfo, config: CliConfig) -> CliConfigView {
     }
 }
 
-fn detect_one(id: &str) -> cli_registry::CliInfo {
-    cli_registry::resolve_cli(id).map(|cli| cli.info).unwrap_or_else(|_| {
-        let spec = cli_registry::KNOWN_CLIS.iter().find(|spec| spec.id == id);
-        cli_registry::CliInfo {
-            id: id.to_string(), label: spec.map(|spec| spec.label).unwrap_or(id).to_string(),
-            installed: false, supported: cli_registry::is_supported(id), path: None, version: None,
-        }
-    })
-}
-
 /// 探测要逐个启动 CLI 取版本号，放到后台线程。
 #[tauri::command(async)]
 pub fn list_cli_configs(state: tauri::State<'_, crate::commands::AppState>) -> AppResult<Vec<CliConfigView>> {
@@ -257,12 +253,29 @@ pub fn save_and_reset_sessions(conn: &Connection, id: &str, config: &CliConfig) 
 pub fn save_cli_config(state: tauri::State<'_, crate::commands::AppState>, id: String, config: CliConfig) -> AppResult<CliConfigView> {
     let saved = { let conn = state.db_lock()?; save_and_reset_sessions(&conn, &id, &config)? };
     cli_registry::set_path_override(&id, saved.custom_path.clone().map(PathBuf::from));
-    Ok(view(detect_one(&id), saved))
+    Ok(view(cli_registry::detect_one(&id), saved))
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CliModelCatalog { pub models: Vec<CliModel>, pub error: Option<String> }
+
+/// Grok 候选的决策：代理设置读取或解析失败、抓取失败，都返回空列表加错误说明，不让整个命令抛错。
+/// 抓取函数由调用方注入（真实实现会启动 `grok models`）。
+fn grok_catalog(
+    proxy: AppResult<crate::proxy::ProxySettings>,
+    fetch: impl FnOnce(&[(String, Option<String>)]) -> Result<Vec<CliModel>, String>,
+) -> CliModelCatalog {
+    let failed = |error: String| CliModelCatalog { models: vec![], error: Some(error) };
+    let environment = match proxy.and_then(|settings| crate::proxy::resolve(&settings)) {
+        Ok(proxy) => proxy.map(|proxy| crate::proxy::overrides(&proxy)).unwrap_or_default(),
+        Err(error) => return failed(error.to_string()),
+    };
+    match fetch(&environment) {
+        Ok(models) => CliModelCatalog { models, error: None },
+        Err(error) => failed(error),
+    }
+}
 
 /// 只服务 claude、codex、grok；Dsh 的候选由前端读 Dsh 目录得到。
 #[tauri::command]
@@ -270,14 +283,9 @@ pub async fn list_cli_models(state: tauri::State<'_, crate::commands::AppState>,
     match id.as_str() {
         "claude" | "codex" => Ok(CliModelCatalog { models: builtin_models(&id), error: None }),
         "grok" => {
-            let proxy = { let conn = state.db_lock()?; crate::proxy::load(&conn)? };
-            let environment = crate::proxy::resolve(&proxy)?.map(|proxy| crate::proxy::overrides(&proxy)).unwrap_or_default();
-            let result = tauri::async_runtime::spawn_blocking(move || fetch_grok_models(&environment)).await
-                .map_err(|error| invalid(format!("读取模型失败：{error}")))?;
-            Ok(match result {
-                Ok(models) => CliModelCatalog { models, error: None },
-                Err(error) => CliModelCatalog { models: vec![], error: Some(error) },
-            })
+            let proxy = { let conn = state.db_lock()?; crate::proxy::load(&conn) };
+            tauri::async_runtime::spawn_blocking(move || grok_catalog(proxy, fetch_grok_models)).await
+                .map_err(|error| invalid(format!("读取模型失败：{error}")))
         }
         _ => Err(invalid("该 CLI 的模型候选不由本命令提供")),
     }
@@ -324,8 +332,7 @@ mod tests {
             ("claude", config(&["opus"], Some("sonnet"))),
             ("claude", config(&["opus", " opus"], None)),
             ("claude", config(&["  "], None)),
-            ("claude", config(&["a
-b"], None)),
+            ("claude", config(&["a\nb"], None)),
             ("claude", relative),
             ("claude", missing),
             ("pi", pi),
@@ -340,7 +347,7 @@ b"], None)),
     }
 
     #[test]
-    fn dsh_models_must_be_valid_selections_and_existing_files_are_accepted_as_paths() {
+    fn dsh_selection_and_existing_file_path_are_accepted() {
         let conn = open_in_memory().unwrap();
         let selection = r#"{"profile":"web","provider":"gpt","model":"gpt-6"}"#;
         save(&conn, "dsh", &config(&[selection], Some(selection))).unwrap();
@@ -391,16 +398,8 @@ b"], None)),
     #[test]
     fn grok_parser_ignores_noise_and_duplicates() {
         assert!(parse_grok_models("").is_empty());
-        assert!(parse_grok_models("You are logged in.
-  - not-a-model-yet
-").is_empty(), "必须在 Available models 之后");
-        let models = parse_grok_models("Available models:
-  - a
-  - a
-
-  * b (default)
-垃圾行
-");
+        assert!(parse_grok_models("You are logged in.\n  - not-a-model-yet\n").is_empty(), "必须在 Available models 之后");
+        let models = parse_grok_models("Available models:\n  - a\n  - a\n\n  * b (default)\n垃圾行\n");
         assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
     }
 
@@ -422,16 +421,99 @@ b"], None)),
         assert_eq!(view(info("pi"), default_config("pi")).models_source, "none");
     }
 
+    #[test]
+    fn view_carries_config_fields_and_detection_unchanged() {
+        let info = cli_registry::CliInfo { id: "claude".into(), label: "Claude Code".into(), installed: true, supported: true,
+            path: Some("/bin/claude".into()), version: Some("2.1.0".into()) };
+        let saved = CliConfig { enabled: false, custom_path: Some("/opt/claude".into()), models: vec![model("opus"), model("sonnet")],
+            default_model: Some("sonnet".into()) };
+        let shown = view(info, saved.clone());
+        assert_eq!((shown.id.as_str(), shown.label.as_str()), ("claude", "Claude Code"));
+        assert!(shown.installed && shown.supported);
+        assert_eq!(shown.path.as_deref(), Some("/bin/claude"));
+        assert_eq!(shown.version.as_deref(), Some("2.1.0"));
+        assert_eq!(shown.enabled, saved.enabled);
+        assert_eq!(shown.custom_path, saved.custom_path);
+        assert_eq!(shown.models, saved.models);
+        assert_eq!(shown.default_model, saved.default_model);
+    }
+
+    #[test]
+    fn load_path_overrides_applies_saved_custom_paths_to_the_registry() {
+        let _guard = cli_registry::PI_OVERRIDE_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join(if cfg!(windows) { "pi.exe" } else { "pi" });
+        std::fs::write(&program, b"").unwrap();
+        let mut with_path = config(&[], None);
+        with_path.enabled = false;
+        with_path.custom_path = Some(program.to_string_lossy().into_owned());
+        save(&conn, "pi", &with_path).unwrap();
+        cli_registry::set_path_override("pi", None);
+
+        load_path_overrides(&conn);
+        let applied = cli_registry::path_override("pi");
+        cli_registry::set_path_override("pi", None);
+        assert_eq!(applied, Some(program));
+
+        // 没有保存路径时，启动加载会清掉旧的覆盖
+        cli_registry::set_path_override("pi", Some(PathBuf::from("/stale")));
+        let mut without_path = config(&[], None);
+        without_path.enabled = false;
+        save(&conn, "pi", &without_path).unwrap();
+        load_path_overrides(&conn);
+        let cleared = cli_registry::path_override("pi");
+        cli_registry::set_path_override("pi", None);
+        assert_eq!(cleared, None);
+    }
+
+    #[test]
+    fn grok_catalog_turns_proxy_failures_into_an_error_message_not_a_command_error() {
+        let fetch_must_not_run = |_: &[(String, Option<String>)]| -> Result<Vec<CliModel>, String> { panic!("代理无法解析时不应抓取模型") };
+        let bad = crate::proxy::ProxySettings { mode: crate::proxy::ProxyMode::Manual, url: "不是地址".into() };
+        let catalog = grok_catalog(Ok(bad), fetch_must_not_run);
+        assert!(catalog.models.is_empty());
+        assert!(catalog.error.as_deref().is_some_and(|text| text.contains("代理")), "{:?}", catalog.error);
+
+        let unreadable = grok_catalog(Err(invalid("网络代理设置无法读取，请重新保存")), fetch_must_not_run);
+        assert!(unreadable.models.is_empty());
+        assert!(unreadable.error.as_deref().is_some_and(|text| text.contains("重新保存")), "{:?}", unreadable.error);
+    }
+
+    #[test]
+    fn grok_catalog_fetches_with_the_proxy_environment_and_reports_fetch_errors() {
+        let direct = || crate::proxy::ProxySettings { mode: crate::proxy::ProxyMode::Direct, url: String::new() };
+        let catalog = grok_catalog(Ok(direct()), |environment| {
+            assert!(environment.contains(&("HTTP_PROXY".to_string(), None)), "直连模式应清掉代理环境变量：{environment:?}");
+            Ok(vec![model("grok-4.7")])
+        });
+        assert_eq!(catalog.models, vec![model("grok-4.7")]);
+        assert_eq!(catalog.error, None);
+
+        let failed = grok_catalog(Ok(direct()), |_| Err("读取 Grok 模型失败或超时".to_string()));
+        assert!(failed.models.is_empty());
+        assert_eq!(failed.error.as_deref(), Some("读取 Grok 模型失败或超时"));
+    }
+
+    #[test]
+    fn changing_cli_requires_the_new_cli_to_be_enabled() {
+        let conn = open_in_memory().unwrap();
+        let mut closed = config(&[], None);
+        closed.enabled = false;
+        save(&conn, "codex", &closed).unwrap();
+
+        // CLI 不变：即使已关闭也允许（编辑只改名字、人设等）
+        assert!(ensure_cli_change_allowed(&conn, "codex", "codex").is_ok());
+        // 换到已关闭的 CLI：拒绝
+        let error = ensure_cli_change_allowed(&conn, "claude", "codex").unwrap_err().to_string();
+        assert!(error.contains("已在应用管理中关闭"), "{error}");
+        // 换到已启用的 CLI：允许（即使旧的已关闭）
+        assert!(ensure_cli_change_allowed(&conn, "codex", "claude").is_ok());
+    }
+
     fn seed_agent(conn: &Connection, project_id: &str, name: &str, cli: &str, model: Option<&str>, leader: bool) -> String {
         let agent = crate::store::agents::create(conn, project_id, &crate::store::agents::NewAgent {
-            name: name.into(), role: "开发".into(), persona: "## 定位
-开发
-## 职责
-测试
-## 边界
-不越界
-## 工作风格
-务实".into(), cli: cli.into(),
+            name: name.into(), role: "开发".into(), persona: "## 定位\n开发\n## 职责\n测试\n## 边界\n不越界\n## 工作风格\n务实".into(), cli: cli.into(),
             model: model.map(str::to_string), is_leader: leader,
         }).unwrap();
         crate::store::agents::set_session(conn, &agent.id, Some("会话")).unwrap();

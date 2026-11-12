@@ -1,4 +1,5 @@
 import { assistantAvailable } from "../lib/clis";
+import { closedCliIds } from "../lib/cliConfig";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
@@ -33,6 +34,7 @@ export default function Project() {
   const { id = "" } = useParams();
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [clis, setClis] = useState<CliInfo[]>([]);
+  const [closedClis, setClosedClis] = useState<ReadonlySet<string>>(new Set());
   const [templates, setTemplates] = useState<PersonaTemplate[]>([]);
   const [projectRules, setProjectRules] = useState<RuleDoc[]>([]);
   const [editing, setEditing] = useState<Editing>(null);
@@ -55,6 +57,8 @@ export default function Project() {
   useEffect(() => {
     reload().catch((e) => setError(String(e)));
     api.listClis().then(setClis);
+    // 应用管理里关闭的 CLI 不能当助理；读不到时当作没有关闭的
+    api.listCliConfigs().then((configs) => setClosedClis(closedCliIds(configs))).catch(() => setClosedClis(new Set()));
     api.listPersonaTemplates().then(setTemplates);
   }, [reload]);
 
@@ -126,7 +130,7 @@ export default function Project() {
   }
 
   const editingAgent = editing?.kind === "edit" ? editing.agent : null;
-  const assistantReady = assistantAvailable(clis);
+  const assistantReady = assistantAvailable(clis, closedClis);
   async function openAgentForm(target: Editing) {
     try { setProjectRules(await api.listRules(id)); setEditing(target); }
     catch (failure) { setError(String(failure)); }
@@ -196,7 +200,7 @@ export default function Project() {
             <div className="min-h-0 flex-1">
               {tab === "rules" ? (
                 // 文件夹重新选定后路径会变，用 key 让规章面板重新读取，不必来回切页签
-                <RulesPanel key={`${detail.folderExists}:${project.folderPath}`} projectId={id} project={project} agents={agents} clis={clis} refreshTick={rulesTick} />
+                <RulesPanel key={`${detail.folderExists}:${project.folderPath}`} projectId={id} project={project} agents={agents} clis={clis} closedCliIds={closedClis} refreshTick={rulesTick} />
               ) : detail.folderExists ? (
                 <FileTree key={project.folderPath} projectId={id} changed={changedFiles} tick={filesTick} />
               ) : (

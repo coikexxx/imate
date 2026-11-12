@@ -174,7 +174,7 @@ pub fn update_agent(state: State<'_, AppState>, id: String, input: NewAgent) -> 
     let runtime = state.runtime_lock()?;
     let conn = lock(&state)?;
     let old = agents::get(&conn, &id)?;
-    if old.cli != input.cli { crate::cli_config::ensure_selectable(&conn, &input.cli)?; }
+    crate::cli_config::ensure_cli_change_allowed(&conn, &old.cli, &input.cli)?;
     if old.cli != input.cli || old.model.as_deref() != input.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
         runtime.ensure_project_idle(&old.project_id)?;
     }

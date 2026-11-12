@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import {
-  addCustomModel, mergeModels, reconcileDefault, selectedModels, toInput, type ModelRow,
+  addCustomModel, isDetailDirty, mergeModels, reconcileDefault, selectedModels, toInput, type ModelRow,
 } from "../lib/cliConfig";
 import { dshModelOptions } from "../lib/dsh";
 import type { CliConfig, CliModel } from "../types";
@@ -69,6 +69,30 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
   }
 
   const checkedRows = rows.filter((r) => r.checked);
+  const effectiveDefault = reconcileDefault(rows, defaultModel);
+  const dirty = isDetailDirty(config, { enabled, customPath, models: selectedModels(rows), defaultModel: effectiveDefault });
+
+  // 任何字段被编辑后，上一次的「已保存」提示就不再成立
+  function edited<T>(setter: (value: T) => void) {
+    return (value: T) => { setSaved(false); setter(value); };
+  }
+  const editEnabled = edited(setEnabled);
+  const editCustomPath = edited(setCustomPath);
+  const editDefaultModel = edited(setDefaultModel);
+  function toggleRow(id: string, checked: boolean) {
+    setSaved(false);
+    setRows((current) => current.map((r) => (r.id === id ? { ...r, checked } : r)));
+  }
+  function addCustom() {
+    if (custom.trim() === "") return;
+    setSaved(false);
+    setRows((current) => addCustomModel(current, custom));
+    setCustom("");
+  }
+  function back() {
+    if (dirty && !window.confirm("放弃未保存的修改？")) return;
+    onBack();
+  }
 
   async function save() {
     setSaving(true); setError(null); setSaved(false);
@@ -77,7 +101,7 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
         enabled,
         customPath: customPath.trim() || null,
         models: selectedModels(rows),
-        defaultModel: reconcileDefault(rows, defaultModel),
+        defaultModel: effectiveDefault,
       }));
       onSaved(next);
       setDefaultModel(next.defaultModel);
@@ -89,10 +113,10 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
-        <button type="button" className="text-sm text-slate-400 hover:text-slate-100" onClick={onBack}>← 应用管理</button>
+        <button type="button" className="text-sm text-slate-400 hover:text-slate-100" onClick={back}>← 应用管理</button>
         <h3 className="text-lg font-semibold">{config.label}</h3>
         <span className="flex-1" />
-        <Switch checked={enabled && config.installed} disabled={!config.installed} label={`${config.label} 开关`} onChange={setEnabled} />
+        <Switch checked={enabled && config.installed} disabled={!config.installed} label={`${config.label} 开关`} onChange={editEnabled} />
       </div>
 
       <section className="space-y-3">
@@ -102,7 +126,7 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
           {config.path && <p className="mt-1 break-all font-mono text-slate-500">{config.path}</p>}
         </div>
         <Field label="手动指定路径（可选，留空自动检测）">
-          <input className={inputClass} value={customPath} placeholder="可执行文件的绝对路径" onChange={(event) => setCustomPath(event.target.value)} />
+          <input className={inputClass} value={customPath} placeholder="可执行文件的绝对路径" onChange={(event) => editCustomPath(event.target.value)} />
         </Field>
         <p className="text-xs text-slate-500">路径保存后生效；保存后会按新路径重新检测</p>
         <div className="flex gap-2">
@@ -111,7 +135,7 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
         {config.id === "dsh" && (
           <div className="rounded border border-slate-800 p-3">
             <p className="mb-3 text-sm font-medium">Dsh 认证与配置来源</p>
-            <DshSettingsPanel embedded onClose={() => undefined} onSaved={() => void loadCandidates()} />
+            <DshSettingsPanel embedded onClose={() => undefined} onSaved={() => { void loadCandidates(); void onRefresh(); }} />
           </div>
         )}
       </section>
@@ -131,7 +155,7 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
           {rows.map((row) => (
             <li key={row.id} className="flex items-center gap-3 px-3 py-2 text-sm">
               <input type="checkbox" aria-label={`启用 ${row.label}`} checked={row.checked}
-                onChange={(event) => setRows((current) => current.map((r) => (r.id === row.id ? { ...r, checked: event.target.checked } : r)))} />
+                onChange={(event) => toggleRow(row.id, event.target.checked)} />
               <span className="min-w-0 flex-1 truncate" title={row.id}>{row.label}</span>
               {row.custom && <span className="shrink-0 rounded bg-slate-800 px-1.5 text-xs text-slate-400">手填</span>}
             </li>
@@ -140,11 +164,11 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
         <div className="flex gap-2">
           <input className={inputClass} value={custom} placeholder="手填模型 ID，如 my-model"
             onChange={(event) => setCustom(event.target.value)}
-            onKeyDown={(event) => { if (event.key === "Enter") { setRows((c) => addCustomModel(c, custom)); setCustom(""); } }} />
-          <Button className="shrink-0" disabled={custom.trim() === ""} onClick={() => { setRows((c) => addCustomModel(c, custom)); setCustom(""); }}>添加</Button>
+            onKeyDown={(event) => { if (event.key === "Enter") addCustom(); }} />
+          <Button className="shrink-0" disabled={custom.trim() === ""} onClick={addCustom}>添加</Button>
         </div>
         <Field label="默认模型（成员没有单独指定模型时使用）">
-          <select className={inputClass} value={reconcileDefault(rows, defaultModel) ?? ""} onChange={(event) => setDefaultModel(event.target.value || null)}>
+          <select className={inputClass} value={effectiveDefault ?? ""} onChange={(event) => editDefaultModel(event.target.value || null)}>
             <option value="">使用 CLI 自带默认</option>
             {checkedRows.map((row) => <option key={row.id} value={row.id}>{row.label}</option>)}
           </select>
@@ -153,8 +177,9 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
 
       {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
       {saved && <p role="status" className="text-sm text-emerald-400">已保存，从下一回合生效。</p>}
-      <div className="flex justify-end gap-2">
-        <Button onClick={onBack}>返回</Button>
+      <div className="flex items-center justify-end gap-2">
+        {dirty && <span role="status" className="mr-1 text-xs text-amber-300">有未保存的修改</span>}
+        <Button onClick={back}>返回</Button>
         <Button variant="primary" disabled={saving} onClick={() => void save()}>{saving ? "正在保存…" : "保存"}</Button>
       </div>
     </div>

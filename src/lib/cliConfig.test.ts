@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { CliConfig } from "../types";
 import {
-  addCustomModel, defaultModelHint, filterDshOptions, groupClis, memberModelOptions, mergeModels,
-  reconcileDefault, selectableClis, selectedModels, toggleState, toInput,
+  addCustomModel, closedCliIds, defaultModelHint, filterDshOptions, groupClis, memberModelOptions, mergeModels,
+  isDetailDirty, reconcileDefault, selectableClis, selectedModels, toggleState, toInput,
 } from "./cliConfig";
 
 function cli(patch: Partial<CliConfig> & { id: string }): CliConfig {
@@ -26,16 +26,63 @@ describe("应用管理 纯函数", () => {
     expect(toggleState(cli({ id: "x", installed: false }))).toMatchObject({ checked: false, disabled: true });
   });
 
+  it("开关提示：未安装提示可指定路径；已安装但不受支持显示暂未支持且置灰关闭", () => {
+    expect(toggleState(cli({ id: "x", installed: false })).hint).toBe("未检测到，可在详情里指定路径");
+    expect(toggleState(cli({ id: "pi", installed: true, supported: false, enabled: true })))
+      .toEqual({ checked: false, disabled: true, hint: "暂未支持" });
+  });
+
   it("成员表单只列已启用、已安装、受支持的 CLI，编辑时保留当前值", () => {
     const all = [cli({ id: "a" }), cli({ id: "b", enabled: false }), cli({ id: "c", installed: false }), cli({ id: "pi", supported: false })];
     expect(selectableClis(all).map((c) => c.id)).toEqual(["a"]);
     expect(selectableClis(all, "b").map((c) => c.id)).toEqual(["a", "b"]);
   });
 
+  it("已关闭的 CLI 集合只含 enabled 为 false 的", () => {
+    const ids = closedCliIds([cli({ id: "a" }), cli({ id: "b", enabled: false }), cli({ id: "pi", enabled: false, supported: false })]);
+    expect([...ids].sort()).toEqual(["b", "pi"]);
+    expect(closedCliIds([]).size).toBe(0);
+  });
+
   it("toInput 只带可保存字段并允许覆盖", () => {
     const config = cli({ id: "a", models: [{ id: "m", label: "m", custom: false }], defaultModel: "m", customPath: "/p" });
     expect(toInput(config)).toEqual({ enabled: true, customPath: "/p", models: config.models, defaultModel: "m" });
     expect(toInput(config, { enabled: false }).enabled).toBe(false);
+  });
+
+  it("toInput 返回的 models 是拷贝，不与传入配置共享引用", () => {
+    const config = cli({ id: "a", models: [{ id: "m", label: "m", custom: false }] });
+    const input = toInput(config);
+    expect(input.models).toEqual(config.models);
+    expect(input.models).not.toBe(config.models);
+    expect(input.models[0]).not.toBe(config.models[0]);
+    input.models[0].label = "改了";
+    expect(config.models[0].label).toBe("m");
+  });
+
+  it("合并候选时按 id 去重，先出现的优先", () => {
+    const rows = mergeModels([], [
+      { id: "a", label: "第一个 a", custom: false },
+      { id: "b", label: "b", custom: false },
+      { id: "a", label: "重复的 a", custom: false },
+    ]);
+    expect(rows.map((r) => r.id)).toEqual(["a", "b"]);
+    expect(rows[0].label).toBe("第一个 a");
+  });
+
+  it("详情页未保存修改判断：逐项与传入配置比较", () => {
+    const config = cli({ id: "a", enabled: true, customPath: "/p", models: [{ id: "m1", label: "m1", custom: false }, { id: "m2", label: "m2", custom: false }], defaultModel: "m1" });
+    const same = { enabled: true, customPath: "/p", models: [{ id: "m2", label: "m2", custom: false }, { id: "m1", label: "m1", custom: false }], defaultModel: "m1" };
+    expect(isDetailDirty(config, same)).toBe(false);
+    expect(isDetailDirty(config, { ...same, customPath: " /p " })).toBe(false);
+    expect(isDetailDirty(config, { ...same, enabled: false })).toBe(true);
+    expect(isDetailDirty(config, { ...same, customPath: "/q" })).toBe(true);
+    expect(isDetailDirty(config, { ...same, models: same.models.slice(0, 1) })).toBe(true);
+    expect(isDetailDirty(config, { ...same, models: [...same.models, { id: "m3", label: "m3", custom: true }] })).toBe(true);
+    expect(isDetailDirty(config, { ...same, defaultModel: null })).toBe(true);
+    const bare = cli({ id: "b", customPath: null });
+    expect(isDetailDirty(bare, { enabled: true, customPath: "   ", models: [], defaultModel: null })).toBe(false);
+    expect(isDetailDirty(bare, { enabled: true, customPath: "/x", models: [], defaultModel: null })).toBe(true);
   });
 
   it("合并候选与已选：已选自定义模型保留，候选默认不勾选", () => {

@@ -76,7 +76,11 @@ pub fn set_path_override(id: &str, path: Option<PathBuf>) {
     if let Some(path) = path { overrides.push((id.to_string(), path)); }
 }
 
-fn path_override(id: &str) -> Option<PathBuf> {
+/// 测试里会改动 pi 手动路径的用例共用这把锁，避免并行时互相覆盖。
+#[cfg(test)]
+pub(crate) static PI_OVERRIDE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) fn path_override(id: &str) -> Option<PathBuf> {
     PATH_OVERRIDES.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
         .iter().find(|(key, _)| key == id).map(|(_, path)| path.clone())
 }
@@ -281,6 +285,18 @@ pub fn detect_all() -> Vec<CliInfo> {
             |resolved| run_version(&resolved.program, &resolved.path_env),
         )
     }).collect()
+}
+
+/// 探测单个 CLI，规则与 `detect_all` 一致：有手动路径只看该路径，失效就报未安装（路径仍带出）。
+pub fn detect_one(id: &str) -> CliInfo {
+    let process_path = std::env::var_os("PATH");
+    detect_one_with(
+        id,
+        path_override(id),
+        process_path.clone(),
+        || resolve_with_fallback(id, process_path, login_shell_path, find_in_path),
+        |resolved| run_version(&resolved.program, &resolved.path_env),
+    )
 }
 
 /// 单个 CLI 的探测决策。有手动路径时只看该路径，失效就报未安装，不回退 PATH（与 `resolve_cli` 一致）。
@@ -498,12 +514,39 @@ mod tests {
 
     #[test]
     fn set_path_override_replaces_and_clears() {
-        // pi 没有适配器，其他测试不会用到它的覆盖
+        // pi 没有适配器，其他测试不会用到它的覆盖；改动它的测试共用同一把锁，避免并行时互相干扰
+        let _guard = PI_OVERRIDE_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         set_path_override("pi", Some(PathBuf::from("/a")));
         set_path_override("pi", Some(PathBuf::from("/b")));
         assert_eq!(path_override("pi"), Some(PathBuf::from("/b")));
         set_path_override("pi", None);
         assert_eq!(path_override("pi"), None);
+    }
+
+    #[test]
+    fn detect_one_reports_a_stale_override_as_missing_but_keeps_its_path() {
+        let _guard = PI_OVERRIDE_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let missing = std::env::temp_dir().join("imates-no-such-cli-binary");
+        set_path_override("pi", Some(missing.clone()));
+        let info = detect_one("pi");
+        set_path_override("pi", None);
+        assert!(!info.installed && !info.supported);
+        assert_eq!(info.path.as_deref(), Some(missing.to_string_lossy().as_ref()));
+        assert_eq!(info.version, None);
+        assert_eq!(info.label, "Pi");
+    }
+
+    #[test]
+    fn detect_one_with_a_valid_override_is_installed_at_that_path() {
+        let _guard = PI_OVERRIDE_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join(if cfg!(windows) { "pi.exe" } else { "pi" });
+        std::fs::write(&program, b"").unwrap();
+        set_path_override("pi", Some(program.clone()));
+        let info = detect_one("pi");
+        set_path_override("pi", None);
+        assert!(info.installed);
+        assert_eq!(info.path.as_deref(), Some(program.to_string_lossy().as_ref()));
     }
 
     #[test]

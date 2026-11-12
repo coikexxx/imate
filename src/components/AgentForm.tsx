@@ -84,7 +84,8 @@ export function AgentForm({
     };
     const selected = clis.find((c) => c.id === cli);
     const duplicate = takenNames.some((other) => normalizeName(other) === normalizeName(input.name));
-    const problem = !cli ? "没有已启用的 CLI，请先在系统设置的应用管理中启用" : duplicate ? `成员名「${input.name}」已存在` :
+    const problem = !cli ? "没有可选的 CLI（未启用或未安装），请先在系统设置的应用管理中启用" :
+      !initial && closed(cli) ? "该 CLI 已在应用管理中关闭，请先在系统设置里启用" : duplicate ? `成员名「${input.name}」已存在` :
       !selected?.supported ? "该 CLI 尚未接入" : !selected.installed ? "请先安装所选 CLI" : validateAgent(input, takenNames);
     if (problem) {
       setError(problem);
