@@ -1348,7 +1348,8 @@ async fn run_orchestrated(
     }).await;
     let cli = match resolved {
         Ok(Ok(cli)) => cli,
-        _ => return refuse("CLI 不可用"),
+        Ok(Err(error)) => return refuse(&format!("CLI 不可用：{error}")),
+        Err(_) => return refuse("CLI 不可用"),
     };
     let mode = if spec.mode == "discuss" { RunMode::Discuss } else { RunMode::Execute };
     let baseline = state.db_lock().ok()

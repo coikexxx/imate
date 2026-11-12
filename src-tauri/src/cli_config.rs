@@ -240,9 +240,22 @@ pub fn list_cli_configs(state: tauri::State<'_, crate::commands::AppState>) -> A
     infos.into_iter().map(|info| { let config = load(&conn, &info.id)?; Ok(view(info, config)) }).collect()
 }
 
+/// 保存配置。默认模型变了，成员「模型留空」时实际模型随之改变，其会话要清空（手册：改模型清会话）。
+/// 配置与清会话在同一个事务里；已在进行的回合不受影响，下一回合生效。
+pub fn save_and_reset_sessions(conn: &Connection, id: &str, config: &CliConfig) -> AppResult<CliConfig> {
+    let previous = load(conn, id).ok().and_then(|old| old.default_model);
+    let tx = conn.unchecked_transaction()?;
+    let saved = save(&tx, id, config)?;
+    if saved.default_model != previous {
+        tx.execute("UPDATE agents SET session_id=NULL WHERE cli=?1 AND COALESCE(TRIM(model),'')=''", [id])?;
+    }
+    tx.commit()?;
+    Ok(saved)
+}
+
 #[tauri::command(async)]
 pub fn save_cli_config(state: tauri::State<'_, crate::commands::AppState>, id: String, config: CliConfig) -> AppResult<CliConfigView> {
-    let saved = { let conn = state.db_lock()?; save(&conn, &id, &config)? };
+    let saved = { let conn = state.db_lock()?; save_and_reset_sessions(&conn, &id, &config)? };
     cli_registry::set_path_override(&id, saved.custom_path.clone().map(PathBuf::from));
     Ok(view(detect_one(&id), saved))
 }
@@ -407,5 +420,59 @@ b"], None)),
         assert_eq!(view(info("claude"), default_config("claude")).models_source, "builtin");
         assert_eq!(view(info("codex"), default_config("codex")).models_source, "builtin");
         assert_eq!(view(info("pi"), default_config("pi")).models_source, "none");
+    }
+
+    fn seed_agent(conn: &Connection, project_id: &str, name: &str, cli: &str, model: Option<&str>, leader: bool) -> String {
+        let agent = crate::store::agents::create(conn, project_id, &crate::store::agents::NewAgent {
+            name: name.into(), role: "开发".into(), persona: "## 定位
+开发
+## 职责
+测试
+## 边界
+不越界
+## 工作风格
+务实".into(), cli: cli.into(),
+            model: model.map(str::to_string), is_leader: leader,
+        }).unwrap();
+        crate::store::agents::set_session(conn, &agent.id, Some("会话")).unwrap();
+        agent.id
+    }
+
+    fn session_of(conn: &Connection, agent_id: &str) -> Option<String> {
+        conn.query_row("SELECT session_id FROM agents WHERE id=?1", [agent_id], |row| row.get(0)).unwrap()
+    }
+
+    #[test]
+    fn changing_default_model_clears_only_sessions_that_follow_the_default() {
+        let conn = open_in_memory().unwrap();
+        let project = crate::store::projects::create(&conn, "项目", "描述", "/tmp/项目").unwrap();
+        let follows = seed_agent(&conn, &project.id, "跟随", "claude", None, true);
+        let blank = seed_agent(&conn, &project.id, "空白", "claude", Some("  "), false);
+        let own = seed_agent(&conn, &project.id, "自填", "claude", Some("haiku"), false);
+        let other_cli = seed_agent(&conn, &project.id, "别家", "codex", None, false);
+
+        // 默认模型从无变为 opus：沿用默认的成员清会话，自填模型与别家 CLI 的成员不动
+        save_and_reset_sessions(&conn, "claude", &config(&["opus", "sonnet"], Some("opus"))).unwrap();
+        assert_eq!(session_of(&conn, &follows), None);
+        assert_eq!(session_of(&conn, &blank), None);
+        assert_eq!(session_of(&conn, &own).as_deref(), Some("会话"));
+        assert_eq!(session_of(&conn, &other_cli).as_deref(), Some("会话"));
+        assert_eq!(load(&conn, "claude").unwrap().default_model.as_deref(), Some("opus"));
+
+        // 默认模型没变（只改 enabled）：不清会话
+        crate::store::agents::set_session(&conn, &follows, Some("新会话")).unwrap();
+        let mut closed = config(&["opus", "sonnet"], Some("opus")); closed.enabled = false;
+        save_and_reset_sessions(&conn, "claude", &closed).unwrap();
+        assert_eq!(session_of(&conn, &follows).as_deref(), Some("新会话"));
+
+        // 默认模型改成 sonnet：再次清空
+        save_and_reset_sessions(&conn, "claude", &config(&["opus", "sonnet"], Some("sonnet"))).unwrap();
+        assert_eq!(session_of(&conn, &follows), None);
+
+        // 校验失败时既不写配置也不清会话
+        crate::store::agents::set_session(&conn, &follows, Some("又一个")).unwrap();
+        assert!(save_and_reset_sessions(&conn, "claude", &config(&["opus"], Some("不存在"))).is_err());
+        assert_eq!(session_of(&conn, &follows).as_deref(), Some("又一个"));
+        assert_eq!(load(&conn, "claude").unwrap().default_model.as_deref(), Some("sonnet"));
     }
 }

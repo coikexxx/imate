@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { CliConfig, DshCatalog, DshProfile } from "../types";
 import { dshModelOptions } from "../lib/dsh";
-import { filterDshOptions } from "../lib/cliConfig";
+import { defaultModelHint, filterDshOptions } from "../lib/cliConfig";
 import { Button, inputClass } from "./ui";
 import { DshSettingsButton } from "./DshSettings";
 
@@ -28,7 +28,7 @@ export function DshModelSelect({ value, onChange, config }: { value: string; onC
   const options = filterDshOptions(dshModelOptions(catalog, value), config, value);
   return <div className="space-y-2">
     <select className={inputClass} value={value} onChange={event => onChange(event.target.value)}>
-      <option value="">使用 Dsh 默认模型与认证设置</option>
+      <option value="">{config?.defaultModel ? defaultModelHint(config) : "使用 Dsh 默认模型与认证设置"}</option>
       {options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
     </select>
     <div className="flex flex-wrap items-center gap-2">

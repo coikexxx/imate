@@ -76,7 +76,9 @@ function Row({ config, busy, onOpen, onToggle }: { config: CliConfig; busy: bool
         </span>
       </button>
       <span className="w-32 shrink-0 text-right font-mono text-xs text-slate-400">{config.version ?? (config.installed ? "" : "未安装")}</span>
-      <Switch checked={state.checked} disabled={state.disabled || busy} label={`${config.label} 开关`} onChange={onToggle} />
+      {config.supported
+        ? <Switch checked={state.checked} disabled={state.disabled || busy} label={`${config.label} 开关`} onChange={onToggle} />
+        : <span aria-hidden className="h-6 w-11 shrink-0" />}
       {config.supported && <span aria-hidden className="shrink-0 text-slate-500">›</span>}
     </li>
   );

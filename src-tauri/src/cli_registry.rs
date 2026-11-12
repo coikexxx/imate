@@ -273,15 +273,37 @@ pub fn detect_all() -> Vec<CliInfo> {
     });
     let fallback = needs_fallback.then(|| login_shell_path(Duration::from_secs(3))).flatten();
     KNOWN_CLIS.iter().map(|spec| {
-        let resolved = path_override(spec.id)
-            .and_then(|program| resolved_from_override(spec.id, program, process_path.clone()))
-            .or_else(|| resolve_with_fallback(spec.id, process_path.clone(), |_| fallback.clone(), find_in_path));
-        match resolved {
-            Some(resolved) => CliInfo { version: run_version(&resolved.program, &resolved.path_env), ..resolved.info },
-            None => CliInfo { id: spec.id.into(), label: spec.label.into(), installed: false,
-                supported: is_supported(spec.id), path: None, version: None },
-        }
+        detect_one_with(
+            spec.id,
+            path_override(spec.id),
+            process_path.clone(),
+            || resolve_with_fallback(spec.id, process_path.clone(), |_| fallback.clone(), find_in_path),
+            |resolved| run_version(&resolved.program, &resolved.path_env),
+        )
     }).collect()
+}
+
+/// 单个 CLI 的探测决策。有手动路径时只看该路径，失效就报未安装，不回退 PATH（与 `resolve_cli` 一致）。
+fn detect_one_with(
+    id: &str,
+    override_path: Option<PathBuf>,
+    process_path: Option<OsString>,
+    fallback: impl FnOnce() -> Option<ResolvedCli>,
+    get_version: impl Fn(&ResolvedCli) -> Option<String>,
+) -> CliInfo {
+    let (label, supported) = KNOWN_CLIS.iter().find(|spec| spec.id == id)
+        .map(|spec| (spec.label, is_supported(spec.id))).unwrap_or((id, false));
+    let resolved = match &override_path {
+        Some(program) => resolved_from_override(id, program.clone(), process_path),
+        None => fallback(),
+    };
+    match resolved {
+        Some(resolved) => { let version = get_version(&resolved); CliInfo { version, ..resolved.info } }
+        None => CliInfo {
+            id: id.into(), label: label.into(), installed: false, supported,
+            path: override_path.map(|path| path.to_string_lossy().into_owned()), version: None,
+        },
+    }
 }
 
 /// 取版本号时实际启动的程序。`.cmd` 启动器先解析成真实入口，不经过 cmd.exe；解析不了就不取版本。
@@ -482,5 +504,45 @@ mod tests {
         assert_eq!(path_override("pi"), Some(PathBuf::from("/b")));
         set_path_override("pi", None);
         assert_eq!(path_override("pi"), None);
+    }
+
+    #[test]
+    fn detect_with_override_uses_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join(if cfg!(windows) { "claude.exe" } else { "claude" });
+        std::fs::write(&program, b"").unwrap();
+        let info = detect_one_with("claude", Some(program.clone()), None,
+            || panic!("有手动路径时不应回退 PATH"), |_| Some("9.9.9".into()));
+        assert!(info.installed);
+        assert_eq!(info.path.as_deref(), Some(program.to_string_lossy().as_ref()));
+        assert_eq!(info.version.as_deref(), Some("9.9.9"));
+    }
+
+    #[test]
+    fn detect_with_missing_override_reports_not_installed_without_falling_back() {
+        let missing = std::env::temp_dir().join("imates-no-such-cli-binary");
+        let calls = std::cell::Cell::new(0);
+        let info = detect_one_with("claude", Some(missing.clone()), None, || { calls.set(calls.get() + 1); None },
+            |_| panic!("路径失效时不应取版本"));
+        assert!(!info.installed && info.supported);
+        assert_eq!(info.path.as_deref(), Some(missing.to_string_lossy().as_ref()));
+        assert_eq!(info.version, None);
+        assert_eq!(calls.get(), 0, "覆盖失效时不能回退 PATH");
+    }
+
+    #[test]
+    fn detect_without_override_uses_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("claude.exe");
+        let resolved = ResolvedCli {
+            info: CliInfo { id: "claude".into(), label: "Claude Code".into(), installed: true, supported: true,
+                path: Some(program.to_string_lossy().into_owned()), version: None },
+            program: program.clone(), path_env: OsString::new(), environment_source: EnvironmentSource::Process,
+        };
+        let info = detect_one_with("claude", None, None, || Some(resolved), |_| Some("1.0.0".into()));
+        assert!(info.installed);
+        assert_eq!(info.version.as_deref(), Some("1.0.0"));
+        let none = detect_one_with("codex", None, None, || None, |_| None);
+        assert!(!none.installed && none.path.is_none());
     }
 }
