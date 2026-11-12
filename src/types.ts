@@ -19,6 +19,26 @@ export interface CliInfo {
   version: string | null;
 }
 
+export interface CliModel { id: string; label: string; custom: boolean }
+
+/** 应用管理里一个 CLI 的完整视图：检测结果加已保存的配置 */
+export interface CliConfig extends CliInfo {
+  enabled: boolean;
+  customPath: string | null;
+  models: CliModel[];
+  defaultModel: string | null;
+  modelsSource: "auto" | "builtin" | "none";
+}
+
+export interface CliConfigInput {
+  enabled: boolean;
+  customPath: string | null;
+  models: CliModel[];
+  defaultModel: string | null;
+}
+
+export interface CliModelCatalog { models: CliModel[]; error: string | null }
+
 export type ProjectStatus = "idle" | "discussing" | "executing" | "waiting_user";
 
 export const STATUS_LABELS: Record<ProjectStatus, string> = {

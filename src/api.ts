@@ -15,7 +15,10 @@ import type {
   DraftResponse,
   AssistantDelta,
   AgentInput,
+  CliConfig,
+  CliConfigInput,
   CliInfo,
+  CliModelCatalog,
   NewProjectInput,
   PersonaTemplate,
   Project,
@@ -37,6 +40,9 @@ export const api = {
   listenAssistantEvent: (receive: (payload: AssistantDelta) => void) =>
     listen<AssistantDelta>("assistant:delta", (event) => receive(event.payload)),
   listClis: () => invoke<CliInfo[]>("list_clis"),
+  listCliConfigs: () => invoke<CliConfig[]>("list_cli_configs"),
+  saveCliConfig: (id: string, config: CliConfigInput) => invoke<CliConfig>("save_cli_config", { id, config }),
+  listCliModels: (id: string) => invoke<CliModelCatalog>("list_cli_models", { id }),
   listMessages: (projectId: string, beforeId: number | null = null, limit = 50) =>
     invoke<Message[]>("list_messages", { projectId, beforeId, limit }),
   sendMessage: (projectId: string, content: string) => invoke<SendMessageResponse>("send_message", { projectId, content }),
