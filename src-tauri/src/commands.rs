@@ -1759,7 +1759,7 @@ mod integration_tests {
             let conn = state.db_lock().unwrap();
             conn.execute("UPDATE runs SET reported_model='报告值' WHERE id=?1", [&started.run_id]).unwrap();
             let placeholder = messages::get(&conn, started.agent_message_id).unwrap();
-            assert_eq!(placeholder.model_info, Some(messages::ModelInfo { requested_model: Some("请求值".into()), reported_model: Some("报告值".into()) }));
+            assert_eq!(placeholder.model_info, Some(messages::ModelInfo { requested_model: Some("请求值".into()), reported_model: Some("报告值".into()), run_status: Some("running".into()) }));
             assert_eq!(messages::get(&conn, started.user_message.id).unwrap().model_info, None);
         }
         // 先落库再启动的路径：占位消息同样链接到运行。
@@ -1768,7 +1768,7 @@ mod integration_tests {
         let started = state.launch_existing_message(&first, user.id, &cli).unwrap();
         let conn = state.db_lock().unwrap();
         assert_eq!(messages::get(&conn, started.agent_message_id).unwrap().model_info,
-            Some(messages::ModelInfo { requested_model: None, reported_model: None }));
+            Some(messages::ModelInfo { requested_model: None, reported_model: None, run_status: Some("running".into()) }));
         assert_eq!(messages::get(&conn, user.id).unwrap().model_info, None);
     }
     #[test]
@@ -1781,14 +1781,14 @@ mod integration_tests {
             conn.execute("UPDATE runs SET requested_model='旧请求', reported_model='旧报告' WHERE id=?1", [&old_run_id]).unwrap();
             conn.execute("UPDATE agents SET model='新请求' WHERE id=?1", [&started.prepared.agent.id]).unwrap();
             let before = messages::get(&conn, started.agent_message_id).unwrap();
-            assert_eq!(before.model_info, Some(messages::ModelInfo { requested_model: Some("旧请求".into()), reported_model: Some("旧报告".into()) }));
+            assert_eq!(before.model_info, Some(messages::ModelInfo { requested_model: Some("旧请求".into()), reported_model: Some("旧报告".into()), run_status: Some("running".into()) }));
         }
         state.rebuild_started(&mut started, &cli, &outcome("failed")).unwrap();
         assert_ne!(started.run_id, old_run_id);
         let conn = state.db_lock().unwrap();
         // 占位消息改链到新运行：显示新运行的请求值，而不是失败的旧运行的值。
         assert_eq!(messages::get(&conn, started.agent_message_id).unwrap().model_info,
-            Some(messages::ModelInfo { requested_model: Some("新请求".into()), reported_model: None }));
+            Some(messages::ModelInfo { requested_model: Some("新请求".into()), reported_model: None, run_status: Some("running".into()) }));
     }
     #[test]
     #[cfg(unix)]

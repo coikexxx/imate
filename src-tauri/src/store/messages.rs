@@ -19,22 +19,23 @@ pub struct Message {
     pub model_info: Option<ModelInfo>,
 }
 
-/// 运行记录里的两个模型值。`Some(ModelInfo { None, None })` 表示「有运行但没有记录」。
+/// 运行记录里的模型值与状态。删除成员后运行可能不存在，此时状态保持未知。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub requested_model: Option<String>,
     pub reported_model: Option<String>,
+    pub run_status: Option<String>,
 }
 
-/// 联表查询的列：消息本身 8 列，之后依次是 run_id、请求的模型、CLI 报告的模型。
+/// 联表查询的列：消息本身 8 列，之后依次是 run_id、请求的模型、CLI 报告的模型及运行状态。
 const SELECT_COLUMNS: &str = "m.id, m.project_id, m.sender_type, m.sender_agent_id, m.kind, m.content, m.round, \
-     m.created_at, m.run_id, r.requested_model, r.reported_model";
+     m.created_at, m.run_id, r.requested_model, r.reported_model, r.status";
 
 fn from_row(row: &Row) -> rusqlite::Result<Message> {
     let run_id: Option<String> = row.get(8)?;
     let model_info = if run_id.is_some() {
-        Some(ModelInfo { requested_model: row.get(9)?, reported_model: row.get(10)? })
+        Some(ModelInfo { requested_model: row.get(9)?, reported_model: row.get(10)?, run_status: row.get(11)? })
     } else {
         None
     };
@@ -187,6 +188,7 @@ mod tests {
         let expected = Some(ModelInfo {
             requested_model: Some("claude-opus-5-5".into()),
             reported_model: Some("claude-opus-5-5-20261001".into()),
+            run_status: Some("running".into()),
         });
         assert_eq!(get(&conn, message.id).unwrap().model_info, expected);
         assert_eq!(list(&conn, &project.id, None, 10).unwrap()[0].model_info, expected);
@@ -202,18 +204,38 @@ mod tests {
         let message = insert(&conn, &project.id, "agent", Some(&agent_id), "chat", "回复").unwrap();
         let run = crate::store::runs::insert_running(&conn, Some(&agent_id), "execute", "{}", None).unwrap();
         set_run(&conn, message.id, &run.id).unwrap();
-        let empty = Some(ModelInfo { requested_model: None, reported_model: None });
+        let empty = Some(ModelInfo { requested_model: None, reported_model: None, run_status: Some("running".into()) });
         assert_eq!(get(&conn, message.id).unwrap().model_info, empty);
         assert_eq!(list(&conn, &project.id, None, 10).unwrap()[0].model_info, empty);
         // 序列化为 camelCase，且无运行时是 null。
         let json = serde_json::to_value(get(&conn, message.id).unwrap()).unwrap();
-        assert_eq!(json["modelInfo"], serde_json::json!({ "requestedModel": null, "reportedModel": null }));
+        assert_eq!(json["modelInfo"], serde_json::json!({ "requestedModel": null, "reportedModel": null, "runStatus": "running" }));
     }
 
     #[test]
     fn set_run_rejects_missing_message() {
         let conn = open_in_memory().unwrap();
         assert!(matches!(set_run(&conn, 9999, "不存在"), Err(AppError::NotFound(_))));
+    }
+    #[test]
+    fn model_info_exposes_current_run_status_in_camel_case() {
+        let conn = open_in_memory().unwrap();
+        let project = projects::create(&conn, "项目", "", "/tmp/项目").unwrap();
+        let agent_id = member(&conn, &project.id);
+        let message = insert(&conn, &project.id, "agent", Some(&agent_id), "chat", "回复").unwrap();
+        let run = crate::store::runs::insert_running(&conn, Some(&agent_id), "execute", "{}", None).unwrap();
+        set_run(&conn, message.id, &run.id).unwrap();
+        for status in ["running", "ok", "failed", "timeout", "cancelled", "interrupted"] {
+            conn.execute("UPDATE runs SET status=?1 WHERE id=?2", params![status, run.id]).unwrap();
+            for fetched in [get(&conn, message.id).unwrap(), list(&conn, &project.id, None, 10).unwrap().remove(0), update_content(&conn, message.id, "更新").unwrap()] {
+                let json = serde_json::to_value(fetched).unwrap();
+                assert_eq!(json["modelInfo"]["runStatus"], status);
+            }
+        }
+        // 删除成员会级联删除运行，消息仍可读；没有运行状态时保持未知。
+        conn.execute("DELETE FROM agents WHERE id=?1", [&agent_id]).unwrap();
+        let json = serde_json::to_value(get(&conn, message.id).unwrap()).unwrap();
+        assert_eq!(json["modelInfo"]["runStatus"], serde_json::Value::Null);
     }
 
     #[test]

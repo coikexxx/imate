@@ -1629,7 +1629,7 @@ mod tests {
     fn tag_run(conn: &rusqlite::Connection, run_id: &str, tag: &str) -> Option<messages::ModelInfo> {
         let (requested, reported) = (format!("请求-{tag}"), format!("报告-{tag}"));
         conn.execute("UPDATE runs SET requested_model = ?1, reported_model = ?2 WHERE id = ?3", rusqlite::params![requested, reported, run_id]).unwrap();
-        Some(messages::ModelInfo { requested_model: Some(requested), reported_model: Some(reported) })
+        Some(messages::ModelInfo { requested_model: Some(requested), reported_model: Some(reported), run_status: Some("ok".into()) })
     }
 
     fn infos_of(conn: &rusqlite::Connection, project_id: &str, kind: &str) -> Vec<Option<messages::ModelInfo>> {

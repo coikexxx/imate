@@ -113,7 +113,7 @@ export interface NewProjectInput {
   agents: AgentInput[];
 }
 
-export interface ModelInfo { requestedModel: string | null; reportedModel: string | null }
+export interface ModelInfo { requestedModel: string | null; reportedModel: string | null; runStatus: string | null }
 export interface Message {
   id: number;
   projectId: string;
