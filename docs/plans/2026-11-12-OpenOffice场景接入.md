@@ -46,6 +46,6 @@ Interfaces：保留 `OfficeCanvas({ agents, statuses })`。图片加载与画布
 
 ## Task 3：验证与文档
 
-- [ ] 运行前端完整测试、TypeScript / Vite 构建与 `git diff --check`；验证发布产物包含全部场景资源。
-- [ ] 更新手册、界面记录和进度表，明确已执行与未执行的验收边界。
-- [ ] 提交：`docs: 记录 OpenOffice 场景接入与验证结果`。
+- [x] 运行前端完整测试、TypeScript / Vite 构建与 `git diff --check`：16 个文件、108 项通过。发布产物包含原始背景、六张人物图（char_0 内联）与完整 MIT 版权许可文本。
+- [x] 更新手册、界面记录和进度表，明确已执行与未执行的验收边界：浏览器临时数据通过，未修改真实数据库，本轮未执行原生 Tauri 窗口与真实 CLI 团队验收；不替代 M4 原有验收。
+- [x] 提交：`docs: 记录 OpenOffice 场景接入与验证结果`。
