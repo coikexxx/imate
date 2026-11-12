@@ -31,7 +31,12 @@ export function AppManager() {
 
   const opened = configs?.find((c) => c.id === openId);
   if (opened) {
-    return <CliDetail config={opened} onBack={() => setOpenId(null)} onSaved={replace} onRefresh={load} />;
+    return (
+      <>
+        {error && <p role="alert" className="mb-3 text-sm text-red-300">{error}</p>}
+        <CliDetail config={opened} onBack={() => setOpenId(null)} onSaved={replace} onRefresh={load} />
+      </>
+    );
   }
   if (!configs) {
     return error
@@ -67,7 +72,7 @@ function Row({ config, busy, onOpen, onToggle }: { config: CliConfig; busy: bool
         <span className="grid h-9 w-9 shrink-0 place-items-center rounded bg-slate-800 text-sm font-semibold">{config.label.slice(0, 1)}</span>
         <span className="min-w-0">
           <span className="block truncate font-medium">{config.label}</span>
-          <span className="block truncate text-xs text-slate-500" title={config.path ?? undefined}>{config.path ?? state.hint ?? "未检测到"}</span>
+          <span className="block truncate text-xs text-slate-500" title={config.path ?? undefined}>{!config.supported ? state.hint : (config.path ?? state.hint ?? "未检测到")}</span>
         </span>
       </button>
       <span className="w-32 shrink-0 text-right font-mono text-xs text-slate-400">{config.version ?? (config.installed ? "" : "未安装")}</span>

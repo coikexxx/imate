@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import {
   addCustomModel, mergeModels, reconcileDefault, selectedModels, toInput, type ModelRow,
@@ -25,32 +25,48 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
   const [rows, setRows] = useState<ModelRow[]>(() => mergeModels(config.models, []));
   const [defaultModel, setDefaultModel] = useState<string | null>(config.defaultModel);
   const [custom, setCustom] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  // 候选请求序号：只有最新一次请求的结果才写入状态，卸载时自增使在途请求作废
+  const requestSeq = useRef(0);
   const [candidateError, setCandidateError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
   const loadCandidates = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    const latest = () => requestSeq.current === seq;
     setLoading(true); setCandidateError(null);
     try {
       let candidates: CliModel[];
+      let failureText: string | null = null;
       if (config.id === "dsh") {
         const settings = await api.getDshSettings();
         const catalog = await api.listDshModels(settings.profile);
         candidates = dshModelOptions(catalog, "").map((o) => ({ id: o.value, label: o.label, custom: false }));
-        const failures = catalog.failures.map((f) => `${f.provider}：${f.message}`).join("；");
-        if (failures) setCandidateError(failures);
+        failureText = catalog.failures.map((f) => `${f.provider}：${f.message}`).join("；") || null;
       } else {
         const catalog = await api.listCliModels(config.id);
         candidates = catalog.models;
-        setCandidateError(catalog.error);
+        failureText = catalog.error;
       }
+      if (!latest()) return;
+      setCandidateError(failureText);
       setRows((current) => mergeModels(selectedModels(current), candidates));
-    } catch (failure) { setCandidateError(String(failure)); }
-    finally { setLoading(false); }
+    } catch (failure) { if (latest()) setCandidateError(String(failure)); }
+    finally { if (latest()) setLoading(false); }
   }, [config.id]);
-  useEffect(() => { void loadCandidates(); }, [loadCandidates]);
+  useEffect(() => {
+    void loadCandidates();
+    return () => { requestSeq.current += 1; };
+  }, [loadCandidates]);
+
+  async function redetect() {
+    setRefreshing(true);
+    try { await onRefresh(); }
+    finally { setRefreshing(false); }
+  }
 
   const checkedRows = rows.filter((r) => r.checked);
 
@@ -88,8 +104,9 @@ export function CliDetail({ config, onBack, onSaved, onRefresh }: Props) {
         <Field label="手动指定路径（可选，留空自动检测）">
           <input className={inputClass} value={customPath} placeholder="可执行文件的绝对路径" onChange={(event) => setCustomPath(event.target.value)} />
         </Field>
+        <p className="text-xs text-slate-500">路径保存后生效；保存后会按新路径重新检测</p>
         <div className="flex gap-2">
-          <Button disabled={saving} onClick={() => void onRefresh()}>重新检测</Button>
+          <Button disabled={saving || refreshing} onClick={() => void redetect()}>{refreshing ? "正在检测…" : "重新检测"}</Button>
         </div>
         {config.id === "dsh" && (
           <div className="rounded border border-slate-800 p-3">
