@@ -290,7 +290,7 @@ pub fn authorize_blocked_task(conn: &Connection, task_id: &str) -> AppResult<Ins
     save_snapshot(&tx, &instruction.id, &snapshot)?;
     tx.execute(
         "UPDATE instructions SET status = 'running', phase = 'execute', wait_reason = NULL, finished_at = NULL, \
-         elevated_allowed = 1, updated_at = ?1 WHERE id = ?2",
+         updated_at = ?1 WHERE id = ?2",
         params![now_ms(), instruction.id],
     )?;
     tx.execute("UPDATE tasks SET status = 'pending', finished_at = NULL WHERE id = ?1 AND status = 'blocked'", [&task.id])?;
@@ -730,7 +730,11 @@ fn handle_denial(
 ) -> AppResult<()> {
     let mut ended = outcome.clone();
     ended.status = "failed".into();
-    if instruction.elevated_allowed && !task_elevated_before(conn, &task.id)? {
+    // 只有适配器从 CLI 事件里认出的拒绝才能触发自动提权；成员自己写的「受阻」不能被当成提权理由。
+    if instruction.elevated_allowed
+        && denial.source == crate::adapters::DenialSource::Adapter
+        && !task_elevated_before(conn, &task.id)?
+    {
         finish_run_with(conn, &run.id, outcome, "failed", &format!("权限受阻，已自动提权重跑：{}", denial.detail))?;
         // 任务回到待执行，由下一轮调度用高权限档重跑；同批其余任务保持待执行。
         conn.execute("UPDATE tasks SET status = 'pending' WHERE id = ?1", [&task.id])?;
@@ -770,7 +774,10 @@ fn report_denial(text: &str) -> Option<crate::adapters::Denial> {
         let line = line.trim();
         let rest = line.strip_prefix("受阻：").or_else(|| line.strip_prefix("受阻:"))?.trim();
         if rest.is_empty() { return None; }
-        Some(crate::adapters::Denial { tool: "成员报告".into(), detail: rest.chars().take(300).collect() })
+        Some(crate::adapters::Denial {
+            tool: "成员报告".into(), detail: rest.chars().take(300).collect(),
+            source: crate::adapters::DenialSource::MemberReport,
+        })
     })
 }
 
@@ -1586,7 +1593,9 @@ mod tests {
 
     fn denied_text(text: &str, detail: &str) -> RunOutcome {
         RunOutcome {
-            denial: Some(crate::adapters::Denial { tool: "命令".into(), detail: detail.into() }),
+            denial: Some(crate::adapters::Denial {
+                tool: "命令".into(), detail: detail.into(), source: crate::adapters::DenialSource::Adapter,
+            }),
             ..ok_text(text)
         }
     }
@@ -1847,12 +1856,40 @@ mod tests {
 
         let instruction = authorize_blocked_task(&conn, &task.id).unwrap();
         assert_eq!(instruction.status, "running");
-        assert!(instruction.elevated_allowed);
+        assert!(!instruction.elevated_allowed, "手动授权只对这次重试有效，不能打开常驻开关");
         assert_eq!(instructions::get_task(&conn, &task.id).unwrap().status, "pending");
         let retry = advance(&conn, &project_id).unwrap().remove(0);
         assert!(retry.elevated);
         apply_outcome(&conn, &retry.run_id, &ok_text("授权后提交成功")).unwrap();
         assert_eq!(instructions::get_task(&conn, &task.id).unwrap().status, "done");
+    }
+
+    #[test]
+    fn manual_authorization_does_not_cover_later_tasks() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap().remove(0);
+        let assign = fence("分两步。", r#"{"action":"assign","decision":"分两步","tasks":[{"to":"前端","title":"第一步","detail":"做第一步"},{"to":"前端","title":"第二步","detail":"做第二步"}]}"#);
+        apply_outcome(&conn, &leader.run_id, &ok_text(&assign)).unwrap();
+
+        let first = advance(&conn, &project_id).unwrap().remove(0);
+        apply_outcome(&conn, &first.run_id, &denied_text("第一步被拒", "git commit：Permission denied")).unwrap();
+        let tasks = instructions::list_tasks(&conn, &instructions::active_instruction(&conn, &project_id).unwrap().unwrap().id).unwrap();
+        assert_eq!(tasks[0].status, "blocked");
+        assert_eq!(tasks[1].status, "pending");
+        authorize_blocked_task(&conn, &tasks[0].id).unwrap();
+        let retry = advance(&conn, &project_id).unwrap().remove(0);
+        assert!(retry.elevated);
+        apply_outcome(&conn, &retry.run_id, &ok_text("第一步完成")).unwrap();
+
+        // 第二步仍按标准档位运行；再次被拒时只能等用户授权，不继承第一次的手动授权。
+        let second = advance(&conn, &project_id).unwrap().remove(0);
+        assert!(!second.elevated);
+        apply_outcome(&conn, &second.run_id, &denied_text("第二步被拒", "git commit：Permission denied")).unwrap();
+        let instruction = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(instruction.status, "waiting_user");
+        let tasks = instructions::list_tasks(&conn, &instruction.id).unwrap();
+        assert_eq!(tasks[1].status, "blocked");
     }
 
     #[test]
@@ -1864,6 +1901,19 @@ mod tests {
         let instruction = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
         assert_eq!(instruction.status, "waiting_user");
         assert_eq!(instructions::list_tasks(&conn, &instruction.id).unwrap()[0].status, "blocked");
+    }
+
+    #[test]
+    fn member_reported_denial_never_triggers_automatic_elevation() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        projects::set_elevation_allowed(&conn, &project_id, true).unwrap();
+        start_team(&conn, &project_id);
+        let exec = assign_one(&conn, &project_id);
+        apply_outcome(&conn, &exec.run_id, &ok_text("改了文件。\n受阻：git commit｜Permission denied")).unwrap();
+        let instruction = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(instruction.status, "waiting_user", "成员报告的受阻不能自己换来高权限");
+        assert_eq!(instructions::list_tasks(&conn, &instruction.id).unwrap()[0].status, "blocked");
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
     }
 
     /// 给运行写入可区分的模型值，返回期望的 model_info。

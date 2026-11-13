@@ -239,7 +239,9 @@ pub async fn run_turn_managed(
                     AgentEvent::ToolDenied { tool, detail } => {
                         out.tool_seen = true;
                         if out.denial.is_none() {
-                            out.denial = Some(crate::adapters::Denial { tool: tool.clone(), detail: detail.clone() });
+                            out.denial = Some(crate::adapters::Denial {
+                                tool: tool.clone(), detail: detail.clone(), source: crate::adapters::DenialSource::Adapter,
+                            });
                         }
                     }
                     AgentEvent::TurnCompleted { final_text, usage } => { completed = true; out.final_text = final_text.clone(); out.usage = usage.clone(); }

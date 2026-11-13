@@ -45,11 +45,20 @@ pub struct Usage {
     pub raw_usage: Option<serde_json::Value>,
 }
 
+/// 拒绝证据的来源。只有适配器从 CLI 事件流里识别出的拒绝可以触发自动提权；
+/// 成员在正文里报告的受阻一律等用户授权。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenialSource {
+    Adapter,
+    MemberReport,
+}
+
 /// 一次权限拒绝的证据。`detail` 只放操作和首行原因，不放完整原始输出。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Denial {
     pub tool: String,
     pub detail: String,
+    pub source: DenialSource,
 }
 
 #[derive(Debug, Clone, PartialEq)]
