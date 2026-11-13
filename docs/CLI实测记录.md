@@ -465,3 +465,9 @@ Task 9 清单 1–5、8 已通过；其中旧第 2 项的“禁用模型框”�
 流式正文在 `message_update.assistantMessageEvent` 的 `text_delta` 中。工具以 `tool_execution_start/end` 配对；同一用户回合可有多个 `turn_end`，按其 assistant 消息归集用量，不再重复读取 `message_end` 和 `agent_end.messages`。例如讨论样本第二子轮 `input=148`、`cacheRead=896`、`output=11`、`totalTokens=1055`；缓存和非缓存输入分开，`totalFromProvider=false` 的零费用不当成真实零。最后出现 `agent_end` 和 `agent_settled`。本轮样本没有验证跨模式、Windows 或操作系统级文件隔离。
 
 脱敏事件见 `src-tauri/tests/fixtures/pi/`，接线方案与验收见 M5 Task 8。
+
+## 2026-11-13 Windows 原生核心流程补验
+
+在 d1b2456 基线的真实 Tauri 窗口完成七项核心冒烟。Claude 2.1.323 官方账号验证阻断，用户明确决定改用其他 CLI，后续由 Codex 0.167.2 / gpt-6.1-sol / low 担任组长；不将该失败写成 Claude 通过。Grok 1.0.77 / grok-4.7 / low 的跨模式新会话写入、直接执行与续接通过；Dsh 0.2.2-rc.1 / Web/gpt/gpt-6.1-sol/low 的完整团队、独立团队用量、普通 write/read 直接执行与同会话续接通过。两者并行讨论停止后运行 cancelled、无关联残留。
+
+Codex 普通 .git/index.lock 拒绝后自动单次 danger-full-access 重跑，真实提交仅含指定文件，后续恢复 workspace-write；实际 low 参数保留。Dsh 团队终端初次 ACL 失败后经原生单次授权成功，失败保留，不外推原采样“无需提权”。失败／取消／中断模型未确认提示均通过，超时未测。原数据恢复并逐表一致。详细 ID、用量、字节、截图和限制集中在 [Windows 验收记录](验收记录-2026-11-13-Windows.md)，本节不重复历史测试数字。
