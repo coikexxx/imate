@@ -50,6 +50,10 @@ export const api = {
   listInstructions: (projectId: string) => invoke<Instruction[]>("list_instructions", { projectId }),
   resumeInstruction: (instructionId: string, action: "retry" | "supplement" | "abandon", note?: string | null) =>
     invoke<Instruction>("resume_instruction", { instructionId, action, note: note ?? null }),
+  retryBlockedTask: (taskId: string) => invoke<Instruction>("retry_blocked_task", { taskId }),
+  getProjectElevation: (projectId: string) => invoke<boolean>("get_project_elevation", { projectId }),
+  saveProjectElevation: (projectId: string, allowed: boolean) =>
+    invoke<boolean>("save_project_elevation", { projectId, allowed }),
   listTasks: (instructionId: string) => invoke<TaskItem[]>("list_tasks", { instructionId }),
   getProjectRuntime: (projectId: string) => invoke<ProjectRuntime>("get_project_runtime", { projectId }),
   confirmRuntimeCleanup: (runId: string) => invoke<void>("confirm_runtime_cleanup", { runId }),

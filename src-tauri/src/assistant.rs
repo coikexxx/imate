@@ -378,7 +378,7 @@ pub async fn run_draft(app: tauri::AppHandle, state: &AppState, kind: DraftKind,
                 .map(|session| (session.partial_text.clone(), session.session_id.clone()))).unwrap_or_default();
             state.finish_draft(&started, crate::runner::RunOutcome { status: "failed".into(), session_id,
                 final_text: String::new(), partial_text: partial, usage: None, exit_code: None,
-                error: Some("助理任务异常退出，请人工检查残留进程".into()), tool_seen: false, cleanup_complete: false })
+                error: Some("助理任务异常退出，请人工检查残留进程".into()), tool_seen: false, cleanup_complete: false, denial: None })
         }
     }
 }
@@ -419,7 +419,7 @@ mod tests {
     }
     fn outcome(raw: &str) -> crate::runner::RunOutcome {
         crate::runner::RunOutcome { status: "ok".into(), session_id: Some("会话甲".into()), final_text: raw.into(), partial_text: raw.into(),
-            usage: None, exit_code: Some(0), error: None, tool_seen: false, cleanup_complete: true }
+            usage: None, exit_code: Some(0), error: None, tool_seen: false, cleanup_complete: true, denial: None }
     }
     #[test]
     fn preserves_fenced_markdown_and_parses_multiple_files() {

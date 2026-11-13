@@ -30,6 +30,7 @@ pub struct ProjectSummary {
 }
 
 const COLUMNS: &str = "id, name, description, folder_path, status, created_at, updated_at";
+const ELEVATION_PREFIX: &str = "project_elevation:";
 
 fn from_row(row: &Row) -> rusqlite::Result<Project> {
     Ok(Project {
@@ -134,12 +135,31 @@ pub fn update(
     get(conn, id)
 }
 
+/// 项目默认是否允许执行任务在权限受阻时自动提权重跑。默认关闭。
+pub fn elevation_allowed(conn: &Connection, project_id: &str) -> AppResult<bool> {
+    let value: Option<String> = conn
+        .query_row("SELECT value FROM settings WHERE key = ?1", [format!("{ELEVATION_PREFIX}{project_id}")], |row| row.get(0))
+        .optional()?;
+    Ok(value.as_deref() == Some("1"))
+}
+
+/// 保存项目的高权限执行开关。只影响之后新建的指令。
+pub fn set_elevation_allowed(conn: &Connection, project_id: &str, allowed: bool) -> AppResult<()> {
+    get(conn, project_id)?;
+    conn.execute(
+        "INSERT INTO settings(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![format!("{ELEVATION_PREFIX}{project_id}"), if allowed { "1" } else { "0" }],
+    )?;
+    Ok(())
+}
+
 /// 只删除应用内的记录（成员等随外键级联删除），不动项目文件夹。
 pub fn delete(conn: &Connection, id: &str) -> AppResult<()> {
     let changed = conn.execute("DELETE FROM projects WHERE id = ?1", [id])?;
     if changed == 0 {
         return Err(AppError::NotFound(format!("项目 {id}")));
     }
+    conn.execute("DELETE FROM settings WHERE key = ?1", [format!("{ELEVATION_PREFIX}{id}")])?;
     Ok(())
 }
 
@@ -221,6 +241,20 @@ mod tests {
             update(&conn, "nope", "x", "", "D:/x"),
             Err(AppError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn elevation_is_off_by_default_and_saved_per_project() {
+        let conn = open_in_memory().unwrap();
+        let first = create(&conn, "甲", "", "D:/a").unwrap();
+        let second = create(&conn, "乙", "", "D:/b").unwrap();
+        assert!(!elevation_allowed(&conn, &first.id).unwrap());
+        set_elevation_allowed(&conn, &first.id, true).unwrap();
+        assert!(elevation_allowed(&conn, &first.id).unwrap());
+        assert!(!elevation_allowed(&conn, &second.id).unwrap(), "开关按项目隔离");
+        assert!(matches!(set_elevation_allowed(&conn, "nope", true), Err(AppError::NotFound(_))));
+        delete(&conn, &first.id).unwrap();
+        assert!(!elevation_allowed(&conn, &first.id).unwrap(), "删除项目时清掉开关");
     }
 
     #[test]

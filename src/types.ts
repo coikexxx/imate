@@ -162,6 +162,7 @@ export interface Instruction {
   createdAt: number;
   updatedAt: number;
   finishedAt: number | null;
+  elevatedAllowed: boolean;
 }
 
 export interface TaskItem {

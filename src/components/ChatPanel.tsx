@@ -9,6 +9,7 @@ import { attachProjectEvents, projectStore } from "../stores/project";
 import type { Agent, Instruction, ProjectStatus, TaskItem } from "../types";
 import { InstructionBar } from "./InstructionBar";
 import { Button, inputClass } from "./ui";
+import { Switch } from "./Switch";
 import { Icon } from "./Icon";
 
 interface Props { projectId: string; agents: Agent[]; folderExists: boolean; mention?: string; onMentionUsed?: () => void; onFinished?: () => void }
@@ -24,6 +25,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [supplement, setSupplement] = useState("");
   const [acting, setActing] = useState(false);
+  const [allowElevated, setAllowElevated] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const tail = useRef<HTMLDivElement>(null);
 
@@ -48,8 +50,9 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       }
     });
     subscription.ready.then(async () => {
-      const [history, runtime, detail, found] = await Promise.all([
-        api.listMessages(projectId), api.getProjectRuntime(projectId), api.getProject(projectId), api.listInstructions(projectId),
+      const [history, runtime, detail, found, elevation] = await Promise.all([
+        api.listMessages(projectId), api.getProjectRuntime(projectId), api.getProject(projectId),
+        api.listInstructions(projectId), api.getProjectElevation(projectId).catch(() => false),
       ]);
       if (disposed) return;
       const current = found[0] ?? null;
@@ -59,6 +62,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       setProjectStatus(detail.project.status);
       setInstruction(current);
       setTasks(taskPage);
+      setAllowElevated(elevation);
       setReady(true);
     }).catch((error) => { if (!disposed) { projectStore.getState().setError(String(error)); setReady(false); } });
     return () => { disposed = true; subscription.dispose(); };
@@ -79,6 +83,8 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
     if ("error" in recipient) { state.setError(recipient.error); return; }
     const content = input.trim(); state.setSending(true); state.setError(null);
     try {
+      // 先落盘开关，保证本次指令创建时快照到的是用户刚选的档位。
+      await api.saveProjectElevation(projectId, allowElevated);
       const result = await api.sendMessage(projectId, content);
       if (projectStore.getState().projectId !== projectId) return;
       projectStore.getState().applyEvent("message:new", { projectId, runId: result.runId, message: result.userMessage });
@@ -132,6 +138,25 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
     } catch (error) { if (projectStore.getState().projectId === projectId) state.setError(String(error)); }
     finally { if (projectStore.getState().projectId === projectId) setActing(false); }
   }
+  async function authorizeElevated(taskId: string) {
+    if (acting) return;
+    setActing(true);
+    state.setError(null);
+    try {
+      await api.retryBlockedTask(taskId);
+      await refreshTeam();
+      onFinished?.();
+    } catch (error) { if (projectStore.getState().projectId === projectId) state.setError(String(error)); }
+    finally { if (projectStore.getState().projectId === projectId) setActing(false); }
+  }
+  async function toggleElevation(next: boolean) {
+    setAllowElevated(next);
+    try { await api.saveProjectElevation(projectId, next); }
+    catch (error) {
+      setAllowElevated(!next);
+      if (projectStore.getState().projectId === projectId) state.setError(String(error));
+    }
+  }
   async function cleanup(runId: string) {
     const accepted = await confirm("请先在终端或活动监视器中确认该目录相关的残留 CLI 及子进程已停止，并检查文件修改。确认后解除此运行的目录阻塞。", {
       title: "确认已人工处理残留进程", kind: "warning",
@@ -177,7 +202,8 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
     {projectMatches && state.error && <p role="alert" className="px-3 py-2 text-xs text-red-300">{state.error}</p>}
     {projectMatches && <InstructionBar projectStatus={projectStatus} instruction={instruction} tasks={tasks} agents={agents}
       supplement={supplement} busy={acting || busy} onSupplementChange={setSupplement}
-      onRetry={() => void resume("retry")} onSupplement={() => void resume("supplement", supplement)} onAbandon={() => void resume("abandon")} />}
+      onRetry={() => void resume("retry")} onSupplement={() => void resume("supplement", supplement)} onAbandon={() => void resume("abandon")}
+      onAuthorizeElevated={(taskId) => void authorizeElevated(taskId)} />}
     <div className="studio-composer">
       {candidates.length > 0 && <div className="mb-2 flex flex-wrap gap-1">{candidates.map((agent) => <Button key={agent.id} onClick={() => { setInput(`@${agent.name} `); textarea.current?.focus(); }}>@{agent.name}</Button>)}</div>}
       <textarea ref={textarea} className={`${inputClass} resize-none !rounded-xl !bg-white !px-4 !py-3`} rows={3} aria-label="消息内容" placeholder="给组长下发任务，或 @成员" value={input}
@@ -185,11 +211,17 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
           if (shouldSendOnEnter({ key: event.key, shiftKey: event.shiftKey, isComposing: event.nativeEvent.isComposing, keyCode: event.nativeEvent.keyCode })) { event.preventDefault(); void send(); }
         }} />
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-[11px] text-slate-500"><kbd className="rounded border border-slate-700 bg-white px-1">Enter</kbd> 发送 · Shift+Enter 换行</p>
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="text-[11px] text-slate-500"><kbd className="rounded border border-slate-700 bg-white px-1">Enter</kbd> 发送 · Shift+Enter 换行</p>
+          <div className="flex items-center gap-2 text-[11px] text-slate-500" title="开启后，执行任务被权限拦截时会用最高权限自动重跑一次；只影响之后新建的指令，可写 .git、可删文件。">
+            <Switch checked={allowElevated} disabled={!folderExists} label="受阻时自动提权" onChange={(next) => void toggleElevation(next)} />
+            <span>受阻时自动提权</span>
+          </div>
+        </div>
         <div className="flex shrink-0 gap-2"><Button variant="danger" disabled={!projectMatches || !state.activeRunId || stopping} onClick={stop}>{stopping ? "正在停止…" : "停止"}</Button>
           <Button variant="primary" disabled={!ready || busy || !input.trim() || !folderExists || state.cleanupRequired.length > 0} onClick={send}>发送指令<Icon name="arrow" width="16" height="16" /></Button></div>
       </div>
-      <p className="mt-3 text-xs leading-5 text-slate-500">执行自动运行工具，可能写出项目目录；沿用 CLI 配置。</p>
+      <p className="mt-3 text-xs leading-5 text-slate-500">执行自动运行工具，可能写出项目目录；沿用 CLI 配置。开启自动提权后，受阻任务会用最高权限重跑一次，并恢复原档位。</p>
     </div>
   </section>;
 }

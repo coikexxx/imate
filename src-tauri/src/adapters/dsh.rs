@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use serde_json::{json, Value};
 use super::{AgentEvent, CliAdapter, CommandSpec, RunMode, TurnRequest, Usage};
@@ -11,7 +11,8 @@ pub struct DshAdapter {
     program: PathBuf,
     path_env: Option<std::ffi::OsString>,
     mode: RunMode,
-    active_tools: HashSet<String>,
+    elevated: bool,
+    active_tools: HashMap<String, String>,
     steps: Vec<Value>,
     had_text: bool,
     failed: bool,
@@ -33,9 +34,10 @@ fn reason_message(reason: &Value) -> String {
 
 impl DshAdapter {
     pub fn new(program: PathBuf, mode: RunMode) -> Self {
-        Self { program, path_env: None, mode, active_tools: HashSet::new(), steps: Vec::new(),
+        Self { program, path_env: None, mode, elevated: false, active_tools: HashMap::new(), steps: Vec::new(),
             had_text: false, failed: false, completed: false, settings: DshSettings::default(), catalog: None }
     }
+    pub fn with_elevation(mut self, elevated: bool) -> Self { self.elevated = elevated; self }
     pub fn with_environment(mut self, resolved: &ResolvedCli) -> Self {
         self.program = resolved.program.clone();
         self.path_env = Some(resolved.path_env.clone());
@@ -60,8 +62,13 @@ impl DshAdapter {
 impl CliAdapter for DshAdapter {
     fn id(&self) -> &'static str { "dsh" }
     fn detect(&self) -> Option<CliInfo> { cli_registry::resolve_cli(self.id()).ok().map(|cli| cli.info) }
+    fn set_elevated(&mut self, elevated: bool) { self.elevated = elevated; }
     fn build_command(&self, req: &TurnRequest) -> CommandSpec {
-        let permission = match self.mode { RunMode::Discuss => "read-only", RunMode::Execute => "workspace-write" };
+        let permission = match self.mode {
+            RunMode::Discuss => "read-only",
+            RunMode::Execute if self.elevated => "danger-full-access",
+            RunMode::Execute => "workspace-write",
+        };
         let mut args: Vec<String> = vec!["headless".into(), "--json".into()];
         if let Some(id) = &req.session_id { args.extend(["--session-id".into(), id.clone()]); }
         args.extend(["--permission-mode".into(), permission.into(), "--approval-policy".into(), "never".into(), "-".into()]);
@@ -93,15 +100,22 @@ impl CliAdapter for DshAdapter {
             }
             Some("tool_call") => {
                 let Some(id) = v["callId"].as_str() else { return vec![]; };
-                if !self.active_tools.insert(id.into()) { return vec![]; }
+                let tool = v["tool"].as_str().unwrap_or("工具").to_string();
+                if self.active_tools.insert(id.into(), tool.clone()).is_some() { return vec![]; }
                 // 只报工具名，不带参数。
-                vec![AgentEvent::ToolUse { name: v["tool"].as_str().unwrap_or("工具").into(), summary: "正在运行工具".into() },
+                vec![AgentEvent::ToolUse { name: tool, summary: "正在运行工具".into() },
                     AgentEvent::ToolState { active: true }]
             }
             Some("tool_result") => {
                 let Some(id) = v["callId"].as_str() else { return vec![]; };
-                self.active_tools.remove(id);
-                vec![AgentEvent::ToolState { active: !self.active_tools.is_empty() }]
+                let tool = self.active_tools.remove(id).unwrap_or_else(|| "工具".into());
+                let mut events = vec![AgentEvent::ToolState { active: !self.active_tools.is_empty() }];
+                if v["status"].as_str() == Some("error") {
+                    if let Some(detail) = tool_denial(&tool, &v) {
+                        events.push(AgentEvent::ToolDenied { tool, detail });
+                    }
+                }
+                events
             }
             Some("status") => match v["phase"].as_str() {
                 Some("step_end") => {
@@ -120,6 +134,19 @@ impl CliAdapter for DshAdapter {
             _ => vec![],
         }
     }
+}
+
+/// 工具报错里认出权限拒绝。Dsh 的沙箱拒绝带 `error.code`，结果文本也有说明。
+fn tool_denial(tool: &str, v: &Value) -> Option<String> {
+    let error = &v["error"];
+    let code = error["code"].as_str().unwrap_or("");
+    let message = error["message"].as_str().or_else(|| v["result"].as_str()).unwrap_or("");
+    let known = ["SANDBOX", "PERMISSION", "DENIED"].iter().any(|needle| code.to_uppercase().contains(needle));
+    if !known && !super::looks_like_permission_denial(message) && !super::looks_like_permission_denial(code) {
+        return None;
+    }
+    let text = if message.is_empty() { code } else { message };
+    Some(format!("{tool}：{}", super::denial_detail(text)))
 }
 
 #[cfg(test)]
@@ -235,9 +262,10 @@ mod tests {
         let mut adapter = DshAdapter::new("dsh".into(), RunMode::Discuss);
         assert!(matches!(adapter.parse_line(r#"{"type":"tool_call","callId":"c1","tool":"write","input":{"file_path":"x"}}"#).as_slice(),
             [AgentEvent::ToolUse { .. }, AgentEvent::ToolState { active: true }]));
-        // 只读沙箱拒绝写入是一次工具失败，回合照常继续。
-        assert_eq!(adapter.parse_line(r#"{"type":"tool_result","callId":"c1","status":"error","error":{"name":"FsError","code":"FS_SANDBOX_DENIED"}}"#),
-            vec![AgentEvent::ToolState { active: false }]);
+        // 只读沙箱拒绝写入是一次工具失败，回合照常继续；同时要作为受阻证据上报。
+        let events = adapter.parse_line(r#"{"type":"tool_result","callId":"c1","status":"error","error":{"name":"FsError","code":"FS_SANDBOX_DENIED"},"result":"file access denied under read-only mode"}"#);
+        assert!(matches!(events.as_slice(), [AgentEvent::ToolState { active: false }, AgentEvent::ToolDenied { tool, detail }]
+            if tool == "write" && detail.contains("access denied")));
         adapter.parse_line(r#"{"type":"status","phase":"step_end","turn":1,"step":1,"usage":{"inputTokens":5,"outputTokens":2}}"#);
         let events = adapter.parse_line(r#"{"type":"final","sessionId":"s","reason":{"kind":"completed"},"text":"写不了"}"#);
         assert!(matches!(events.as_slice(), [AgentEvent::TurnCompleted { final_text, usage: Some(usage) }]
@@ -246,6 +274,25 @@ mod tests {
         let mut bare = DshAdapter::new("dsh".into(), RunMode::Discuss);
         assert!(matches!(bare.parse_line(r#"{"type":"final","sessionId":"s","reason":{"kind":"completed"},"text":"好"}"#).as_slice(),
             [AgentEvent::TurnCompleted { usage: None, .. }]));
+    }
+
+    #[test]
+    fn ordinary_tool_error_is_not_reported_as_a_denial() {
+        let mut adapter = DshAdapter::new("dsh".into(), RunMode::Discuss);
+        adapter.parse_line(r#"{"type":"tool_call","callId":"c1","tool":"read","input":{"file_path":"missing"}}"#);
+        let events = adapter.parse_line(r#"{"type":"tool_result","callId":"c1","status":"error","error":{"name":"FsError","code":"ENOENT"},"result":"no such file or directory"}"#);
+        assert!(!events.iter().any(|event| matches!(event, AgentEvent::ToolDenied { .. })));
+    }
+
+    #[test]
+    fn elevated_execute_uses_danger_full_access() {
+        let request = TurnRequest { prompt: "做".into(), session_id: None, cwd: "/tmp".into(), mode: RunMode::Execute, model: None };
+        let spec = DshAdapter::new("dsh".into(), RunMode::Execute).with_elevation(true).build_command(&request);
+        assert!(spec.args.windows(2).any(|args| args == ["--permission-mode", "danger-full-access"]));
+        let mut discuss = DshAdapter::new("dsh".into(), RunMode::Discuss);
+        discuss.set_elevated(true);
+        let spec = discuss.build_command(&request);
+        assert!(spec.args.windows(2).any(|args| args == ["--permission-mode", "read-only"]));
     }
 
     #[test]

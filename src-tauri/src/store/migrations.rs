@@ -121,6 +121,9 @@ ALTER TABLE agents ADD COLUMN name_key TEXT;
 ALTER TABLE runs ADD COLUMN requested_model TEXT;
 ALTER TABLE runs ADD COLUMN reported_model TEXT;
 ALTER TABLE messages ADD COLUMN run_id TEXT;
+"#, r#"
+ALTER TABLE instructions ADD COLUMN elevated_allowed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE runs ADD COLUMN elevated INTEGER NOT NULL DEFAULT 0;
 "#];
 
 /// 把数据库升级到最新版本。版本号记在 `PRAGMA user_version`。
@@ -215,6 +218,31 @@ mod tests {
         assert_eq!((requested, reported), (None, None));
         let run_id: Option<String> = conn.query_row("SELECT run_id FROM messages", [], |row| row.get(0)).unwrap();
         assert_eq!(run_id, None);
+    }
+
+    #[test]
+    fn blocked_elevation_migration_adds_columns_and_defaults_to_off() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let previous = 3;
+        for sql in &MIGRATIONS[..previous] { conn.execute_batch(sql).unwrap(); }
+        conn.pragma_update(None, "user_version", previous as i64).unwrap();
+        conn.execute("INSERT INTO projects (id,name,description,folder_path,status,created_at,updated_at) VALUES ('p','甲','','/tmp','idle',1,1)", []).unwrap();
+        conn.execute("INSERT INTO messages (project_id,sender_type,kind,content,created_at) VALUES ('p','user','instruction','做',1)", []).unwrap();
+        let message_id: i64 = conn.query_row("SELECT id FROM messages", [], |row| row.get(0)).unwrap();
+        conn.execute("INSERT INTO instructions (id,project_id,source_message_id,kind,phase,status,created_at,updated_at) VALUES ('i','p',?1,'team','triage','running',1,1)", [message_id]).unwrap();
+        conn.execute("INSERT INTO runs (id,mode,command,started_at,status) VALUES ('r','execute','{}',1,'ok')", []).unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let columns = |table: &str| -> Vec<String> {
+            let mut statement = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap();
+            statement.query_map([], |row| row.get::<_, String>(1)).unwrap().map(|name| name.unwrap()).collect()
+        };
+        assert!(columns("instructions").contains(&"elevated_allowed".to_string()));
+        assert!(columns("runs").contains(&"elevated".to_string()));
+        let allowed: bool = conn.query_row("SELECT elevated_allowed FROM instructions WHERE id='i'", [], |row| row.get(0)).unwrap();
+        let elevated: bool = conn.query_row("SELECT elevated FROM runs WHERE id='r'", [], |row| row.get(0)).unwrap();
+        assert!(!allowed && !elevated, "旧数据默认关闭高权限且未提权");
     }
 
     #[test]

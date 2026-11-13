@@ -45,6 +45,13 @@ pub struct Usage {
     pub raw_usage: Option<serde_json::Value>,
 }
 
+/// 一次权限拒绝的证据。`detail` 只放操作和首行原因，不放完整原始输出。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Denial {
+    pub tool: String,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     SessionStarted { session_id: String },
@@ -53,6 +60,8 @@ pub enum AgentEvent {
     TextDelta { text: String },
     ToolUse { name: String, summary: String },
     ToolState { active: bool },
+    /// 工具被权限拦截。适配器只上报能识别的拒绝；识别不了由成员汇报兜底。
+    ToolDenied { tool: String, detail: String },
     TurnCompleted { final_text: String, usage: Option<Usage> },
     Error { message: String },
 }
@@ -67,12 +76,32 @@ pub(crate) fn model_event(value: &serde_json::Value) -> Option<AgentEvent> {
     Some(AgentEvent::ModelReported { model: model.into() })
 }
 
+/// 从 CLI 文本里认出权限拒绝。宁可漏认，交给成员汇报兜底，也不把普通失败当成受阻。
+pub(crate) fn looks_like_permission_denial(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    ["permission denied", "access is denied", "operation not permitted", "eperm",
+        "fs_sandbox_denied", "sandbox_denied", "read-only file system", "readonly file system",
+        "拒绝访问", "权限不足", "权限被拒绝", "无权限操作"]
+        .iter().any(|needle| lower.contains(needle))
+}
+
+/// 拒绝说明：只保留第一段有意义的文本，压掉换行和控制字符，最多 300 个字符。
+pub(crate) fn denial_detail(text: &str) -> String {
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
+    let cleaned: String = line.chars().map(|ch| if ch.is_control() { ' ' } else { ch }).collect();
+    let trimmed = cleaned.trim();
+    if trimmed.chars().count() <= 300 { trimmed.to_string() }
+    else { trimmed.chars().take(300).collect::<String>() + "…" }
+}
+
 pub trait CliAdapter: Send + Sync {
     fn id(&self) -> &'static str;
     fn detect(&self) -> Option<CliInfo>;
     fn build_command(&self, req: &TurnRequest) -> CommandSpec;
     /// 只覆盖本次子进程的环境；None 表示移除继承的变量。
     fn environment(&self) -> Vec<(String, Option<String>)> { vec![] }
+    /// 本次回合是否使用用户授权的高权限档。默认不改变。
+    fn set_elevated(&mut self, _elevated: bool) {}
     fn parse_line(&mut self, line: &str) -> Vec<AgentEvent>;
 }
 

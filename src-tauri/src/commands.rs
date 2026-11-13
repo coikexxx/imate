@@ -1176,7 +1176,7 @@ async fn execute_project(app: tauri::AppHandle, mut started: StartedMessage, cli
             Err(error) => {
                 let outcome = crate::runner::RunOutcome { status: "failed".into(), session_id: started.request.session_id.clone(),
                     final_text: String::new(), partial_text: String::new(), usage: None, exit_code: None,
-                    error: Some(error.to_string()), tool_seen: false, cleanup_complete: true };
+                    error: Some(error.to_string()), tool_seen: false, cleanup_complete: true, denial: None };
                 if let Ok(events) = app.state::<AppState>().finish_project(&started, outcome) { emit_events(&app, events); }
                 return;
             }
@@ -1377,10 +1377,11 @@ async fn run_orchestrated(
         .and_then(|conn| session.as_deref().and_then(|id| runs::latest_usage(&conn, &agent.id, id).ok().flatten()))
         .and_then(|value| serde_json::from_value(value).ok());
     // 与直接点名路径一致：带上代理环境和 Dsh 设置。它自己会拿数据库锁，调用时不能持有锁。
-    let adapter = match state.make_runtime_adapter(&cli, mode, baseline) {
+    let mut adapter = match state.make_runtime_adapter(&cli, mode, baseline) {
         Ok(adapter) => adapter,
         Err(error) => return refuse(&error.to_string()),
     };
+    adapter.set_elevated(spec.elevated);
     let request = crate::adapters::TurnRequest { prompt: spec.prompt.clone(), session_id: session,
         cwd: folder.clone(), mode, model: agent.model.clone() };
     record_requested_model(&state, &spec.run_id, request.model.as_deref());
@@ -1496,6 +1497,46 @@ pub fn list_tasks(state: State<'_, AppState>, instruction_id: String) -> AppResu
 }
 
 #[tauri::command]
+pub fn get_project_elevation(state: State<'_, AppState>, project_id: String) -> AppResult<bool> {
+    let conn = lock(&state)?;
+    projects::elevation_allowed(&conn, &project_id)
+}
+
+#[tauri::command]
+pub fn save_project_elevation(state: State<'_, AppState>, project_id: String, allowed: bool) -> AppResult<bool> {
+    let conn = lock(&state)?;
+    projects::set_elevation_allowed(&conn, &project_id, allowed)?;
+    Ok(allowed)
+}
+
+/// 用户在受阻任务上点「授权并继续」：只对这条指令有效，随后自动用最高权限重跑。
+#[tauri::command]
+pub async fn retry_blocked_task(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    task_id: String,
+) -> AppResult<crate::store::instructions::Instruction> {
+    let instruction = {
+        let conn = state.db_lock()?;
+        crate::orchestrator::authorize_blocked_task(&conn, &task_id)?
+    };
+    let project_id = instruction.project_id.clone();
+    let specs = {
+        let conn = state.db_lock()?;
+        match crate::orchestrator::advance(&conn, &project_id) {
+            Ok(specs) => specs,
+            Err(error) => {
+                let _ = crate::orchestrator::stop_instruction(&conn, &project_id);
+                return Err(error);
+            }
+        }
+    };
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn(async move { drive_team(worker_app, project_id, specs).await; });
+    Ok(instruction)
+}
+
+#[tauri::command]
 pub async fn resume_instruction(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -1584,7 +1625,7 @@ mod integration_tests {
     }
     fn outcome(status: &str) -> crate::runner::RunOutcome {
         crate::runner::RunOutcome { status: status.into(), session_id: Some("thread".into()), final_text: "最终正文".into(),
-            partial_text: "部分正文".into(), usage: None, exit_code: Some(0), error: None, tool_seen: false, cleanup_complete: true }
+            partial_text: "部分正文".into(), usage: None, exit_code: Some(0), error: None, tool_seen: false, cleanup_complete: true, denial: None }
     }
     #[test]
     fn persisted_run_and_ownership_precede_start_and_failures_roll_back_reservation() {

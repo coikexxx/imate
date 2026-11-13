@@ -13,11 +13,12 @@ interface Props {
   onRetry: () => void;
   onSupplement: () => void;
   onAbandon: () => void;
+  onAuthorizeElevated: (taskId: string) => void;
 }
 
 export function InstructionBar({
   projectStatus, instruction, tasks, agents, supplement, busy,
-  onSupplementChange, onRetry, onSupplement, onAbandon,
+  onSupplementChange, onRetry, onSupplement, onAbandon, onAuthorizeElevated,
 }: Props) {
   const actions = instructionBarState({
     projectStatus,
@@ -25,17 +26,25 @@ export function InstructionBar({
     supplement,
   });
   if (!instruction && tasks.length === 0) return null;
+  const blocked = tasks.filter((task) => task.status === "blocked");
+  const canAuthorize = blocked.length > 0 && instruction?.status === "waiting_user";
   return <div className="border-t border-slate-800 px-3 py-2">
     {tasks.length > 0 && <ul aria-label="任务列表" className="mb-2 space-y-1 text-xs text-slate-300">
       {tasks.map((task) => {
         const row = taskRowLabel(task, agents);
-        return <li key={task.id}>{row.title} · {row.member} · {row.status}</li>;
+        return <li key={task.id} className={task.status === "blocked" ? "text-amber-200" : ""}>{row.title} · {row.member} · {row.status}</li>;
       })}
     </ul>}
+    {canAuthorize && <div className="mb-2 space-y-2 rounded-xl border border-amber-700 bg-amber-950/40 p-3 text-xs text-amber-100">
+      {blocked.map((task) => <div key={task.id}>
+        <p>任务「{task.title}」因权限受阻，未完成。授权只对这条指令有效，用完恢复原档位。</p>
+        <Button className="mt-2" disabled={busy} onClick={() => onAuthorizeElevated(task.id)}>授权并继续</Button>
+      </div>)}
+    </div>}
     {actions.showActions && <div className="space-y-2">
       {instruction?.waitReason && <p className="text-xs text-amber-200">{instruction.waitReason}</p>}
       <div className="flex flex-wrap items-center gap-2">
-        <Button disabled={busy} onClick={onRetry}>重试</Button>
+        {!canAuthorize && <Button disabled={busy} onClick={onRetry}>重试</Button>}
         <Button variant="danger" disabled={busy} onClick={onAbandon}>放弃</Button>
       </div>
       <div className="flex items-center gap-2">

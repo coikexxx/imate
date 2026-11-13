@@ -35,11 +35,13 @@ pub struct RunOutcome {
     pub error: Option<String>,
     pub tool_seen: bool,
     pub cleanup_complete: bool,
+    /// 这次回合里识别到的第一条权限拒绝。任务据此转为受阻，而不是当成完成。
+    pub denial: Option<crate::adapters::Denial>,
 }
 impl RunOutcome {
     fn failed(message: String) -> Self { Self { status: "failed".into(), session_id: None,
         final_text: String::new(), partial_text: String::new(), usage: None, exit_code: None,
-        error: Some(message), tool_seen: false, cleanup_complete: true } }
+        error: Some(message), tool_seen: false, cleanup_complete: true, denial: None } }
 }
 
 enum StreamEvent { Bytes(bool, Vec<u8>), Eof(bool), ReadError(bool), StdinDone(Result<(), std::io::Error>) }
@@ -233,6 +235,12 @@ pub async fn run_turn_managed(
                     AgentEvent::ToolState { active } => {
                         if *active { out.tool_seen = true; tool_start.get_or_insert(Instant::now()); }
                         else { tool_start = None; last_output = Instant::now(); }
+                    }
+                    AgentEvent::ToolDenied { tool, detail } => {
+                        out.tool_seen = true;
+                        if out.denial.is_none() {
+                            out.denial = Some(crate::adapters::Denial { tool: tool.clone(), detail: detail.clone() });
+                        }
                     }
                     AgentEvent::TurnCompleted { final_text, usage } => { completed = true; out.final_text = final_text.clone(); out.usage = usage.clone(); }
                     AgentEvent::Error { message } => { latched = Some("failed"); out.error = Some(message.clone()); }

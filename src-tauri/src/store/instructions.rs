@@ -26,6 +26,8 @@ pub struct Instruction {
     pub created_at: i64,
     pub updated_at: i64,
     pub finished_at: Option<i64>,
+    /// 用户允许这条指令在权限受阻时自动用最高权限重跑。
+    pub elevated_allowed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -80,7 +82,7 @@ pub struct InsertedBatch {
 
 const INSTRUCTION_COLUMNS: &str = "id, project_id, source_message_id, kind, target_agent_id, phase, status, \
      discuss_rounds, turn_count, current_batch, resume_phase, context_snapshot_json, wait_reason, \
-     created_at, updated_at, finished_at";
+     created_at, updated_at, finished_at, elevated_allowed";
 
 const TASK_COLUMNS: &str = "id, project_id, instruction_message_id, assignee_agent_id, title, detail, order_index, \
      status, rework_count, report_message_id, created_at, finished_at, instruction_id, batch_id, superseded_by_task_id";
@@ -109,6 +111,7 @@ fn instruction_from_row(row: &Row) -> rusqlite::Result<Instruction> {
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
         finished_at: row.get(15)?,
+        elevated_allowed: row.get(16)?,
     })
 }
 
@@ -394,13 +397,14 @@ pub fn insert_batch(
 }
 
 /// 结束一个任务。失败时把同批尚未开始的任务改为取消，不删除任何行。
+/// 受阻不算失败：保留同批未开始的任务，用户授权重试后还能继续这一批。
 pub fn finish_task(
     conn: &Connection,
     task_id: &str,
     status: &str,
     report_message_id: Option<i64>,
 ) -> AppResult<TaskRecord> {
-    if !matches!(status, "done" | "failed" | "cancelled") {
+    if !matches!(status, "done" | "failed" | "cancelled" | "blocked") {
         return Err(invalid("任务终态无效"));
     }
     let tx = conn.unchecked_transaction()?;

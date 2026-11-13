@@ -152,13 +152,16 @@ fn stage_body(stage: Stage, snapshot: &TeamSnapshot<'_>) -> AppResult<String> {
             };
             format!(
                 "# 成员执行\n任务编号：{}\n标题：{}\n详情：{}\n\
+如果某个操作被权限拦截且无法绕过，不要声称它已经完成；在汇报末尾单独一行写：\
+受阻：<操作>｜<原文摘要>。\n\
 完成后给出简短汇报：做了什么、改了哪些文件、还有什么遗留问题。\n\
 你只汇报自己的任务，不能宣布整条指令完成。",
                 task.id, task.title, task.detail.trim()
             )
         }
         Stage::Review => format!(
-            "# 组长验收\n对照项目规章和各成员的边界检查。违反规章或越界时用 rework 打回，rework 必须写任务编号。\n{}\n\n{PROTOCOL}",
+            "# 组长验收\n对照项目规章和各成员的边界检查。违反规章或越界时用 rework 打回，rework 必须写任务编号。\n\
+状态 blocked 表示任务因权限受阻没有完成，不算完成；它需要用户授权后才能重跑。\n{}\n\n{PROTOCOL}",
             format_tasks(snapshot.tasks)
         ),
         Stage::Intervention => format!(

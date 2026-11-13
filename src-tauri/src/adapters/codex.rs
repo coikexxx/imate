@@ -9,6 +9,7 @@ pub struct CodexAdapter {
     program: PathBuf,
     path_env: Option<std::ffi::OsString>,
     mode: RunMode,
+    elevated: bool,
     usage_baseline: Option<Usage>,
     resumed: AtomicBool,
     active_tools: HashSet<String>,
@@ -20,9 +21,10 @@ pub struct CodexAdapter {
 
 impl CodexAdapter {
     pub fn new(program: PathBuf, mode: RunMode, usage_baseline: Option<Usage>) -> Self {
-        Self { program, path_env: None, mode, usage_baseline, resumed: AtomicBool::new(false),
+        Self { program, path_env: None, mode, elevated: false, usage_baseline, resumed: AtomicBool::new(false),
             active_tools: HashSet::new(), final_text: String::new(), had_text: false, failed: false, completed: false }
     }
+    pub fn with_elevation(mut self, elevated: bool) -> Self { self.elevated = elevated; self }
     pub fn with_environment(mut self, resolved: &ResolvedCli) -> Self {
         self.program = resolved.program.clone(); self.path_env = Some(resolved.path_env.clone()); self
     }
@@ -52,11 +54,16 @@ impl CodexAdapter {
 impl CliAdapter for CodexAdapter {
     fn id(&self) -> &'static str { "codex" }
     fn detect(&self) -> Option<CliInfo> { cli_registry::resolve_cli(self.id()).ok().map(|cli| cli.info) }
+    fn set_elevated(&mut self, elevated: bool) { self.elevated = elevated; }
     fn build_command(&self, req: &TurnRequest) -> CommandSpec {
         self.resumed.store(req.session_id.is_some(), Ordering::Relaxed);
         let mut args = vec!["exec".into()];
         if let Some(id) = &req.session_id { args.extend(["resume".into(), id.clone()]); }
-        let sandbox = match self.mode { RunMode::Discuss => "read-only", RunMode::Execute => "workspace-write" };
+        let sandbox = match self.mode {
+            RunMode::Discuss => "read-only",
+            RunMode::Execute if self.elevated => "danger-full-access",
+            RunMode::Execute => "workspace-write",
+        };
         args.extend(["--json".into(), "--skip-git-repo-check".into(), "-c".into(),
             format!("sandbox_mode=\"{sandbox}\""), "-c".into(), "approval_policy=\"never\"".into()]);
         if let Some(model) = req.model.as_ref().filter(|m| !m.trim().is_empty()) { args.extend(["--model".into(), model.clone()]); }
@@ -95,7 +102,13 @@ impl CliAdapter for CodexAdapter {
                         let Some(id) = item["id"].as_str() else { return vec![]; };
                         if completed {
                             self.active_tools.remove(id);
-                            vec![AgentEvent::ToolState { active: !self.active_tools.is_empty() }]
+                            let mut events = vec![AgentEvent::ToolState { active: !self.active_tools.is_empty() }];
+                            if kind == "command_execution" {
+                                if let Some(detail) = command_denial(item) {
+                                    events.push(AgentEvent::ToolDenied { tool: "命令".into(), detail });
+                                }
+                            }
+                            events
                         } else if self.active_tools.insert(id.into()) {
                             vec![AgentEvent::ToolUse { name: kind.into(), summary: "正在运行工具".into() }, AgentEvent::ToolState { active: true }]
                         } else { vec![] }
@@ -111,6 +124,17 @@ impl CliAdapter for CodexAdapter {
             _ => vec![],
         }
     }
+}
+
+/// 命令失败且输出像权限拒绝时给出说明。普通失败不当作受阻。
+fn command_denial(item: &Value) -> Option<String> {
+    let failed = item["status"].as_str() == Some("failed") || item["exit_code"].as_i64().is_some_and(|code| code != 0);
+    if !failed { return None; }
+    let output = item["aggregated_output"].as_str().unwrap_or("");
+    if !super::looks_like_permission_denial(output) { return None; }
+    let command = item["command"].as_str().unwrap_or("命令").split_whitespace().collect::<Vec<_>>().join(" ");
+    let command = if command.chars().count() > 160 { command.chars().take(160).collect::<String>() + "…" } else { command };
+    Some(format!("{command}：{}", super::denial_detail(output)))
 }
 
 #[cfg(test)]
@@ -232,6 +256,42 @@ mod tests {
         let mut adapter = CodexAdapter::new("codex".into(), RunMode::Execute, None);
         assert!(matches!(adapter.parse_line(r#"{"type":"turn.failed","error":{"message":"启动失败"}}"#).as_slice(), [AgentEvent::Error { .. }]));
         assert!(adapter.parse_line(r#"{"type":"turn.completed","usage":{}}"#).is_empty());
+    }
+
+    #[test]
+    fn permission_denied_command_is_reported_as_a_denial_not_a_plain_failure() {
+        let mut adapter = CodexAdapter::new("codex".into(), RunMode::Execute, None);
+        let line = r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"git commit -m probe","aggregated_output":"fatal: Unable to create '.git/index.lock': Permission denied\n","exit_code":1,"status":"failed"}}"#;
+        let events = adapter.parse_line(line);
+        let denial = events.iter().find_map(|event| match event {
+            AgentEvent::ToolDenied { tool, detail } => Some((tool, detail)),
+            _ => None,
+        }).expect("应当识别为权限拒绝");
+        assert_eq!(denial.0, "命令");
+        assert!(denial.1.contains("git commit"));
+        assert!(denial.1.contains("Permission denied"));
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::ToolState { active: false })));
+    }
+
+    #[test]
+    fn ordinary_command_failure_and_success_are_not_denials() {
+        let mut adapter = CodexAdapter::new("codex".into(), RunMode::Execute, None);
+        let failed = r#"{"type":"item.completed","item":{"id":"a","type":"command_execution","command":"npm test","aggregated_output":"1 test failed\n","exit_code":1,"status":"failed"}}"#;
+        let success = r#"{"type":"item.completed","item":{"id":"b","type":"command_execution","command":"git commit -m ok","aggregated_output":"[master 1] ok\n","exit_code":0,"status":"completed"}}"#;
+        for line in [failed, success] {
+            assert!(!adapter.parse_line(line).iter().any(|event| matches!(event, AgentEvent::ToolDenied { .. })));
+        }
+    }
+
+    #[test]
+    fn elevated_execute_uses_danger_full_access_but_discuss_stays_read_only() {
+        let adapter = CodexAdapter::new("codex".into(), RunMode::Execute, None).with_elevation(true);
+        let spec = adapter.build_command(&request(None));
+        assert!(spec.args.windows(2).any(|args| args == ["-c", "sandbox_mode=\"danger-full-access\""]));
+        let mut discuss = CodexAdapter::new("codex".into(), RunMode::Discuss, None);
+        discuss.set_elevated(true);
+        let spec = discuss.build_command(&request(None));
+        assert!(spec.args.windows(2).any(|args| args == ["-c", "sandbox_mode=\"read-only\""]));
     }
 
 }

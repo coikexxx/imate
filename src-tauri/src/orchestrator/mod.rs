@@ -29,6 +29,8 @@ pub struct TurnSpec {
     pub mode: String,
     pub prompt: String,
     pub message_bound: i64,
+    /// 这次回合使用用户授权的高权限档。
+    pub elevated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +55,11 @@ struct StoredSnapshot {
     /// 运行中点名。不占用批次任务，做完后进入干预研判。
     #[serde(default)]
     mention: Option<StoredMention>,
+    /// 下一次执行要提权重跑的任务，以及上次被拒的说明。只消费一次。
+    #[serde(default)]
+    elevated_task: Option<String>,
+    #[serde(default)]
+    elevated_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +81,8 @@ impl Default for StoredSnapshot {
             stashed_phase: None,
             stashed_run_id: None,
             mention: None,
+            elevated_task: None,
+            elevated_reason: None,
         }
     }
 }
@@ -170,11 +179,13 @@ pub fn begin_user_instruction(conn: &Connection, project_id: &str, content: &str
     let kind = if mentioned { "direct" } else { "team" };
     let phase = if mentioned { "direct" } else { "triage" };
     let target = if mentioned { Some(agent.id.as_str()) } else { None };
+    // 项目开关在指令创建时快照：之后改设置不影响这条指令。
+    let elevated_allowed = projects::elevation_allowed(&tx, project_id)?;
     tx.execute(
         "INSERT INTO instructions (id, project_id, source_message_id, kind, target_agent_id, phase, status, \
-         discuss_rounds, turn_count, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', 0, 0, ?7, ?7)",
-        params![id, project_id, message.id, kind, target, phase, now],
+         discuss_rounds, turn_count, elevated_allowed, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', 0, 0, ?7, ?8, ?8)",
+        params![id, project_id, message.id, kind, target, phase, elevated_allowed, now],
     )?;
     tx.commit()?;
     instructions::get(conn, &id)
@@ -253,6 +264,50 @@ pub fn resume_instruction(conn: &Connection, instruction_id: &str, action: &str,
         "abandon" => abandon_instruction(conn, &instruction),
         _ => Err(invalid("未知的恢复操作")),
     }
+}
+
+/// 用户从受阻任务上授权：只对这条指令有效，把任务放回队列并用最高权限重跑。
+/// 这是唯一能打开高权限的入口，组长和成员协议里没有对应字段。
+pub fn authorize_blocked_task(conn: &Connection, task_id: &str) -> AppResult<Instruction> {
+    let task = instructions::get_task(conn, task_id)?;
+    if task.status != "blocked" {
+        return Err(invalid("只有受阻的任务可以授权重试"));
+    }
+    let instruction_id = task.instruction_id.clone().ok_or_else(|| invalid("任务没有关联指令"))?;
+    let instruction = instructions::get(conn, &instruction_id)?;
+    if instruction.status != "waiting_user" {
+        return Err(invalid("指令不在等待用户状态"));
+    }
+    if running_count(conn, &instruction.id)? > 0 {
+        return Err(invalid("仍有运行中的回合，请稍后再试"));
+    }
+    let tx = conn.unchecked_transaction()?;
+    let reason = latest_task_error(&tx, &task.id)?.unwrap_or_else(|| "权限不足".into());
+    let reason = reason.strip_prefix("权限受阻：").unwrap_or(&reason).to_string();
+    let mut snapshot = load_snapshot(&instruction.context_snapshot_json)?;
+    snapshot.elevated_task = Some(task.id.clone());
+    snapshot.elevated_reason = Some(reason);
+    save_snapshot(&tx, &instruction.id, &snapshot)?;
+    tx.execute(
+        "UPDATE instructions SET status = 'running', phase = 'execute', wait_reason = NULL, finished_at = NULL, \
+         elevated_allowed = 1, updated_at = ?1 WHERE id = ?2",
+        params![now_ms(), instruction.id],
+    )?;
+    tx.execute("UPDATE tasks SET status = 'pending', finished_at = NULL WHERE id = ?1 AND status = 'blocked'", [&task.id])?;
+    set_project_status(&tx, &instruction.project_id, "executing")?;
+    messages::insert(&tx, &instruction.project_id, "system", None, "system", &format!(
+        "已授权以最高权限重跑任务「{}」。授权只对这条指令有效，用完后恢复原档位。", task.title
+    ))?;
+    tx.commit()?;
+    instructions::get(conn, &instruction.id)
+}
+
+/// 任务最近一次运行留下的错误说明，用来给提权重跑提示词提供被拒原因。
+fn latest_task_error(conn: &Connection, task_id: &str) -> AppResult<Option<String>> {
+    Ok(conn.query_row(
+        "SELECT error FROM runs WHERE task_id = ?1 AND error IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+        [task_id], |row| row.get(0),
+    ).optional()?.flatten())
 }
 
 /// 记录一个已经预留的回合结果，并推进阶段。不在这里启动下一回合。
@@ -368,9 +423,9 @@ pub fn rebuild_turn(conn: &Connection, run_id: &str, outcome: &RunOutcome) -> Ap
         };
         compose_prompt(&tx, &instruction, &agent, Stage::Discuss, None, &topic)?
     };
-    let new_run = insert_run(&tx, &agent, &run.mode, &instruction.id, run.task_id.as_deref(), bound)?;
+    let new_run = insert_run(&tx, &agent, &run.mode, &instruction.id, run.task_id.as_deref(), bound, false)?;
     tx.commit()?;
-    Ok(Some(spec(new_run, agent.id, &instruction.id, run.task_id, &run.mode, prompt, bound)))
+    Ok(Some(spec(new_run, agent.id, &instruction.id, run.task_id, &run.mode, prompt, bound, false)))
 }
 
 fn dispatch(conn: &Connection, instruction: &Instruction) -> AppResult<Vec<TurnSpec>> {
@@ -392,9 +447,9 @@ fn schedule_leader(conn: &Connection, instruction: &Instruction, stage: Stage) -
     }
     let leader = leader(conn, &instruction.project_id)?;
     let (prompt, bound) = compose_prompt(conn, instruction, &leader, stage, None, "")?;
-    let run_id = insert_run(conn, &leader, "discuss", &instruction.id, None, bound)?;
+    let run_id = insert_run(conn, &leader, "discuss", &instruction.id, None, bound, false)?;
     set_project_status(conn, &instruction.project_id, "discussing")?;
-    Ok(vec![spec(run_id, leader.id, &instruction.id, None, "discuss", prompt, bound)])
+    Ok(vec![spec(run_id, leader.id, &instruction.id, None, "discuss", prompt, bound, false)])
 }
 
 fn schedule_discuss(conn: &Connection, instruction: &Instruction) -> AppResult<Vec<TurnSpec>> {
@@ -417,8 +472,8 @@ fn schedule_discuss(conn: &Connection, instruction: &Instruction) -> AppResult<V
         let agent = roster.iter().find(|agent| agent.id == *agent_id).cloned()
             .ok_or_else(|| invalid(format!("成员 {agent_id} 不在花名册中")))?;
         let (prompt, prompt_bound) = compose_prompt(conn, instruction, &agent, Stage::Discuss, None, &topic)?;
-        let run_id = insert_run(conn, &agent, "discuss", &instruction.id, None, prompt_bound)?;
-        specs.push(spec(run_id, agent.id, &instruction.id, None, "discuss", prompt, prompt_bound));
+        let run_id = insert_run(conn, &agent, "discuss", &instruction.id, None, prompt_bound, false)?;
+        specs.push(spec(run_id, agent.id, &instruction.id, None, "discuss", prompt, prompt_bound, false));
     }
     stored.pending = Some(StoredPending::Discuss { agent_ids, topic, launched: true });
     stored.message_bound = Some(bound);
@@ -444,10 +499,26 @@ fn schedule_execute(conn: &Connection, instruction: &Instruction) -> AppResult<V
     }
     conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?1", [&task.id])?;
     let assignee = agents::get(conn, task.assignee_agent_id.as_deref().unwrap_or(""))?;
-    let (prompt, bound) = compose_prompt(conn, instruction, &assignee, Stage::Execute, Some(&task), "")?;
-    let run_id = insert_run(conn, &assignee, "execute", &instruction.id, Some(&task.id), bound)?;
+    let mut stored = load_snapshot(&instruction.context_snapshot_json)?;
+    let elevated = stored.elevated_task.as_deref() == Some(task.id.as_str());
+    let elevated_reason = if elevated { stored.elevated_reason.clone() } else { None };
+    if elevated {
+        // 只消费一次：这一回合无论成败，下次都不再自动提权。
+        stored.elevated_task = None;
+        stored.elevated_reason = None;
+        save_snapshot(conn, &instruction.id, &stored)?;
+    }
+    let (mut prompt, bound) = compose_prompt(conn, instruction, &assignee, Stage::Execute, Some(&task), "")?;
+    if elevated {
+        prompt.push_str(&format!(
+            "\n\n# 权限提权\n上一个回合因权限被拒：{}。本回合已按用户授权使用最高权限，请继续完成原任务；\
+             不要重复已经完成的部分，也不要把被拒的步骤当成已完成。",
+            elevated_reason.as_deref().unwrap_or("权限不足")
+        ));
+    }
+    let run_id = insert_run(conn, &assignee, "execute", &instruction.id, Some(&task.id), bound, elevated)?;
     set_project_status(conn, &instruction.project_id, "executing")?;
-    Ok(vec![spec(run_id, assignee.id, &instruction.id, Some(task.id), "execute", prompt, bound)])
+    Ok(vec![spec(run_id, assignee.id, &instruction.id, Some(task.id), "execute", prompt, bound, elevated)])
 }
 
 /// 运行中点名的提示词。会话重建时复用。
@@ -491,11 +562,11 @@ fn schedule_mention(conn: &Connection, instruction: &Instruction) -> AppResult<V
     }
     let agent = agents::get(conn, &mention.agent_id)?;
     let (prompt, bound) = compose_mention(conn, instruction, &agent, &mention.content)?;
-    let run_id = insert_run(conn, &agent, "execute", &instruction.id, None, bound)?;
+    let run_id = insert_run(conn, &agent, "execute", &instruction.id, None, bound, false)?;
     stored.mention = Some(StoredMention { launched: true, ..mention });
     save_snapshot(conn, &instruction.id, &stored)?;
     set_project_status(conn, &instruction.project_id, "executing")?;
-    Ok(vec![spec(run_id, agent.id, &instruction.id, None, "execute", prompt, bound)])
+    Ok(vec![spec(run_id, agent.id, &instruction.id, None, "execute", prompt, bound, false)])
 }
 
 fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agent: &Agent, outcome: &RunOutcome) -> AppResult<()> {
@@ -612,6 +683,7 @@ fn protocol_failed(conn: &Connection, run: &RunRow, instruction: &Instruction, a
 
 fn apply_execute(conn: &Connection, run: &RunRow, instruction: &Instruction, agent: &Agent, outcome: &RunOutcome) -> AppResult<()> {
     let task_id = run.task_id.clone().ok_or_else(|| invalid("执行回合缺少任务"))?;
+    let task = instructions::get_task(conn, &task_id)?;
     let content = if outcome.final_text.trim().is_empty() {
         outcome.error.clone().unwrap_or_else(|| "执行失败".to_string())
     } else {
@@ -619,6 +691,11 @@ fn apply_execute(conn: &Connection, run: &RunRow, instruction: &Instruction, age
     };
     let report = messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "report", &content)?;
     messages::set_run(conn, report.id, &run.id)?;
+    // 正常退出不等于做完了：权限拒绝优先，任务转为受阻或按授权重跑。
+    let denial = outcome.denial.clone().or_else(|| (outcome.status == "ok").then(|| report_denial(&content)).flatten());
+    if let Some(denial) = denial {
+        return handle_denial(conn, run, instruction, agent, outcome, &task, report.id, denial);
+    }
     if outcome.status == "ok" {
         instructions::finish_task(conn, &task_id, "done", Some(report.id))?;
     } else {
@@ -643,6 +720,58 @@ fn apply_execute(conn: &Connection, run: &RunRow, instruction: &Instruction, age
         set_project_status(conn, &instruction.project_id, "discussing")?;
     }
     Ok(())
+}
+
+/// 执行回合遇到权限拒绝：有项目预授权就自动提权重跑一次，否则把任务标成受阻并等用户授权。
+/// 两种情况都不把任务记成完成。
+fn handle_denial(
+    conn: &Connection, run: &RunRow, instruction: &Instruction, agent: &Agent, outcome: &RunOutcome,
+    task: &TaskRecord, report_id: i64, denial: crate::adapters::Denial,
+) -> AppResult<()> {
+    let mut ended = outcome.clone();
+    ended.status = "failed".into();
+    if instruction.elevated_allowed && !task_elevated_before(conn, &task.id)? {
+        finish_run_with(conn, &run.id, outcome, "failed", &format!("权限受阻，已自动提权重跑：{}", denial.detail))?;
+        // 任务回到待执行，由下一轮调度用高权限档重跑；同批其余任务保持待执行。
+        conn.execute("UPDATE tasks SET status = 'pending' WHERE id = ?1", [&task.id])?;
+        let mut snapshot = load_snapshot(&instruction.context_snapshot_json)?;
+        snapshot.elevated_task = Some(task.id.clone());
+        snapshot.elevated_reason = Some(denial.detail.clone());
+        save_snapshot(conn, &instruction.id, &snapshot)?;
+        remember_agent(conn, run, agent, &ended)?;
+        messages::insert(conn, &instruction.project_id, "system", None, "system", &format!(
+            "任务「{}」因权限受阻，未完成：{}。已按项目的高权限设置，用最高权限自动重跑一次。",
+            task.title, denial.detail
+        ))?;
+        set_project_status(conn, &instruction.project_id, "executing")?;
+        return Ok(());
+    }
+    instructions::finish_task(conn, &task.id, "blocked", Some(report_id))?;
+    finish_run_with(conn, &run.id, outcome, "failed", &format!("权限受阻：{}", denial.detail))?;
+    remember_agent(conn, run, agent, &ended)?;
+    let reason = format!("任务「{}」因权限受阻，等待授权后重试：{}", task.title, denial.detail);
+    messages::insert(conn, &instruction.project_id, "system", None, "system", &format!(
+        "{reason}\n授权只对这条指令有效：以最高权限重跑这个任务，完成后继续剩余任务。\
+         也可以补充说明或放弃；已经改过的文件不会被自动撤销。"
+    ))?;
+    mark_waiting(conn, instruction, &reason)
+}
+
+/// 这条任务是否已经用过自动提权。用过再被拒就转人工，不无限重试。
+fn task_elevated_before(conn: &Connection, task_id: &str) -> AppResult<bool> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM runs WHERE task_id = ?1 AND elevated = 1", [task_id], |row| row.get::<_, i64>(0),
+    )? > 0)
+}
+
+/// 成员按固定格式报告的受阻：`受阻：<操作>｜<原文摘要>`。识别不到就返回 None。
+fn report_denial(text: &str) -> Option<crate::adapters::Denial> {
+    text.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.strip_prefix("受阻：").or_else(|| line.strip_prefix("受阻:"))?.trim();
+        if rest.is_empty() { return None; }
+        Some(crate::adapters::Denial { tool: "成员报告".into(), detail: rest.chars().take(300).collect() })
+    })
 }
 
 fn apply_member_discuss(conn: &Connection, instruction: &Instruction, agent: &Agent, run_id: &str, outcome: &RunOutcome) -> AppResult<()> {
@@ -769,7 +898,7 @@ fn compose_prompt(
 
 fn leftover_notice(tasks: &[TaskRecord]) -> Option<String> {
     let lines: Vec<String> = tasks.iter().filter(|task| task.superseded_by_task_id.is_none())
-        .filter(|task| matches!(task.status.as_str(), "failed" | "cancelled" | "pending"))
+        .filter(|task| matches!(task.status.as_str(), "failed" | "cancelled" | "pending" | "blocked"))
         .map(|task| format!("- {}｜状态 {}", task.title, task.status))
         .collect();
     if lines.is_empty() {
@@ -879,16 +1008,16 @@ fn persona_mark(persona: &str) -> String {
     format!("{}:{hash:016x}", persona.len())
 }
 
-fn insert_run(conn: &Connection, agent: &Agent, mode: &str, instruction_id: &str, task_id: Option<&str>, bound: i64) -> AppResult<String> {
+fn insert_run(conn: &Connection, agent: &Agent, mode: &str, instruction_id: &str, task_id: Option<&str>, bound: i64, elevated: bool) -> AppResult<String> {
     let id = new_id();
     // 不记录提示词本身，只记录回合结束时要用的两项事实。
     let command = serde_json::json!({
         "source": "orchestrator", "mode": mode, "messageBound": bound, "personaMark": persona_mark(&agent.persona),
     }).to_string();
     conn.execute(
-        "INSERT INTO runs (id, agent_id, mode, command, started_at, status, instruction_id, task_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7)",
-        params![id, agent.id, mode, command, now_ms(), instruction_id, task_id],
+        "INSERT INTO runs (id, agent_id, mode, command, started_at, status, instruction_id, task_id, elevated) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8)",
+        params![id, agent.id, mode, command, now_ms(), instruction_id, task_id, elevated],
     )?;
     Ok(id)
 }
@@ -1044,8 +1173,8 @@ fn set_project_status(conn: &Connection, project_id: &str, status: &str) -> AppR
     Ok(())
 }
 
-fn spec(run_id: String, agent_id: String, instruction_id: &str, task_id: Option<String>, mode: &str, prompt: String, message_bound: i64) -> TurnSpec {
-    TurnSpec { run_id, agent_id, instruction_id: instruction_id.to_string(), task_id, mode: mode.to_string(), prompt, message_bound }
+fn spec(run_id: String, agent_id: String, instruction_id: &str, task_id: Option<String>, mode: &str, prompt: String, message_bound: i64, elevated: bool) -> TurnSpec {
+    TurnSpec { run_id, agent_id, instruction_id: instruction_id.to_string(), task_id, mode: mode.to_string(), prompt, message_bound, elevated }
 }
 
 fn invalid(message: impl Into<String>) -> AppError {
@@ -1413,7 +1542,10 @@ mod tests {
 
     fn start_team(conn: &rusqlite::Connection, project_id: &str) {
         let message = messages::insert(conn, project_id, "user", None, "instruction", "给登录加上校验").unwrap();
-        instructions::insert_instruction(conn, project_id, message.id, "team", None, "triage").unwrap();
+        let instruction = instructions::insert_instruction(conn, project_id, message.id, "team", None, "triage").unwrap();
+        // 与 begin_user_instruction 一致：项目开关在指令创建时快照。
+        let allowed = projects::elevation_allowed(conn, project_id).unwrap();
+        conn.execute("UPDATE instructions SET elevated_allowed = ?1 WHERE id = ?2", rusqlite::params![allowed, instruction.id]).unwrap();
     }
 
     #[test]
@@ -1444,12 +1576,19 @@ mod tests {
         RunOutcome {
             status: "ok".into(), session_id: Some("session".into()), final_text: text.into(),
             partial_text: String::new(), usage: None, exit_code: Some(0), error: None,
-            tool_seen: false, cleanup_complete: true,
+            tool_seen: false, cleanup_complete: true, denial: None,
         }
     }
 
     fn failed_text(text: &str) -> RunOutcome {
         RunOutcome { status: "failed".into(), error: Some("执行失败".into()), ..ok_text(text) }
+    }
+
+    fn denied_text(text: &str, detail: &str) -> RunOutcome {
+        RunOutcome {
+            denial: Some(crate::adapters::Denial { tool: "命令".into(), detail: detail.into() }),
+            ..ok_text(text)
+        }
     }
 
     fn fence(speech: &str, json: &str) -> String {
@@ -1624,6 +1763,107 @@ mod tests {
         let systems: Vec<_> = messages::list(&conn, &project_id, None, 50).unwrap().into_iter().filter(|message| message.kind == "system").collect();
         assert!(systems.iter().all(|message| !message.content.contains("第三步")));
         assert_eq!(projects::get(&conn, &project_id).unwrap().status, "idle");
+    }
+
+    /// 走到执行阶段并返回第一个执行回合。
+    fn assign_one(conn: &rusqlite::Connection, project_id: &str) -> TurnSpec {
+        let leader = advance(conn, project_id).unwrap().remove(0);
+        let assign = fence("开工。", r#"{"action":"assign","decision":"做校验","tasks":[{"to":"前端","title":"校验","detail":"做校验"}]}"#);
+        apply_outcome(conn, &leader.run_id, &ok_text(&assign)).unwrap();
+        advance(conn, project_id).unwrap().remove(0)
+    }
+
+    #[test]
+    fn denial_without_preauthorization_blocks_the_task_and_waits_for_the_user() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let exec = assign_one(&conn, &project_id);
+        apply_outcome(&conn, &exec.run_id, &denied_text("已经改完文件", "git commit：Permission denied")).unwrap();
+
+        let instruction = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(instruction.status, "waiting_user");
+        assert!(instruction.wait_reason.as_deref().unwrap().contains("权限受阻"));
+        let tasks = instructions::list_tasks(&conn, &instruction.id).unwrap();
+        assert_eq!(tasks[0].status, "blocked");
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
+        let system_messages: Vec<_> = messages::list(&conn, &project_id, None, 100).unwrap()
+            .into_iter().filter(|message| message.kind == "system").collect();
+        assert!(system_messages.iter().any(|message| message.content.contains("权限受阻") && message.content.contains("授权")));
+        // 受阻不是失败：同批未开始的任务不被取消，授权后还能继续。
+    }
+
+    #[test]
+    fn preauthorized_denial_retries_once_with_elevation_then_completes() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        projects::set_elevation_allowed(&conn, &project_id, true).unwrap();
+        start_team(&conn, &project_id);
+        let exec = assign_one(&conn, &project_id);
+        assert!(!exec.elevated);
+        apply_outcome(&conn, &exec.run_id, &denied_text("改完文件但提交失败", "git commit：Permission denied")).unwrap();
+
+        let instruction = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(instruction.status, "running");
+        let tasks = instructions::list_tasks(&conn, &instruction.id).unwrap();
+        assert_eq!(tasks[0].status, "pending");
+
+        let retry = advance(&conn, &project_id).unwrap().remove(0);
+        assert!(retry.elevated);
+        assert!(retry.prompt.contains("# 权限提权") && retry.prompt.contains("Permission denied"));
+        apply_outcome(&conn, &retry.run_id, &ok_text("这次提交成功")).unwrap();
+
+        let tasks = instructions::list_tasks(&conn, &instruction.id).unwrap();
+        assert_eq!(tasks[0].status, "done");
+        let review = advance(&conn, &project_id).unwrap();
+        assert!(review[0].prompt.contains("这次提交成功"));
+    }
+
+    #[test]
+    fn second_denial_after_elevation_blocks_instead_of_looping() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        projects::set_elevation_allowed(&conn, &project_id, true).unwrap();
+        start_team(&conn, &project_id);
+        let exec = assign_one(&conn, &project_id);
+        apply_outcome(&conn, &exec.run_id, &denied_text("第一次被拒", "git commit：Permission denied")).unwrap();
+        let retry = advance(&conn, &project_id).unwrap().remove(0);
+        assert!(retry.elevated);
+        apply_outcome(&conn, &retry.run_id, &denied_text("提权后仍被拒", "git commit：Access is denied")).unwrap();
+
+        let instruction = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(instruction.status, "waiting_user");
+        let tasks = instructions::list_tasks(&conn, &instruction.id).unwrap();
+        assert_eq!(tasks[0].status, "blocked");
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn user_authorization_on_blocked_task_schedules_one_elevated_retry() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let exec = assign_one(&conn, &project_id);
+        apply_outcome(&conn, &exec.run_id, &denied_text("提交失败", "git commit：Permission denied")).unwrap();
+        let task = instructions::list_tasks(&conn, &instructions::active_instruction(&conn, &project_id).unwrap().unwrap().id)
+            .unwrap().remove(0);
+        assert_eq!(task.status, "blocked");
+
+        let instruction = authorize_blocked_task(&conn, &task.id).unwrap();
+        assert_eq!(instruction.status, "running");
+        assert!(instruction.elevated_allowed);
+        assert_eq!(instructions::get_task(&conn, &task.id).unwrap().status, "pending");
+        let retry = advance(&conn, &project_id).unwrap().remove(0);
+        assert!(retry.elevated);
+        apply_outcome(&conn, &retry.run_id, &ok_text("授权后提交成功")).unwrap();
+        assert_eq!(instructions::get_task(&conn, &task.id).unwrap().status, "done");
+    }
+
+    #[test]
+    fn member_reported_denial_is_treated_as_blocked() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let exec = assign_one(&conn, &project_id);
+        apply_outcome(&conn, &exec.run_id, &ok_text("改了文件。\n受阻：git commit｜Permission denied")).unwrap();
+        let instruction = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(instruction.status, "waiting_user");
+        assert_eq!(instructions::list_tasks(&conn, &instruction.id).unwrap()[0].status, "blocked");
     }
 
     /// 给运行写入可区分的模型值，返回期望的 model_info。
@@ -2143,7 +2383,7 @@ mod tests {
             status: "failed".into(), session_id: Some(session.into()), final_text: String::new(),
             partial_text: String::new(), usage: None, exit_code: Some(1),
             error: Some(format!("No conversation found with session ID: {session}")),
-            tool_seen: false, cleanup_complete: true,
+            tool_seen: false, cleanup_complete: true, denial: None,
         }
     }
 

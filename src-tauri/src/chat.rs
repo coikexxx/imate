@@ -262,7 +262,7 @@ mod tests {
     fn session_rebuild_is_limited_to_explicit_startup_failures() {
         let base = crate::runner::RunOutcome { status: "failed".into(), session_id: Some("old".into()),
             final_text: String::new(), partial_text: String::new(), usage: None, exit_code: Some(1),
-            error: Some("thread not found".into()), tool_seen: false, cleanup_complete: true };
+            error: Some("thread not found".into()), tool_seen: false, cleanup_complete: true, denial: None };
         assert!(should_rebuild_session(&base, true, false));
         assert!(!should_rebuild_session(&base, true, true));
         assert!(!should_rebuild_session(&base, false, false));
@@ -281,7 +281,7 @@ mod tests {
         let outcome = crate::runner::RunOutcome { status: "failed".into(), session_id: Some("01a1c3f2-85eb-71d2-a133-6a6d4627d764".into()),
             final_text: String::new(), partial_text: String::new(), usage: None, exit_code: Some(1),
             error: Some("Error: thread/resume: thread/resume failed: no rollout found for thread id 01a1c3f2-85eb-71d2-a133-6a6d4627d764 (code -32600)".into()),
-            tool_seen: false, cleanup_complete: true };
+            tool_seen: false, cleanup_complete: true, denial: None };
         assert!(should_rebuild_session(&outcome, true, false));
         assert!(!should_rebuild_session(&outcome, true, true));
     }
@@ -291,7 +291,7 @@ mod tests {
         let outcome = crate::runner::RunOutcome { status: "failed".into(), session_id: Some("session-old".into()),
             final_text: String::new(), partial_text: String::new(), usage: None, exit_code: Some(1),
             error: Some("session \"session-old\" does not exist; omit --session-id to start a new Session".into()),
-            tool_seen: false, cleanup_complete: true };
+            tool_seen: false, cleanup_complete: true, denial: None };
         assert!(should_rebuild_session(&outcome, true, false));
         assert!(!should_rebuild_session(&outcome, true, true));
     }

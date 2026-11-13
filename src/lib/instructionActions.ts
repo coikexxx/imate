@@ -14,6 +14,7 @@ const TASK_STATUS_LABELS: Record<string, string> = {
   done: "已完成",
   failed: "失败",
   cancelled: "已取消",
+  blocked: "受阻：权限不足",
 };
 
 /** 任务行只展示标题、成员名和状态。找不到成员时不留空。 */

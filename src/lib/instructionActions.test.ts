@@ -50,5 +50,6 @@ describe("指令等待操作", () => {
     expect(row).toEqual({ title: "改按钮", member: "前端", status: "失败" });
     expect(taskRowLabel({ title: "无人认领", assigneeAgentId: null, status: "pending" }, []).member).toBe("未指定");
     expect(taskRowLabel({ title: "已完成", assigneeAgentId: "front", status: "done" }, [{ id: "front", name: "前端" }]).status).toBe("已完成");
+    expect(taskRowLabel({ title: "提交", assigneeAgentId: "front", status: "blocked" }, [{ id: "front", name: "前端" }]).status).toBe("受阻：权限不足");
   });
 });
