@@ -91,10 +91,10 @@ src/
   pages/               Home.tsx、Project.tsx
   components/          MemberList、ChatPanel、FileTree、RulesPanel、ProjectWizard、
                        AgentForm、PersonaEditor、ProjectCard
-  office/              OfficeCanvas.tsx、openOffice.ts（角色与寻路）、gbaOfficeMap.ts（分区与碰撞）、
-                       gbaCharacters.ts（原创角色）、openOfficeRenderer.ts、openOfficeAssets.ts
+  office/              OfficeCanvas.tsx、officeScene.ts（角色与寻路）、gbaOfficeMap.ts（分区与碰撞）、
+                       gbaCharacters.ts（原创角色）、officeSceneRenderer.ts、officeSceneAssets.ts
   assets/gba-office/   当前场景背景、共用布局与来源说明
-  assets/openoffice/   上一版素材、来源说明与 MIT 许可（当前画布不加载）
+  assets/openoffice/   已于 2026-11-13 删除（上一版素材、来源说明与 MIT 许可）
   stores/              projects.ts、project.ts（单项目的成员/消息/任务）
   api.ts               command 调用与 event 订阅的类型化封装
 ```
@@ -596,7 +596,7 @@ messages: run_id                             -- 成员消息指向产生它的�
 
 ### 像素办公室
 
-- 2026-11-12 用户授权替换为 GBA 时代俯视像素风的原创场景，明确五个区域：办公区、摸鱼区、阳台、会议室、前台。背景经用户确认的 `gpt-image-2.5-sunburst` 按项目结构参考图生成；当前图片与来源记录在 `src/assets/gba-office/`，完整提示词和原始输出在 `output/imagegen/`。旧 OpenOffice 素材与 MIT 声明保留为历史来源，当前画布不加载。
+- 2026-11-12 用户授权替换为 GBA 时代俯视像素风的原创场景，明确五个区域：办公区、摸鱼区、阳台、会议室、前台。背景经用户确认的 `gpt-image-2.5-sunburst` 按项目结构参考图生成；当前图片与来源记录在 `src/assets/gba-office/`，完整提示词和原始输出在 `output/imagegen/`。旧 OpenOffice 素材与 MIT 声明已于 2026-11-13 清理，当前画布不加载。
 - Canvas 2D 绘制 512×512、128 色背景，人物用代码绘制原创像素帧，不增加游戏引擎或运行依赖。资源随应用离线打包；加载失败显示中文提示，可重新加载。图片接口密钥只用于生成阶段，不进入应用或仓库。
 - 房间为 32×32 网格、每格 16 逻辑像素；布局、家具占地、门洞、工作/会议/休息座位在同一份 `layout.json` 中定义。参考图和前端碰撞共用坐标，家具占地阻挡行走，各区域通过走廊相连。
 - 八个工作座位在办公区按四列两行固定布置，通过 `seatIndex` 对应成员；成员列表重排不会换座。按 Agent ID 选择固定人物外观和名牌配色，组长另有文字标记。

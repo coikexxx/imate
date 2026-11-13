@@ -2,9 +2,9 @@ import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
 import type { Agent, AgentStatus } from "../types";
 import { Icon } from "../components/Icon";
-import { getOfficeViewport, getRegionCamera, ROOM_HEIGHT, ROOM_WIDTH, STATUS_TEXT, stepActor, syncActors, type OfficeActor, type Position } from "./openOffice";
-import { loadOfficeAssets, type OfficeAssets } from "./openOfficeAssets";
-import { drawOpenOffice, type ActorHit } from "./openOfficeRenderer";
+import { getOfficeViewport, getRegionCamera, ROOM_HEIGHT, ROOM_WIDTH, STATUS_TEXT, stepActor, syncActors, type OfficeActor, type Position } from "./officeScene";
+import { loadOfficeSceneAssets, type OfficeSceneAssets } from "./officeSceneAssets";
+import { drawOfficeScene, type ActorHit } from "./officeSceneRenderer";
 import { OFFICE_REGIONS, type OfficeRegion, type RegionId } from "./gbaOfficeMap";
 
 interface Props { agents: Agent[]; statuses: Record<string, AgentStatus> }
@@ -34,7 +34,7 @@ function OfficeView({ agents, statuses, simulation, paused = false, expanded = f
     const ctx = node.getContext("2d");
     if (!ctx) { setLoading(false); setError(true); return; }
     let disposed = false;
-    let assets: OfficeAssets | null = null;
+    let assets: OfficeSceneAssets | null = null;
     let width = 1;
     let height = 1;
     let pixelRatio = 1;
@@ -54,7 +54,7 @@ function OfficeView({ agents, statuses, simulation, paused = false, expanded = f
     resize();
     setLoading(true);
     setError(false);
-    loadOfficeAssets().then((loaded) => {
+    loadOfficeSceneAssets().then((loaded) => {
       if (disposed) return;
       assets = loaded;
       setLoading(false);
@@ -71,7 +71,7 @@ function OfficeView({ agents, statuses, simulation, paused = false, expanded = f
       for (const actor of actors.values()) stepActor(actor, delta, !reduced.matches);
       const viewport = getOfficeViewport(width, height, camera.current.zoom, camera.current.center);
       camera.current.center = viewport.center;
-      hits.current = drawOpenOffice(ctx, {
+      hits.current = drawOfficeScene(ctx, {
         width, height, pixelRatio, assets, actors, viewport, members: latest.current.agents,
         tick: reduced.matches ? 0 : Math.floor(simulation.elapsed * 4), hoveredId: hovered.current, motion: !reduced.matches,
       });

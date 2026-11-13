@@ -1,18 +1,18 @@
 import type { Agent } from "../types";
 import { hashOf, idleAct, shirtColor } from "./layout";
-import { CHARACTER_SCALE, officeFrame, ROOM_HEIGHT, ROOM_WIDTH, STATUS_TEXT, type OfficeActor, type OfficeViewport } from "./openOffice";
-import type { OfficeAssets } from "./openOfficeAssets";
+import { CHARACTER_SCALE, officeFrame, ROOM_HEIGHT, ROOM_WIDTH, STATUS_TEXT, type OfficeActor, type OfficeViewport } from "./officeScene";
+import type { OfficeSceneAssets } from "./officeSceneAssets";
 import { OFFICE_REGIONS } from "./gbaOfficeMap";
 
 export interface ActorHit { id: string; x: number; y: number; width: number; height: number }
 interface DrawOptions {
   width: number; height: number; pixelRatio: number; tick: number;
   viewport: OfficeViewport; actors: Map<string, OfficeActor>; members: Agent[];
-  assets: OfficeAssets; hoveredId: string | null; motion: boolean;
+  assets: OfficeSceneAssets; hoveredId: string | null; motion: boolean;
 }
 
 /** 图片放在房间坐标中；名牌和状态气泡保持屏幕字号，缩略图也能辨认成员。 */
-export function drawOpenOffice(ctx: CanvasRenderingContext2D, options: DrawOptions): ActorHit[] {
+export function drawOfficeScene(ctx: CanvasRenderingContext2D, options: DrawOptions): ActorHit[] {
   const { width, height, pixelRatio, viewport, actors, members, assets, tick, hoveredId, motion } = options;
   const { scale, offsetX, offsetY } = viewport;
   ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);

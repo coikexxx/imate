@@ -8,4 +8,4 @@
 - 原始输出、完整最终提示词、参考图和可复现的参考图构建脚本保存在 `output/imagegen/`。密钥及私密接口配置不保存在本项目。
 - 人物由 `src/office/gbaCharacters.ts` 绘制原创 16×24 像素帧，沿用 16×32 帧格与三方向、七列的调用接口，向左使用镜像。
 
-旧版 OpenOffice 资源及 MIT 声明仍保留在 `src/assets/openoffice/` 作为上一版来源记录；当前画布不再加载那些图片。
+旧版 OpenOffice 资源及 MIT 声明已于 2026-11-13 清理，不再保留在仓库中；当前画布只加载 GBA 素材。

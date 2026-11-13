@@ -1,5 +1,7 @@
 # OpenOffice 像素办公室场景接入
 
+> 2026-11-13 清理：OpenOffice 素材、`openOffice*` 模块及旧像素绘制代码已删除或更名为 `officeScene*`；本文件保留为历史接入记录。
+
 ## 目标与授权
 
 2026-11-12 用户指定参考 `git@github.com:longyangxi/OpenOffice.git`，并使用该项目的办公室场景。此次授权取代手册中「不引入外部素材」的旧限制。以当前团队工作室界面为基线，在 `codex/openoffice-scene` 实施。
@@ -19,9 +21,9 @@
 
 | 文件 | 用途 |
 |---|---|
-| `src/assets/openoffice/` | 背景、room.json、六张人物帧图、来源说明与 MIT 许可 |
-| `src/office/openOffice.ts`、`openOffice.test.ts` | 房间座位、帧图映射、寻路、角色状态和相机纯逻辑 |
-| `src/office/openOfficeAssets.ts`、`openOfficeRenderer.ts` | 图片加载、背景与角色绘制 |
+| `src/assets/openoffice/` | 已于 2026-11-13 删除（原背景、room.json、六张人物帧图、来源说明与 MIT 许可） |
+| `src/office/officeScene.ts`、`officeScene.test.ts` | 2026-11-13 更名；房间座位、帧图映射、寻路、角色状态和相机纯逻辑 |
+| `src/office/officeSceneAssets.ts`、`officeSceneRenderer.ts` | 2026-11-13 更名；图片加载、背景与角色绘制 |
 | `src/office/OfficeCanvas.tsx` | 保留 agents / statuses 接口，接入新场景与展开交互 |
 | `src/index.css` | 场景容器、工具条、展开视图与窄窗口适配 |
 | `docs/MVP开发手册.md`、`docs/界面打磨记录.md`、`AGENTS.md` | 回填本次场景约定、实施与验证记录 |

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ROOM, ROOM_WIDTH, ROOM_HEIGHT, WORK_SEATS, cellPoint, createActor, findRoomPath, getOfficeViewport, getRegionCamera,
   isWalkable, officeFrame, stepActor, syncActors,
-} from "./openOffice";
+} from "./officeScene";
 import { MEETING_SEATS, OFFICE_REGIONS, REST_SEATS } from "./gbaOfficeMap";
 
 describe("GBA 办公室角色", () => {

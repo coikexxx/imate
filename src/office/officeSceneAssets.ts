@@ -1,7 +1,7 @@
 import backgroundUrl from "../assets/gba-office/background.png";
 import { createGbaCharacters } from "./gbaCharacters";
 
-export interface OfficeAssets { background: HTMLImageElement; characters: HTMLCanvasElement[] }
+export interface OfficeSceneAssets { background: HTMLImageElement; characters: HTMLCanvasElement[] }
 
 function loadImage(url: string, width: number, height: number): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -13,10 +13,10 @@ function loadImage(url: string, width: number, height: number): Promise<HTMLImag
   });
 }
 
-let cached: Promise<OfficeAssets> | null = null;
+let cached: Promise<OfficeSceneAssets> | null = null;
 
 /** 两个画布共享离线图片；失败后清空缓存，允许用户重新加载。 */
-export function loadOfficeAssets(): Promise<OfficeAssets> {
+export function loadOfficeSceneAssets(): Promise<OfficeSceneAssets> {
   if (!cached) {
     cached = loadImage(backgroundUrl, 512, 512)
       .then((background) => ({ background, characters: createGbaCharacters() })).catch((error: unknown) => {
