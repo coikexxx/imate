@@ -266,7 +266,7 @@ pub fn resume_instruction(conn: &Connection, instruction_id: &str, action: &str,
     }
 }
 
-/// 用户从受阻任务上授权：只对这条指令有效，把任务放回队列并用最高权限重跑。
+/// 用户从受阻任务上授权：只对这一次重试有效，把任务放回队列并用最高权限重跑。
 /// 这是唯一能打开高权限的入口，组长和成员协议里没有对应字段。
 pub fn authorize_blocked_task(conn: &Connection, task_id: &str) -> AppResult<Instruction> {
     let task = instructions::get_task(conn, task_id)?;
@@ -296,7 +296,7 @@ pub fn authorize_blocked_task(conn: &Connection, task_id: &str) -> AppResult<Ins
     tx.execute("UPDATE tasks SET status = 'pending', finished_at = NULL WHERE id = ?1 AND status = 'blocked'", [&task.id])?;
     set_project_status(&tx, &instruction.project_id, "executing")?;
     messages::insert(&tx, &instruction.project_id, "system", None, "system", &format!(
-        "已授权以最高权限重跑任务「{}」。授权只对这条指令有效，用完后恢复原档位。", task.title
+        "已授权以最高权限重跑任务「{}」。授权只对这一次重试有效，用完后恢复原档位。", task.title
     ))?;
     tx.commit()?;
     instructions::get(conn, &instruction.id)
@@ -755,7 +755,7 @@ fn handle_denial(
     remember_agent(conn, run, agent, &ended)?;
     let reason = format!("任务「{}」因权限受阻，等待授权后重试：{}", task.title, denial.detail);
     messages::insert(conn, &instruction.project_id, "system", None, "system", &format!(
-        "{reason}\n授权只对这条指令有效：以最高权限重跑这个任务，完成后继续剩余任务。\
+        "{reason}\n授权只对这一次重试有效：以最高权限重跑这个任务，完成后继续剩余任务。\
          也可以补充说明或放弃；已经改过的文件不会被自动撤销。"
     ))?;
     mark_waiting(conn, instruction, &reason)

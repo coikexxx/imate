@@ -1509,7 +1509,7 @@ pub fn save_project_elevation(state: State<'_, AppState>, project_id: String, al
     Ok(allowed)
 }
 
-/// 用户在受阻任务上点「授权并继续」：只对这条指令有效，随后自动用最高权限重跑。
+/// 用户在受阻任务上点「授权并继续」：只对这一次重试有效，随后自动用最高权限重跑。
 #[tauri::command]
 pub async fn retry_blocked_task(
     app: tauri::AppHandle,
