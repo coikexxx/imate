@@ -5,9 +5,10 @@ function displayModel(value: string): string {
   try {
     const parsed: unknown = JSON.parse(value);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      const { provider, model } = parsed as { provider?: unknown; model?: unknown };
+      const { provider, model, reasoningEffort } = parsed as { provider?: unknown; model?: unknown; reasoningEffort?: unknown };
       if (typeof provider === "string" && provider.trim() && typeof model === "string" && model.trim()) {
-        return `${provider.trim()} / ${model.trim()}`;
+        const effort = typeof reasoningEffort === "string" && reasoningEffort.trim() ? ` · ${reasoningEffort.trim()}` : "";
+        return `${provider.trim()} / ${model.trim()}${effort}`;
       }
     }
   } catch {

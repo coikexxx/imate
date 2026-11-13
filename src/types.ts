@@ -4,9 +4,18 @@ export interface ProxySettings { mode: "system" | "manual" | "direct"; url: stri
 export interface ProxyState { settings: ProxySettings; detectedProxy: string; detectionError: string | null }
 export type DshProfile = "web" | "headless";
 export interface DshSettings { authentication: "headless" | "account"; profile: DshProfile }
+export interface DshEffort { id: string; name: string }
+export interface DshCatalogModel {
+  id: string;
+  name: string;
+  /** 该模型声明的推理强度，从弱到强；旧版目录或模型未声明时缺省 */
+  efforts?: DshEffort[];
+  /** Dsh 配置里的默认强度 */
+  defaultEffort?: string | null;
+}
 export interface DshCatalog {
   profile: DshProfile;
-  groups: { id: string; name: string; models: { id: string; name: string }[] }[];
+  groups: { id: string; name: string; models: DshCatalogModel[] }[];
   failures: { provider: string; message: string }[];
 }
 
@@ -72,6 +81,8 @@ export interface Agent {
   personaDirty: boolean;
   cli: string;
   model: string | null;
+  /** 非 Dsh CLI 的推理强度；Dsh 的强度在 model 的 JSON 里。空表示沿用 CLI 配置 */
+  reasoningEffort?: string | null;
   isLeader: boolean;
   sessionId: string | null;
   lastSeenMessageId: number | null;
@@ -86,6 +97,7 @@ export interface AgentInput {
   persona: string;
   cli: string;
   model: string | null;
+  reasoningEffort?: string | null;
   isLeader: boolean;
 }
 

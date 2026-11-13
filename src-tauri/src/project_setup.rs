@@ -97,7 +97,7 @@ mod tests {
             persona: PERSONA.to_string(),
             cli: "claude".to_string(),
             model: None,
-            is_leader,
+            is_leader, reasoning_effort: None,
         }
     }
 

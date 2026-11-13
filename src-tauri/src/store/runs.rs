@@ -227,7 +227,7 @@ mod tests {
                 persona: PERSONA.into(),
                 cli: "codex".into(),
                 model: None,
-                is_leader: true,
+                is_leader: true, reasoning_effort: None,
             },
         )
         .unwrap();

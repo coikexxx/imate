@@ -8,6 +8,7 @@ pub struct ClaudeAdapter {
     program: PathBuf,
     path_env: Option<std::ffi::OsString>,
     mode: RunMode,
+    reasoning_effort: Option<String>,
     active_tools: HashSet<String>,
     failed: bool,
     completed: bool,
@@ -15,7 +16,7 @@ pub struct ClaudeAdapter {
 
 impl ClaudeAdapter {
     pub fn new(program: PathBuf, mode: RunMode) -> Self {
-        Self { program, path_env: None, mode, active_tools: HashSet::new(), failed: false, completed: false }
+        Self { program, path_env: None, mode, reasoning_effort: None, active_tools: HashSet::new(), failed: false, completed: false }
     }
     pub fn with_environment(mut self, resolved: &ResolvedCli) -> Self {
         self.program = resolved.program.clone();
@@ -33,6 +34,7 @@ impl ClaudeAdapter {
 
 impl CliAdapter for ClaudeAdapter {
     fn id(&self) -> &'static str { "claude" }
+    fn set_reasoning_effort(&mut self, effort: Option<String>) { self.reasoning_effort = effort; }
     fn detect(&self) -> Option<CliInfo> { cli_registry::resolve_cli(self.id()).ok().map(|cli| cli.info) }
     fn build_command(&self, req: &TurnRequest) -> CommandSpec {
         let mut args = vec!["-p".into(), "--output-format".into(), "stream-json".into(),
@@ -41,6 +43,7 @@ impl CliAdapter for ClaudeAdapter {
         if let Some(model) = req.model.as_ref().filter(|model| !model.trim().is_empty()) {
             args.extend(["--model".into(), model.clone()]);
         }
+        if let Some(effort) = &self.reasoning_effort { args.extend(["--effort".into(), effort.clone()]); }
         CommandSpec { program: self.program.clone(), args, path_env: self.path_env.clone(),
             stdin: Some(req.prompt.clone()), prompt_file: None, support_files: vec![] }
     }
@@ -119,6 +122,17 @@ mod tests {
     fn feed(text: &str, mode: RunMode) -> Vec<AgentEvent> {
         let mut adapter = ClaudeAdapter::new("claude".into(), mode);
         text.lines().flat_map(|line| adapter.parse_line(line)).collect()
+    }
+
+    #[test]
+    fn reasoning_effort_adds_the_effort_flag_only_when_selected() {
+        let request = TurnRequest { prompt: "p".into(), session_id: Some("s1".into()), cwd: std::env::temp_dir(), mode: RunMode::Execute, model: Some("m".into()) };
+        let mut adapter = ClaudeAdapter::new("claude".into(), RunMode::Execute);
+        assert!(!adapter.build_command(&request).args.iter().any(|arg| arg == "--effort"));
+        adapter.set_reasoning_effort(Some("max".into()));
+        let args = adapter.build_command(&request).args;
+        assert!(args.windows(2).any(|pair| pair == ["--effort", "max"]));
+        assert!(args.windows(2).any(|pair| pair == ["--resume", "s1"]), "续接参数不受影响");
     }
 
     #[test]

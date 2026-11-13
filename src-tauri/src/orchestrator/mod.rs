@@ -1535,13 +1535,13 @@ mod tests {
         let mut agents = Vec::new();
         let leader = agents::create(&conn, &project.id, &NewAgent {
             name: "组长".into(), role: "管理".into(), persona: PERSONA.into(),
-            cli: "claude".into(), model: None, is_leader: true,
+            cli: "claude".into(), model: None, is_leader: true, reasoning_effort: None,
         }).unwrap();
         agents.push(leader);
         for (index, name) in member_names.iter().enumerate() {
             agents.push(agents::create(&conn, &project.id, &NewAgent {
                 name: (*name).into(), role: "开发".into(), persona: PERSONA.into(),
-                cli: if index == 0 { "claude" } else { "codex" }.into(), model: None, is_leader: false,
+                cli: if index == 0 { "claude" } else { "codex" }.into(), model: None, is_leader: false, reasoning_effort: None,
             }).unwrap());
         }
         (conn, project.id, agents)
@@ -2267,7 +2267,7 @@ mod tests {
         let reply = || ok_text(&fence("直接答复。", r#"{"action":"reply","message":"可以"}"#));
         let edit = |text: &str| agents::update(&conn, &agents[0].id, &NewAgent {
             name: "组长".into(), role: "管理".into(), persona: PERSONA.replace("本人风格", text),
-            cli: "claude".into(), model: None, is_leader: true,
+            cli: "claude".into(), model: None, is_leader: true, reasoning_effort: None,
         }).unwrap();
         start_team(&conn, &project_id);
         let first = advance(&conn, &project_id).unwrap();

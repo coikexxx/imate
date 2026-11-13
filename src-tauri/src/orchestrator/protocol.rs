@@ -395,7 +395,7 @@ mod tests {
         Agent {
             id: id.into(), project_id: "p".into(), name: name.into(), role: "开发".into(),
             persona: "x".into(), persona_dirty: false, cli: "claude".into(), model: None,
-            is_leader: id == "a", session_id: None, last_seen_message_id: None, seat_index: 0, created_at: 1,
+            is_leader: id == "a", session_id: None, last_seen_message_id: None, seat_index: 0, created_at: 1, reasoning_effort: None,
         }
     }
     fn limits(rounds: u32, task: Option<TaskLimit>) -> LimitContext {

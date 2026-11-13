@@ -1,6 +1,7 @@
 import type { Agent, Instruction, TaskItem } from "../types";
 import { Button, inputClass } from "./ui";
 import { instructionBarState, taskRowLabel } from "../lib/instructionActions";
+import { errorHint } from "../lib/errorHint";
 
 interface Props {
   projectStatus: string;
@@ -43,6 +44,7 @@ export function InstructionBar({
     </div>}
     {actions.showActions && <div className="space-y-2">
       {instruction?.waitReason && <p className="text-xs text-[#6b4a12]">{instruction.waitReason}</p>}
+      {errorHint(instruction?.waitReason) && <p className="rounded-lg border border-[#d8b878] bg-[#fbf3df] px-3 py-2 text-xs leading-5 text-[#6b4a12]">提示：{errorHint(instruction?.waitReason)}</p>}
       <div className="flex flex-wrap items-center gap-2">
         {!canAuthorize && <Button disabled={busy} onClick={onRetry}>重试</Button>}
         <Button variant="danger" disabled={busy} onClick={onAbandon}>放弃</Button>

@@ -250,11 +250,11 @@ mod tests {
         let project = projects::create(&conn, "网站", "登录", "/tmp/site").unwrap();
         let leader = agents::create(&conn, &project.id, &NewAgent {
             name: "组长".into(), role: "管理".into(), persona: PERSONA.into(),
-            cli: "claude".into(), model: None, is_leader: true,
+            cli: "claude".into(), model: None, is_leader: true, reasoning_effort: None,
         }).unwrap();
         let member = agents::create(&conn, &project.id, &NewAgent {
             name: "前端".into(), role: "开发".into(), persona: PERSONA.into(),
-            cli: "codex".into(), model: None, is_leader: false,
+            cli: "codex".into(), model: None, is_leader: false, reasoning_effort: None,
         }).unwrap();
         (project, leader, member)
     }

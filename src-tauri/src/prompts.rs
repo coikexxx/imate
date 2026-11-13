@@ -83,8 +83,8 @@ mod tests {
     #[test]
     fn opening_contains_rules_and_full_persona_but_only_public_roster_fields() {
         let conn = open_in_memory().unwrap(); let project = projects::create(&conn, "网站", "重构官网", "/tmp/site").unwrap();
-        let me = agents::create(&conn, &project.id, &NewAgent { name: "组长".into(), role: "管理".into(), persona: PERSONA.into(), cli: "claude".into(), model: None, is_leader: true }).unwrap();
-        let mut input = NewAgent { name: "设计".into(), role: "设计师".into(), persona: PERSONA.replace("本人", "其他成员"), cli: "codex".into(), model: None, is_leader: false };
+        let me = agents::create(&conn, &project.id, &NewAgent { name: "组长".into(), role: "管理".into(), persona: PERSONA.into(), cli: "claude".into(), model: None, is_leader: true, reasoning_effort: None }).unwrap();
+        let mut input = NewAgent { name: "设计".into(), role: "设计师".into(), persona: PERSONA.replace("本人", "其他成员"), cli: "codex".into(), model: None, is_leader: false, reasoning_effort: None };
         let other = agents::create(&conn, &project.id, &input).unwrap(); input.persona = PERSONA.replace("本人", "第三成员"); input.name = "测试".into();
         let third = agents::create(&conn, &project.id, &input).unwrap();
         let rules = vec![RuleDoc { filename: "协作.md".into(), content: "必须写测试".into() }];
@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn empty_rules_are_explicit_and_recovery_keeps_unread_plus_last_twenty() {
         let conn = open_in_memory().unwrap(); let project = projects::create(&conn, "空规章", "", "/tmp/empty").unwrap();
-        let agent = agents::create(&conn, &project.id, &NewAgent { name: "组长".into(), role: "开发".into(), persona: PERSONA.into(), cli: "claude".into(), model: None, is_leader: true }).unwrap();
+        let agent = agents::create(&conn, &project.id, &NewAgent { name: "组长".into(), role: "开发".into(), persona: PERSONA.into(), cli: "claude".into(), model: None, is_leader: true, reasoning_effort: None }).unwrap();
         assert!(build_opening(&project, &[], &agent, std::slice::from_ref(&agent)).contains("尚未配置项目规章"));
         let old_unread = message(2, "尚未读过的早期约束", None); let recent = (0..25).map(|i| message(10+i, &format!("历史{i}"), None)).collect::<Vec<_>>();
         let snapshot = TurnPromptSnapshot { request: "当前请求必须保留", agent_id: &agent.id, project: &project, rules: &[], agent: &agent,

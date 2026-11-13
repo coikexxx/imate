@@ -9,6 +9,7 @@ pub struct GrokAdapter {
     program: PathBuf,
     path_env: Option<std::ffi::OsString>,
     mode: RunMode,
+    reasoning_effort: Option<String>,
     active_tools: HashSet<String>,
     failed: bool,
     completed: bool,
@@ -16,7 +17,7 @@ pub struct GrokAdapter {
 
 impl GrokAdapter {
     pub fn new(program: PathBuf, mode: RunMode) -> Self {
-        Self { program, path_env: None, mode, active_tools: HashSet::new(), failed: false, completed: false }
+        Self { program, path_env: None, mode, reasoning_effort: None, active_tools: HashSet::new(), failed: false, completed: false }
     }
     pub fn with_environment(mut self, resolved: &ResolvedCli) -> Self {
         self.program = resolved.program.clone();
@@ -35,6 +36,7 @@ impl GrokAdapter {
 
 impl CliAdapter for GrokAdapter {
     fn id(&self) -> &'static str { "grok" }
+    fn set_reasoning_effort(&mut self, effort: Option<String>) { self.reasoning_effort = effort; }
     fn detect(&self) -> Option<CliInfo> { cli_registry::resolve_cli(self.id()).ok().map(|cli| cli.info) }
     fn build_command(&self, req: &TurnRequest) -> CommandSpec {
         // 只决定路径。runner 在启动前写入提示词，回合结束后删除。
@@ -46,6 +48,7 @@ impl CliAdapter for GrokAdapter {
         if let Some(model) = req.model.as_ref().filter(|model| !model.trim().is_empty()) {
             args.extend(["-m".into(), model.clone()]);
         }
+        if let Some(effort) = &self.reasoning_effort { args.extend(["--reasoning-effort".into(), effort.clone()]); }
         CommandSpec { program: self.program.clone(), args, path_env: self.path_env.clone(),
             stdin: None, prompt_file: Some(prompt_file), support_files: vec![] }
     }
@@ -134,6 +137,15 @@ mod tests {
         }).collect();
         assert_eq!(found.len(), 1, "应当恰好完成一次");
         found[0]
+    }
+
+    #[test]
+    fn reasoning_effort_adds_the_effort_flag_only_when_selected() {
+        let request = TurnRequest { prompt: "p".into(), session_id: None, cwd: std::env::temp_dir(), mode: RunMode::Discuss, model: None };
+        let mut adapter = GrokAdapter::new("grok".into(), RunMode::Discuss);
+        assert!(!adapter.build_command(&request).args.iter().any(|arg| arg == "--reasoning-effort"));
+        adapter.set_reasoning_effort(Some("xhigh".into()));
+        assert!(adapter.build_command(&request).args.windows(2).any(|pair| pair == ["--reasoning-effort", "xhigh"]));
     }
 
     #[test]

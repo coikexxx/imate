@@ -4,6 +4,7 @@ import { api } from "../api";
 import { defaultModelHint, memberModelOptions, selectableClis } from "../lib/cliConfig";
 import { composePersona, emptyPersona, parsePersona } from "../lib/persona";
 import { normalizeName } from "../lib/mentions";
+import { keepEffortForCli, reasoningOptions, supportsReasoningEffort } from "../lib/reasoning";
 import { validateAgent } from "../lib/wizard";
 import type { AgentInput, CliConfig, CliInfo, DraftInput, PersonaTemplate } from "../types";
 import { PersonaEditor } from "./PersonaEditor";
@@ -44,6 +45,7 @@ export function AgentForm({
   const [role, setRole] = useState(initial?.role ?? "");
   const [cli, setCli] = useState(initial?.cli ?? clis.find((c) => c.installed && c.supported)?.id ?? "");
   const [model, setModel] = useState(initial?.model ?? "");
+  const [effort, setEffort] = useState(initial?.cli === "dsh" ? "" : initial?.reasoningEffort ?? "");
   const [isLeader, setIsLeader] = useState(forceLeader || (initial?.isLeader ?? false));
   const [persona, setPersona] = useState(initial?.persona ?? composePersona(emptyPersona()));
   const [error, setError] = useState<string | null>(null);
@@ -81,6 +83,7 @@ export function AgentForm({
       persona,
       cli,
       model: model.trim() || null,
+      reasoningEffort: supportsReasoningEffort(cli) && effort ? effort : null,
       isLeader,
     };
     const selected = clis.find((c) => c.id === cli);
@@ -129,7 +132,7 @@ export function AgentForm({
           </datalist>
         </Field>
         <Field label="CLI">
-          <Select aria-label="CLI" value={cli} onChange={(value) => { setCli(value); setModel(""); }}
+          <Select aria-label="CLI" value={cli} onChange={(value) => { setCli(value); setModel(""); setEffort((current) => keepEffortForCli(value, current)); }}
             options={[{ value: "", label: "请选择", disabled: true }, ...visibleClis.map((c) => ({ value: c.id, disabled: !c.installed || !c.supported,
               label: `${c.label}${!c.supported ? "（尚未接入）" : c.installed ? (c.version ? `（${c.version}）` : "") : "（未安装）"}${closed(c.id) ? "（已关闭）" : ""}` }))]} />
         </Field>
@@ -140,6 +143,10 @@ export function AgentForm({
                 options={[{ value: "", label: defaultModelHint(cliConfig) }, ...modelChoice.options]} />
             ) : <input className={inputClass} value={model} onChange={(e) => setModel(e.target.value)} />}
         </Field>
+        {supportsReasoningEffort(cli) && <Field label="推理强度（可选，留空沿用 CLI 配置）">
+          <Select aria-label="推理强度" value={effort} onChange={setEffort}
+            options={reasoningOptions(cli, effort).map(({ value, label }) => ({ value, label }))} />
+        </Field>}
       </div>
 
       <label className="flex items-center gap-2 text-sm">

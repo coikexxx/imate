@@ -1,6 +1,7 @@
 mod fs_watch;
 mod files;
 mod proxy;
+mod reasoning;
 mod dsh_config;
 mod chat;
 mod orchestrator;

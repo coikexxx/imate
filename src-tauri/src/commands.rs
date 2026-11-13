@@ -781,7 +781,8 @@ impl AppState {
             runtime.reserve_session(&prepared.agent.cli, request.session_id.as_deref(), &reservation)?;
             let baseline = request.session_id.as_deref().map(|id| runs::latest_usage(&tx, &prepared.agent.id, id)).transpose()?.flatten()
                 .and_then(|value| serde_json::from_value(value).ok());
-            let adapter = make_adapter(cli, RunMode::Execute, baseline.clone())?;
+            let mut adapter = make_adapter(cli, RunMode::Execute, baseline.clone())?;
+            adapter.set_reasoning_effort(prepared.agent.reasoning_effort.clone());
             let spec = adapter.build_command(&request);
             let command = serde_json::to_string(&json!({"program":spec.program, "args":spec.args}))
                 .map_err(|e| AppError::Invalid(e.to_string()))?;
@@ -838,7 +839,8 @@ impl AppState {
             runtime.reserve_session(&prepared.agent.cli, request.session_id.as_deref(), &reservation)?;
             let baseline = request.session_id.as_deref().map(|id| runs::latest_usage(&tx, &prepared.agent.id, id)).transpose()?.flatten()
                 .and_then(|value| serde_json::from_value(value).ok());
-            let adapter = make_adapter(cli, RunMode::Execute, baseline.clone())?;
+            let mut adapter = make_adapter(cli, RunMode::Execute, baseline.clone())?;
+            adapter.set_reasoning_effort(prepared.agent.reasoning_effort.clone());
             let spec = adapter.build_command(&request);
             let command = serde_json::to_string(&json!({"program": spec.program, "args": spec.args})).map_err(|e| AppError::Invalid(e.to_string()))?;
             let run = runs::insert_running(&tx, Some(&prepared.agent.id), "execute", &command, request.session_id.as_deref())?;
@@ -1020,7 +1022,9 @@ impl AppState {
         tx.execute("UPDATE projects SET status='idle' WHERE id=?1", [project_id])?;
         let prepared = ChatService::send(&tx, project_id, started.user_message.id, true)?;
         let request = ChatService::request(&prepared, started.request.cwd.clone());
-        let spec = make_adapter(cli, RunMode::Execute, None)?.build_command(&request);
+        let mut adapter = make_adapter(cli, RunMode::Execute, None)?;
+        adapter.set_reasoning_effort(prepared.agent.reasoning_effort.clone());
+        let spec = adapter.build_command(&request);
         let run = runs::insert_running(&tx, Some(&prepared.agent.id), "execute",
             &serde_json::to_string(&json!({"program":spec.program,"args":spec.args})).map_err(|e| AppError::Invalid(e.to_string()))?, None)?;
         runs::set_requested_model(&tx, &run.id, request.model.as_deref())?;
@@ -1171,7 +1175,7 @@ fn spawn_direct(app: tauri::AppHandle, project_id: String, started: StartedMessa
 async fn execute_project(app: tauri::AppHandle, mut started: StartedMessage, cli: crate::cli_registry::ResolvedCli) {
     let mut retried = false;
     loop {
-        let adapter = match app.state::<AppState>().make_runtime_adapter(&cli, RunMode::Execute, started.baseline.clone()) {
+        let mut adapter = match app.state::<AppState>().make_runtime_adapter(&cli, RunMode::Execute, started.baseline.clone()) {
             Ok(adapter) => adapter,
             Err(error) => {
                 let outcome = crate::runner::RunOutcome { status: "failed".into(), session_id: started.request.session_id.clone(),
@@ -1181,6 +1185,7 @@ async fn execute_project(app: tauri::AppHandle, mut started: StartedMessage, cli
                 return;
             }
         };
+        adapter.set_reasoning_effort(started.prepared.agent.reasoning_effort.clone());
         let outcome = crate::runner::run_turn_managed(adapter, started.request.clone(), started.cancellation.clone(), |event| {
             let state = app.state::<AppState>();
             match state.apply_project_event(&started, event) {
@@ -1382,6 +1387,7 @@ async fn run_orchestrated(
         Err(error) => return refuse(&error.to_string()),
     };
     adapter.set_elevated(spec.elevated);
+    adapter.set_reasoning_effort(agent.reasoning_effort.clone());
     let request = crate::adapters::TurnRequest { prompt: spec.prompt.clone(), session_id: session,
         cwd: folder.clone(), mode, model: agent.model.clone() };
     record_requested_model(&state, &spec.run_id, request.model.as_deref());
@@ -1617,7 +1623,7 @@ mod integration_tests {
         let first = projects::create(&conn, "甲", "", folder.path().to_str().unwrap()).unwrap();
         let second = projects::create(&conn, "乙", "", folder.path().to_str().unwrap()).unwrap();
         let input = NewAgent { name: "组长".into(), role: "开发".into(),
-            persona: "## 定位\n开发\n## 职责\n测试\n## 边界\n不越界\n## 工作风格\n务实".into(), cli: "codex".into(), model: None, is_leader: true };
+            persona: "## 定位\n开发\n## 职责\n测试\n## 边界\n不越界\n## 工作风格\n务实".into(), cli: "codex".into(), model: None, is_leader: true, reasoning_effort: None };
         agents::create(&conn, &first.id, &input).unwrap(); agents::create(&conn, &second.id, &input).unwrap();
         let cli = crate::cli_registry::ResolvedCli { info: CliInfo { id: "codex".into(), label: "Codex".into(), installed: true,
             supported: true, path: Some("/bin/test".into()), version: None }, program: "/bin/test".into(), path_env: "/bin".into(), environment_source: crate::cli_registry::EnvironmentSource::Process };
@@ -2032,7 +2038,7 @@ mod integration_tests {
         let project = projects::create(&conn, "甲", "", folder.to_str().unwrap()).unwrap();
         let input = NewAgent { name: "组长".into(), role: "开发".into(),
             persona: "## 定位\n开发\n## 职责\n测试\n## 边界\n不越界\n## 工作风格\n务实".into(),
-            cli: "codex".into(), model: None, is_leader: true };
+            cli: "codex".into(), model: None, is_leader: true, reasoning_effort: None };
         let agent = agents::create(&conn, &project.id, &input).unwrap();
         let run = runs::insert_running(&conn, Some(&agent.id), "execute", "probe", None).unwrap();
         let mut sleeper = {

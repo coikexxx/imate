@@ -20,15 +20,25 @@ pub struct DshSettings { pub authentication: Authentication, pub profile: Profil
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DshModelSelection { pub profile: Profile, pub provider: String, pub model: String }
+pub struct DshModelSelection {
+    pub profile: Profile, pub provider: String, pub model: String,
+    /// 推理强度（如 high、off）。为空时由 Dsh 配置里的供应商默认值决定。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
 
 fn invalid(message: &str) -> AppError { AppError::Invalid(message.into()) }
 fn valid_id(value: &str) -> bool { !value.trim().is_empty() && value.len() <= 512 && !value.chars().any(char::is_control) }
+/// 强度标识只允许短的字母数字、连字符和下划线，避免把任意文本写进补丁。
+fn valid_effort(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 32 && value.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
 
 pub fn parse_selection(value: Option<&str>) -> AppResult<Option<DshModelSelection>> {
     let Some(value) = value.filter(|value| !value.trim().is_empty()) else { return Ok(None); };
     let selection: DshModelSelection = serde_json::from_str(value).map_err(|_| invalid("Dsh 模型选择无效，请从已配置模型列表重新选择"))?;
     if !valid_id(&selection.provider) || !valid_id(&selection.model) { return Err(invalid("Dsh 供应商或模型标识无效，请重新选择")); }
+    if selection.reasoning_effort.as_deref().is_some_and(|effort| !valid_effort(effort)) { return Err(invalid("Dsh 推理强度无效，请重新选择")); }
     Ok(Some(selection))
 }
 
@@ -45,7 +55,18 @@ pub fn save(conn: &Connection, settings: &DshSettings) -> AppResult<()> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DshModel { pub id: String, pub name: String }
+pub struct DshModel {
+    pub id: String, pub name: String,
+    /// 该模型声明的可选推理强度，从最弱到最强；没有声明时为空。
+    #[serde(default)]
+    pub efforts: Vec<DshEffort>,
+    /// Dsh 配置里为该模型设置的默认强度。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DshEffort { pub id: String, pub name: String }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DshModelGroup { pub id: String, pub name: String, pub models: Vec<DshModel> }
@@ -61,7 +82,9 @@ impl DshCatalog {
     pub fn from_event(event: Value) -> AppResult<Self> {
         let catalog: Self = serde_json::from_value(event).map_err(|_| invalid("Dsh 模型目录格式无法识别，请核对 CLI 版本"))?;
         if catalog.groups.len() > 128 || catalog.groups.iter().any(|group| !valid_id(&group.id) || !valid_id(&group.name)
-            || group.models.len() > 4096 || group.models.iter().any(|model| !valid_id(&model.id) || !valid_id(&model.name))) {
+            || group.models.len() > 4096 || group.models.iter().any(|model| !valid_id(&model.id) || !valid_id(&model.name)
+                || model.efforts.len() > 16 || model.efforts.iter().any(|effort| !valid_effort(&effort.id) || !valid_id(&effort.name))
+                || model.default_effort.as_deref().is_some_and(|effort| !valid_effort(effort)))) {
             return Err(invalid("Dsh 模型目录包含无效字段"));
         }
         Ok(catalog)
@@ -81,7 +104,9 @@ pub fn configure_command(spec: &mut CommandSpec, request: &TurnRequest, settings
     let mut patch = vec![json!({"id":"credentials","disabled":true}), json!({"id":"authorization","disabled":true}),
         json!({"id":"deepseek-account","disabled":true}), json!({"id":"headless-runner","disabled":true})];
     if let Some(selection) = &selection {
-        patch.push(json!({"id":"agent-default-model","config":{"provider":selection.provider,"model":selection.model}}));
+        let mut model = json!({"provider":selection.provider,"model":selection.model});
+        if let Some(effort) = &selection.reasoning_effort { model["reasoningEffort"] = json!(effort); }
+        patch.push(json!({"id":"agent-default-model","config":model}));
     } else if settings.authentication == Authentication::Account && !catalog {
         patch.push(json!({"id":"agent-default-model","config":{"provider":"deepseek-account","model":"deepseek-flash"}}));
     }
@@ -113,14 +138,49 @@ mod tests {
 
     #[test]
     fn dsh_model_selection_is_structured_and_validated() {
-        let selection = DshModelSelection { profile: Profile::Web, provider: "gpt".into(), model: "gpt-6".into() };
+        let selection = DshModelSelection { profile: Profile::Web, provider: "gpt".into(), model: "gpt-6".into(), reasoning_effort: None };
         let encoded = serde_json::to_string(&selection).unwrap();
+        assert!(!encoded.contains("reasoningEffort"), "未选强度时不写出该字段，旧数据与新数据保持一致");
         assert_eq!(parse_selection(Some(&encoded)).unwrap(), Some(selection));
         assert_eq!(parse_selection(None).unwrap(), None);
         for invalid in ["gpt-6", r#"{"profile":"../web","provider":"gpt","model":"m"}"#,
-            r#"{"profile":"web","provider":"","model":"m"}"#, r#"{"profile":"web","provider":"gpt","model":"m\nsecret"}"#] {
-            assert!(parse_selection(Some(invalid)).is_err());
+            r#"{"profile":"web","provider":"","model":"m"}"#, r#"{"profile":"web","provider":"gpt","model":"m\nsecret"}"#,
+            r#"{"profile":"web","provider":"gpt","model":"m","reasoningEffort":""}"#,
+            r#"{"profile":"web","provider":"gpt","model":"m","reasoningEffort":"high\nx"}"#,
+            r#"{"profile":"web","provider":"gpt","model":"m","reasoningEffort":"a b"}"#] {
+            assert!(parse_selection(Some(invalid)).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn dsh_reasoning_effort_is_kept_in_selection_and_written_to_the_model_patch() {
+        let selection = DshModelSelection { profile: Profile::Web, provider: "claude".into(), model: "claude-opus-5-5".into(), reasoning_effort: Some("high".into()) };
+        let encoded = serde_json::to_string(&selection).unwrap();
+        assert_eq!(parse_selection(Some(&encoded)).unwrap(), Some(selection));
+        let patch_of = |model: Option<String>| {
+            let request = TurnRequest { prompt: "p".into(), session_id: None, cwd: std::env::temp_dir(), mode: RunMode::Execute, model };
+            let adapter = crate::adapters::dsh::DshAdapter::new("dsh".into(), RunMode::Execute);
+            let spec = adapter.build_command(&request);
+            let patch: serde_json::Value = serde_json::from_str(&spec.support_files[1].content).unwrap();
+            patch.as_array().unwrap().iter().find(|row| row["id"] == "agent-default-model").unwrap()["config"].clone()
+        };
+        let with_effort = patch_of(Some(encoded));
+        assert_eq!(with_effort["reasoningEffort"], "high");
+        assert_eq!(with_effort["model"], "claude-opus-5-5");
+        let without = patch_of(Some(r#"{"profile":"web","provider":"claude","model":"claude-opus-5-5"}"#.into()));
+        assert!(without.get("reasoningEffort").is_none(), "没选强度时不覆盖 Dsh 配置里的默认值");
+    }
+
+    #[test]
+    fn dsh_catalog_carries_model_efforts_and_rejects_bad_ones() {
+        let event = |efforts: serde_json::Value| json!({"type":"imates_dsh_catalog","profile":"web","failures":[],
+            "groups":[{"id":"claude","name":"claude","models":[{"id":"m","name":"m","efforts":efforts,"defaultEffort":"high"}]}]});
+        let catalog = DshCatalog::from_event(event(json!([{"id":"off","name":"off"},{"id":"high","name":"high"}]))).unwrap();
+        assert_eq!(catalog.groups[0].models[0].efforts.len(), 2);
+        assert_eq!(catalog.groups[0].models[0].default_effort.as_deref(), Some("high"));
+        let legacy = DshCatalog::from_event(json!({"type":"imates_dsh_catalog","profile":"web","groups":[{"id":"g","name":"g","models":[{"id":"m","name":"m"}]}]})).unwrap();
+        assert!(legacy.groups[0].models[0].efforts.is_empty(), "旧格式的目录没有强度字段也能读取");
+        assert!(DshCatalog::from_event(event(json!([{"id":"bad id","name":"x"}]))).is_err());
     }
 
     #[test]

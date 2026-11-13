@@ -639,7 +639,7 @@ mod tests {
     fn seed_agent(conn: &Connection, project_id: &str, name: &str, cli: &str, model: Option<&str>, leader: bool) -> String {
         let agent = crate::store::agents::create(conn, project_id, &crate::store::agents::NewAgent {
             name: name.into(), role: "开发".into(), persona: "## 定位\n开发\n## 职责\n测试\n## 边界\n不越界\n## 工作风格\n务实".into(), cli: cli.into(),
-            model: model.map(str::to_string), is_leader: leader,
+            model: model.map(str::to_string), is_leader: leader, reasoning_effort: None,
         }).unwrap();
         crate::store::agents::set_session(conn, &agent.id, Some("会话")).unwrap();
         agent.id

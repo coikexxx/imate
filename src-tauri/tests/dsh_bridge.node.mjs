@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { prepareRuntime, buildCatalog, publicFailure, readSourceRows } from '../src/dsh_bridge.mjs';
+import { prepareRuntime, buildCatalog, publicFailure, readSourceRows, readEfforts } from '../src/dsh_bridge.mjs';
 
 test('来源 profile 仅通过只读接口组合，不触发原生 profile 迁移写入',()=>{
   const boot = {
@@ -59,4 +59,19 @@ test('账号服务使用来源配置启动，目录故障逐供应商隔离且�
 test('配置删除或模型不再可用时明确失败，不回退到其他模型',async()=>{
   const {ctx,rows}=fixture();
   await assert.rejects(()=>prepareRuntime(ctx,{operation:'run',profile:'web',authentication:'headless',selection:{provider:'missing',model:'m'}},rows));
+});
+
+test('目录携带模型声明的推理强度，读不到或含非法值时降级为空而不影响模型',async()=>{
+  const info={ok:{reasoning:{efforts:[{id:'off',name:'off'},{id:'high',name:'high'},{id:'bad id',name:'x'}],defaultEffort:'high'}},plain:{},broken:null};
+  const ctx={llm:{
+    listProviders:()=>[{id:'p',name:'p'}],
+    listModels:async()=>['ok','plain','broken'].map(id=>({id,name:id})),
+    resolveModelInfo:async(provider,model)=>{if(info[model]===null)throw new Error('私密信息 PRIVATE_REF');return {provider,id:model,name:model,...info[model]};},
+  }};
+  const models=(await buildCatalog(ctx,'web')).groups[0].models;
+  assert.deepEqual(models.find(m=>m.id==='ok'),{id:'ok',name:'ok',efforts:[{id:'off',name:'off'},{id:'high',name:'high'}],defaultEffort:'high'});
+  assert.deepEqual(models.find(m=>m.id==='plain'),{id:'plain',name:'plain'});
+  assert.deepEqual(models.find(m=>m.id==='broken'),{id:'broken',name:'broken'});
+  assert.equal(JSON.stringify(models).includes('PRIVATE_REF'),false);
+  assert.deepEqual(await readEfforts({llm:{}},'p','m'),{});
 });

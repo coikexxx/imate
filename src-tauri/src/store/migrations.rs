@@ -124,6 +124,8 @@ ALTER TABLE messages ADD COLUMN run_id TEXT;
 "#, r#"
 ALTER TABLE instructions ADD COLUMN elevated_allowed INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE runs ADD COLUMN elevated INTEGER NOT NULL DEFAULT 0;
+"#, r#"
+ALTER TABLE agents ADD COLUMN reasoning_effort TEXT;
 "#];
 
 /// 把数据库升级到最新版本。版本号记在 `PRAGMA user_version`。
@@ -243,6 +245,9 @@ mod tests {
         let allowed: bool = conn.query_row("SELECT elevated_allowed FROM instructions WHERE id='i'", [], |row| row.get(0)).unwrap();
         let elevated: bool = conn.query_row("SELECT elevated FROM runs WHERE id='r'", [], |row| row.get(0)).unwrap();
         assert!(!allowed && !elevated, "旧数据默认关闭高权限且未提权");
+        assert!(columns("agents").contains(&"reasoning_effort".to_string()));
+        let effort: Option<String> = conn.query_row("SELECT reasoning_effort FROM agents LIMIT 1", [], |row| row.get(0)).unwrap_or(None);
+        assert_eq!(effort, None, "旧成员没有推理强度，沿用 CLI 自己的配置");
     }
 
     #[test]

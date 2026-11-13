@@ -146,6 +146,9 @@ impl crate::adapters::CliAdapter for ProxyAdapter {
     fn detect(&self) -> Option<crate::cli_registry::CliInfo> { self.inner.detect() }
     fn build_command(&self, request: &crate::adapters::TurnRequest) -> crate::adapters::CommandSpec { self.inner.build_command(request) }
     fn environment(&self) -> Vec<(String, Option<String>)> { self.environment.clone() }
+    /// 必须转给内层适配器，否则提权档位在包装后被默认实现吞掉。
+    fn set_elevated(&mut self, elevated: bool) { self.inner.set_elevated(elevated); }
+    fn set_reasoning_effort(&mut self, effort: Option<String>) { self.inner.set_reasoning_effort(effort); }
     fn parse_line(&mut self, line: &str) -> Vec<crate::adapters::AgentEvent> { self.inner.parse_line(line) }
 }
 
@@ -192,6 +195,30 @@ fn system_proxy() -> AppResult<Option<ProxyEnvironment>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_adapter_forwards_reasoning_effort_to_every_inner_adapter() {
+        use crate::adapters::{CliAdapter, RunMode, TurnRequest};
+        let request = TurnRequest { prompt: "p".into(), session_id: None, cwd: std::env::temp_dir(), mode: RunMode::Execute, model: None };
+        let wrap = |inner: Box<dyn CliAdapter>| { let mut adapter = ProxyAdapter::new(inner, vec![]); adapter.set_reasoning_effort(Some("high".into())); adapter.build_command(&request).args };
+        assert!(wrap(Box::new(crate::adapters::claude::ClaudeAdapter::new("claude".into(), RunMode::Execute))).windows(2).any(|pair| pair == ["--effort", "high"]));
+        assert!(wrap(Box::new(crate::adapters::grok::GrokAdapter::new("grok".into(), RunMode::Execute))).windows(2).any(|pair| pair == ["--reasoning-effort", "high"]));
+        assert!(wrap(Box::new(crate::adapters::codex::CodexAdapter::new("codex".into(), RunMode::Execute, None))).iter().any(|arg| arg == "model_reasoning_effort=\"high\""));
+    }
+
+    #[test]
+    fn proxy_adapter_forwards_elevation_to_the_inner_adapter() {
+        use crate::adapters::{CliAdapter, RunMode, TurnRequest};
+        let request = TurnRequest { prompt: "p".into(), session_id: None, cwd: std::env::temp_dir(), mode: RunMode::Execute, model: None };
+        let permission = |elevated: bool| {
+            let mut adapter = ProxyAdapter::new(Box::new(crate::adapters::dsh::DshAdapter::new("dsh".into(), RunMode::Execute)), vec![]);
+            adapter.set_elevated(elevated);
+            let args = adapter.build_command(&request).args;
+            args.windows(2).find(|pair| pair[0] == "--permission-mode").map(|pair| pair[1].clone()).unwrap()
+        };
+        assert_eq!(permission(false), "workspace-write");
+        assert_eq!(permission(true), "danger-full-access", "包了代理层之后，授权并继续必须仍然切到最高权限");
+    }
 
     #[test]
     fn proxy_defaults_to_system_and_persists_validated_settings() {

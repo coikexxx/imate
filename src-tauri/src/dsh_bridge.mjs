@@ -61,13 +61,28 @@ export async function prepareRuntime(ctx, config, rows) {
   }
 }
 
+const safeEffort = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(value);
+
+/** 读取单个模型声明的推理强度。读不到时返回空，不影响模型本身出现在列表里。 */
+export async function readEfforts(ctx, provider, model) {
+  try {
+    const reasoning = (await ctx.llm.resolveModelInfo(provider, model)).reasoning;
+    if (!reasoning) return {};
+    const efforts = reasoning.efforts.filter(effort => safeEffort(effort.id) && safeLabel(effort.name)).map(effort => ({ id: effort.id, name: effort.name }));
+    return { efforts, ...(safeEffort(reasoning.defaultEffort) ? { defaultEffort: reasoning.defaultEffort } : {}) };
+  } catch {
+    return {};
+  }
+}
+
 export async function buildCatalog(ctx, profile) {
   const results = await Promise.all(ctx.llm.listProviders().map(async provider => {
     try {
       if (!safeLabel(provider.id) || !safeLabel(provider.name)) throw new Error('无效供应商');
       const models = await ctx.llm.listModels(provider.id);
-      return { group: { id: provider.id, name: provider.name, models: models.filter(model => safeLabel(model.id) && safeLabel(model.name))
-        .map(model => ({ id: model.id, name: model.name })) } };
+      const usable = models.filter(model => safeLabel(model.id) && safeLabel(model.name));
+      return { group: { id: provider.id, name: provider.name, models: await Promise.all(usable.map(async model => ({
+        id: model.id, name: model.name, ...await readEfforts(ctx, provider.id, model.id) }))) } };
     } catch {
       return { failure: { provider: safeLabel(provider.id) ? provider.id : 'unknown', message: publicFailure() } };
     }

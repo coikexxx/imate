@@ -1,8 +1,9 @@
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useStore } from "zustand";
 import { api } from "../api";
 import { mentionCandidates, parseMention, shouldSendOnEnter } from "../lib/mentions";
+import { errorHint } from "../lib/errorHint";
 import { modelNote } from "../lib/modelNote";
 import { shirtColor } from "../office/layout";
 import { attachProjectEvents, projectStore } from "../stores/project";
@@ -10,6 +11,21 @@ import type { Agent, Instruction, ProjectStatus, TaskItem } from "../types";
 import { InstructionBar } from "./InstructionBar";
 import { Button, inputClass } from "./ui";
 import { Switch } from "./Switch";
+
+/** 悬停或键盘聚焦时在上方弹出的说明气泡。 */
+function Tips({ label, children }: { label: string; children: ReactNode }) {
+  const id = useId();
+  return <span className="group relative inline-flex">
+    <button type="button" aria-label={label} aria-describedby={id}
+      className="inline-flex h-4 w-4 items-center justify-center rounded-full text-slate-400 hover:text-slate-600 focus-visible:text-slate-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-emerald-700">
+      <Icon name="info" width="14" height="14" />
+    </button>
+    <span id={id} role="tooltip"
+      className="pointer-events-none invisible absolute bottom-full left-1/2 z-20 mb-2 w-72 -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs leading-5 text-slate-600 opacity-0 shadow-lg transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
+      {children}
+    </span>
+  </span>;
+}
 import { Icon } from "./Icon";
 
 interface Props { projectId: string; agents: Agent[]; folderExists: boolean; mention?: string; onMentionUsed?: () => void; onFinished?: () => void }
@@ -200,6 +216,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       <Button className="mt-2" onClick={() => cleanup(notice.runId)}>我已处理残留进程，解除阻塞</Button>
     </div>)}
     {projectMatches && state.error && <p role="alert" className="px-3 py-2 text-xs text-red-300">{state.error}</p>}
+    {projectMatches && errorHint(state.error) && <p className="mx-3 mb-2 rounded-lg border border-[#d8b878] bg-[#fbf3df] px-3 py-2 text-xs leading-5 text-[#6b4a12]">提示：{errorHint(state.error)}</p>}
     {projectMatches && <InstructionBar projectStatus={projectStatus} instruction={instruction} tasks={tasks} agents={agents}
       supplement={supplement} busy={acting || busy} onSupplementChange={setSupplement}
       onRetry={() => void resume("retry")} onSupplement={() => void resume("supplement", supplement)} onAbandon={() => void resume("abandon")}
@@ -213,15 +230,18 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <p className="text-[11px] text-slate-500"><kbd className="rounded border border-slate-700 bg-white px-1">Enter</kbd> 发送 · Shift+Enter 换行</p>
-          <div className="flex items-center gap-2 text-[11px] text-slate-500" title="开启后，执行任务被权限拦截时会用最高权限自动重跑一次；只影响之后新建的指令，可写 .git、可删文件。">
+          <div className="flex items-center gap-2 text-[11px] text-slate-500">
             <Switch checked={allowElevated} disabled={!folderExists} label="受阻时自动提权" onChange={(next) => void toggleElevation(next)} />
             <span>受阻时自动提权</span>
+            <Tips label="关于受阻时自动提权">
+              <p>执行自动运行工具，可能写出项目目录；沿用 CLI 配置。</p>
+              <p className="mt-1">开启自动提权后，受阻任务会用最高权限重跑一次，并恢复原档位。只影响之后新建的指令，可写 .git、可删文件。</p>
+            </Tips>
           </div>
         </div>
         <div className="flex shrink-0 gap-2"><Button variant="danger" disabled={!projectMatches || !state.activeRunId || stopping} onClick={stop}>{stopping ? "正在停止…" : "停止"}</Button>
           <Button variant="primary" disabled={!ready || busy || !input.trim() || !folderExists || state.cleanupRequired.length > 0} onClick={send}>发送指令<Icon name="arrow" width="16" height="16" /></Button></div>
       </div>
-      <p className="mt-3 text-xs leading-5 text-slate-500">执行自动运行工具，可能写出项目目录；沿用 CLI 配置。开启自动提权后，受阻任务会用最高权限重跑一次，并恢复原档位。</p>
     </div>
   </section>;
 }

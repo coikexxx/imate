@@ -12,6 +12,7 @@ const paths = {
   team: "M9 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8 M2 21v-3c0-3 14-3 14 0v3 M17 5a3 3 0 0 1 0 6 M19 15c3 0 3 2 3 5",
   connection: "M8 4v5 M16 4v5 M6 9h12v3a6 6 0 0 1-12 0z M12 18v4",
   close: "M6 6l12 12 M18 6 6 18",
+  info: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18 M12 11v5 M12 8h.01",
   grid: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
 } as const;
 

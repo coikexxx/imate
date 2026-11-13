@@ -72,8 +72,8 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        // 新增「运行模型记录」后为 3；新增「受阻与提权」后为 4。
-        assert_eq!(version, 4);
+        // 新增「运行模型记录」后为 3；新增「受阻与提权」后为 4；新增成员「推理强度」后为 5。
+        assert_eq!(version, 5);
     }
 
     #[test]

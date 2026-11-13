@@ -142,9 +142,9 @@ mod tests {
     fn setup() -> (rusqlite::Connection, String, Vec<Agent>) {
         let conn = open_in_memory().unwrap();
         let project = projects::create(&conn, "项目", "描述", "/tmp/项目").unwrap();
-        let leader = agents::create(&conn, &project.id, &NewAgent { name: "王".into(), role: "组长".into(), persona: PERSONA.into(), cli: "claude".into(), model: None, is_leader: true }).unwrap();
-        let member = agents::create(&conn, &project.id, &NewAgent { name: "王五".into(), role: "开发".into(), persona: PERSONA.replace("本人", "其他成员"), cli: "codex".into(), model: None, is_leader: false }).unwrap();
-        let mut qa = NewAgent { name: "Dev".into(), role: "开发".into(), persona: PERSONA.into(), cli: "claude".into(), model: None, is_leader: false };
+        let leader = agents::create(&conn, &project.id, &NewAgent { name: "王".into(), role: "组长".into(), persona: PERSONA.into(), cli: "claude".into(), model: None, is_leader: true, reasoning_effort: None }).unwrap();
+        let member = agents::create(&conn, &project.id, &NewAgent { name: "王五".into(), role: "开发".into(), persona: PERSONA.replace("本人", "其他成员"), cli: "codex".into(), model: None, is_leader: false, reasoning_effort: None }).unwrap();
+        let mut qa = NewAgent { name: "Dev".into(), role: "开发".into(), persona: PERSONA.into(), cli: "claude".into(), model: None, is_leader: false, reasoning_effort: None };
         let dev = agents::create(&conn, &project.id, &qa).unwrap();
         qa.name = "Dev Ops".into();
         let ops = agents::create(&conn, &project.id, &qa).unwrap();

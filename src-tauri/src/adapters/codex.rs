@@ -10,6 +10,7 @@ pub struct CodexAdapter {
     path_env: Option<std::ffi::OsString>,
     mode: RunMode,
     elevated: bool,
+    reasoning_effort: Option<String>,
     usage_baseline: Option<Usage>,
     resumed: AtomicBool,
     active_tools: HashSet<String>,
@@ -21,7 +22,7 @@ pub struct CodexAdapter {
 
 impl CodexAdapter {
     pub fn new(program: PathBuf, mode: RunMode, usage_baseline: Option<Usage>) -> Self {
-        Self { program, path_env: None, mode, elevated: false, usage_baseline, resumed: AtomicBool::new(false),
+        Self { program, path_env: None, mode, elevated: false, reasoning_effort: None, usage_baseline, resumed: AtomicBool::new(false),
             active_tools: HashSet::new(), final_text: String::new(), had_text: false, failed: false, completed: false }
     }
     pub fn with_elevation(mut self, elevated: bool) -> Self { self.elevated = elevated; self }
@@ -55,6 +56,7 @@ impl CliAdapter for CodexAdapter {
     fn id(&self) -> &'static str { "codex" }
     fn detect(&self) -> Option<CliInfo> { cli_registry::resolve_cli(self.id()).ok().map(|cli| cli.info) }
     fn set_elevated(&mut self, elevated: bool) { self.elevated = elevated; }
+    fn set_reasoning_effort(&mut self, effort: Option<String>) { self.reasoning_effort = effort; }
     fn build_command(&self, req: &TurnRequest) -> CommandSpec {
         self.resumed.store(req.session_id.is_some(), Ordering::Relaxed);
         let mut args = vec!["exec".into()];
@@ -67,6 +69,7 @@ impl CliAdapter for CodexAdapter {
         args.extend(["--json".into(), "--skip-git-repo-check".into(), "-c".into(),
             format!("sandbox_mode=\"{sandbox}\""), "-c".into(), "approval_policy=\"never\"".into()]);
         if let Some(model) = req.model.as_ref().filter(|m| !m.trim().is_empty()) { args.extend(["--model".into(), model.clone()]); }
+        if let Some(effort) = &self.reasoning_effort { args.extend(["-c".into(), format!("model_reasoning_effort=\"{effort}\"")]); }
         args.push("-".into());
         CommandSpec { program: self.program.clone(), args, path_env: self.path_env.clone(),
             stdin: Some(req.prompt.clone()), prompt_file: None, support_files: vec![] }
@@ -141,6 +144,20 @@ fn command_denial(item: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use crate::adapters::{AgentEvent, CliAdapter, RunMode, TurnRequest};
+
+    #[test]
+    fn reasoning_effort_is_a_config_override_in_every_mode_and_keeps_the_sandbox() {
+        for (mode, sandbox) in [(RunMode::Discuss, "read-only"), (RunMode::Execute, "workspace-write")] {
+            let mut adapter = CodexAdapter::new("codex".into(), mode, None);
+            let request = TurnRequest { prompt: "p".into(), session_id: Some("t1".into()), cwd: std::env::temp_dir(), mode, model: None };
+            assert!(!adapter.build_command(&request).args.iter().any(|arg| arg.starts_with("model_reasoning_effort")));
+            adapter.set_reasoning_effort(Some("xhigh".into()));
+            let args = adapter.build_command(&request).args;
+            assert!(args.windows(2).any(|pair| pair == ["-c", "model_reasoning_effort=\"xhigh\""]));
+            assert!(args.windows(2).any(|pair| pair == ["-c", &format!("sandbox_mode=\"{sandbox}\"")]), "沙箱档位不受影响");
+            assert_eq!(args.last().map(String::as_str), Some("-"));
+        }
+    }
 
     #[test]
     fn fixture_keeps_only_last_agent_message_as_final_text() {

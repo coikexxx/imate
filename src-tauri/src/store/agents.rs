@@ -21,6 +21,8 @@ pub struct Agent {
     pub persona_dirty: bool,
     pub cli: String,
     pub model: Option<String>,
+    /// 非 Dsh CLI 的推理强度；Dsh 的强度在模型选择 JSON 里。空表示沿用 CLI 自己的配置。
+    pub reasoning_effort: Option<String>,
     pub is_leader: bool,
     pub session_id: Option<String>,
     pub last_seen_message_id: Option<i64>,
@@ -38,10 +40,12 @@ pub struct NewAgent {
     pub cli: String,
     pub model: Option<String>,
     pub is_leader: bool,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 const COLUMNS: &str = "id, project_id, name, role, persona, persona_dirty, cli, model, \
-                       is_leader, session_id, last_seen_message_id, seat_index, created_at";
+                       is_leader, session_id, last_seen_message_id, seat_index, created_at, reasoning_effort";
 
 fn from_row(row: &Row) -> rusqlite::Result<Agent> {
     Ok(Agent {
@@ -58,11 +62,12 @@ fn from_row(row: &Row) -> rusqlite::Result<Agent> {
         last_seen_message_id: row.get(10)?,
         seat_index: row.get(11)?,
         created_at: row.get(12)?,
+        reasoning_effort: row.get(13)?,
     })
 }
 
-/// 校验并整理输入，返回（名字，角色，模型）。
-fn normalize(input: &NewAgent) -> AppResult<(&str, &str, Option<&str>)> {
+/// 校验并整理输入，返回（名字，角色，模型，推理强度）。
+fn normalize(input: &NewAgent) -> AppResult<(&str, &str, Option<&str>, Option<String>)> {
     let name = input.name.trim();
     let role = input.role.trim();
     if name.is_empty() {
@@ -84,7 +89,8 @@ fn normalize(input: &NewAgent) -> AppResult<(&str, &str, Option<&str>)> {
         .map(str::trim)
         .filter(|m| !m.is_empty());
     if input.cli == "dsh" { crate::dsh_config::parse_selection(model)?; }
-    Ok((name, role, model))
+    let effort = crate::reasoning::normalize(&input.cli, input.reasoning_effort.as_deref())?;
+    Ok((name, role, model, effort))
 }
 
 pub fn get(conn: &Connection, id: &str) -> AppResult<Agent> {
@@ -111,7 +117,7 @@ pub fn list(conn: &Connection, project_id: &str) -> AppResult<Vec<Agent>> {
 
 /// 新建成员。项目的第一个成员总是组长；新成员指定为组长时，原组长自动卸任。
 pub fn create(conn: &Connection, project_id: &str, input: &NewAgent) -> AppResult<Agent> {
-    let (name, role, model) = normalize(input)?;
+    let (name, role, model, effort) = normalize(input)?;
     projects::get(conn, project_id)?;
     let existing = list(conn, project_id)?;
     if existing.len() as i64 >= MAX_AGENTS {
@@ -142,8 +148,8 @@ pub fn create(conn: &Connection, project_id: &str, input: &NewAgent) -> AppResul
     let id = new_id();
     conn.execute(
         "INSERT INTO agents (id, project_id, name, role, persona, cli, model, is_leader, \
-                            last_seen_message_id, seat_index, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                            last_seen_message_id, seat_index, created_at, reasoning_effort) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             id,
             project_id,
@@ -155,7 +161,8 @@ pub fn create(conn: &Connection, project_id: &str, input: &NewAgent) -> AppResul
             is_leader,
             last_seen_message_id,
             seat_index,
-            now_ms()
+            now_ms(),
+            effort
         ],
     )?;
     projects::touch(conn, project_id)?;
@@ -164,7 +171,7 @@ pub fn create(conn: &Connection, project_id: &str, input: &NewAgent) -> AppResul
 
 /// 编辑成员。组长不能直接卸任，只能通过把另一位成员设为组长来交接。
 pub fn update(conn: &Connection, id: &str, input: &NewAgent) -> AppResult<Agent> {
-    let (name, role, model) = normalize(input)?;
+    let (name, role, model, effort) = normalize(input)?;
     let old = get(conn, id)?;
     let siblings = list(conn, &old.project_id)?;
     if siblings.iter().any(|a| a.id != id && a.name.trim().to_lowercase() == name.to_lowercase()) {
@@ -188,8 +195,8 @@ pub fn update(conn: &Connection, id: &str, input: &NewAgent) -> AppResult<Agent>
                            session_id = CASE \
                                WHEN cli != ?5 OR COALESCE(model, '') != COALESCE(?6, '') \
                                THEN NULL ELSE session_id END, \
-                           cli = ?5, model = ?6, is_leader = ?7 \
-         WHERE id = ?8",
+                           cli = ?5, model = ?6, is_leader = ?7, reasoning_effort = ?8 \
+         WHERE id = ?9",
         params![
             name,
             role,
@@ -198,6 +205,7 @@ pub fn update(conn: &Connection, id: &str, input: &NewAgent) -> AppResult<Agent>
             input.cli,
             model,
             input.is_leader,
+            effort,
             id
         ],
     )?;
@@ -254,7 +262,7 @@ mod tests {
     #[test]
     fn dsh_rejects_plain_model_names_and_preserves_structured_selection() {
         let input = NewAgent { name: "成员".into(), role: "开发".into(), cli: "dsh".into(), model: Some("gpt-6".into()),
-            persona: "## 定位\n开发\n## 职责\n实现\n## 边界\n遵守规章\n## 工作风格\n务实".into(), is_leader: false };
+            persona: "## 定位\n开发\n## 职责\n实现\n## 边界\n遵守规章\n## 工作风格\n务实".into(), is_leader: false, reasoning_effort: None };
         assert!(normalize(&input).is_err());
         let mut valid = input;
         valid.model = Some(r#"{"profile":"web","provider":"gpt","model":"gpt-6"}"#.into());
@@ -273,7 +281,7 @@ mod tests {
             persona: PERSONA.to_string(),
             cli: "claude".to_string(),
             model: None,
-            is_leader,
+            is_leader, reasoning_effort: None,
         }
     }
 
@@ -281,6 +289,29 @@ mod tests {
         let conn = open_in_memory().unwrap();
         let project = projects::create(&conn, "测试项目", "", "D:/x").unwrap();
         (conn, project.id)
+    }
+
+    #[test]
+    fn reasoning_effort_is_saved_validated_per_cli_and_does_not_reset_the_session() {
+        let (conn, pid) = setup();
+        let mut claude = input("老王", true);
+        assert_eq!(create(&conn, &pid, &claude).unwrap().reasoning_effort, None, "不选就是沿用 CLI 配置");
+        let id = list(&conn, &pid).unwrap()[0].id.clone();
+        set_session(&conn, &id, Some("thread-1")).unwrap();
+        claude.reasoning_effort = Some(" high ".into());
+        let saved = update(&conn, &id, &claude).unwrap();
+        assert_eq!(saved.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(saved.session_id.as_deref(), Some("thread-1"), "只改强度不丢会话");
+        claude.reasoning_effort = Some("  ".into());
+        assert_eq!(update(&conn, &id, &claude).unwrap().reasoning_effort, None, "空白等于清除");
+        for (cli, bad) in [("codex", "none"), ("grok", "max"), ("claude", "turbo"), ("dsh", "high")] {
+            let mut other = input("老王", true);
+            other.cli = cli.into();
+            if cli == "dsh" { other.model = Some(r#"{\"profile\":\"web\",\"provider\":\"p\",\"model\":\"m\"}"#.into()); }
+            other.reasoning_effort = Some(bad.into());
+            assert!(update(&conn, &id, &other).is_err(), "{cli} 不应接受 {bad}");
+        }
+        assert_eq!(get(&conn, &id).unwrap().reasoning_effort, None, "校验失败不留下半成品");
     }
 
     #[test]
