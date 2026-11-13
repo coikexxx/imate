@@ -178,7 +178,7 @@ M0 确认：claude 的 `bypassPermissions`、codex 的 `workspace-write`、grok 
 
 | CLI | M0 权限证据 | 会话与模式切换 | 用量归一规则 | 接入阶段 |
 |---|---|---|---|---|
-| claude | `system/init.permissionMode` 可核对。Windows 2.1.319 在 2026-11-11 有工具层拒写：plan 下 Write 被拒绝且目标文件不存在，bypassPermissions 下 Write 成功。M0 另有写入计划目录的样本。macOS 2.1.322 仍无工具层证据。以上都不等于硬隔离 | Windows 2.1.319 同一 session 的 plan → bypassPermissions → plan 已核对模式、续接和文件事实。macOS 2.1.322 只核对了模式回显和续接，该次 plan 请求没有触发写工具 | macOS G3 与 Windows 2.1.319 都对照了 `result.usage` 与 `model_usage_since_last_result`；后者的 `costUSD` 是本回合费用，`total_cost_usd` 为会话累计；不重复累加 assistant usage | M2 |
+| claude | `system/init.permissionMode` 可核对。Windows 2.1.319 在 2026-11-11 有工具层拒写；2026-11-13 macOS 2.1.322 也已补到真实 Write 拒绝／成功／拒绝与文件字节证据，见 macOS 验收记录。M0 另有写入计划目录的样本。以上都不等于硬隔离 | Windows 2.1.319 与 macOS 2.1.322 同一 session 的 plan → bypassPermissions → plan 已核对模式、续接和文件事实；Mac 本轮为直接 CLI，不替代窗口验收 | macOS G3 与 Windows 2.1.319 都对照了 `result.usage` 与 `model_usage_since_last_result`；后者的 `costUSD` 是本回合费用，`total_cost_usd` 为会话累计；不重复累加 assistant usage | M2 |
 | codex | `thread.started` 无权限字段；Windows M0 有新会话样本，macOS 0.167.0 G1 已有工具和文件事实 | macOS 同模式续接与 Discuss → Execute → Discuss 已通过 G1；结果不外推其他版本/平台 | macOS G2 已证实 `turn.completed.usage` 为线程累计，同会话按可靠基线取差；缓存输入不重复计入 input | M2 |
 | grok | `system/init.permissionMode` 可核对；本次 plan 的 write 被拒且文件不存在，不等于硬隔离 | Windows 1.0.77 经本机代理恢复联网。应用同一执行会话创建文件/续接通过；G4 plan→execute 的回显为 bypassPermissions，但 write 仍按 plan 拒绝，跨模式失败、团队混合模式未通过；macOS 未验证 | G4 两回合 input 从 38776 降至 1203、费用从 0.092212 降至 0.02762，确认不是会话累计；应用成功回合的 token/费用已保存 | M5 已接入，同模式执行通过，混合模式待整改 |
 | dsh | `session` 不回显权限；Windows M0 沙箱行为已有样本；M5 首回合 cwd 与进程目录一致 | Windows 0.2.2-rc.1 临时启用凭据、授权与账号服务并选择 deepseek-account 后，新桥接在同一会话 read-only → workspace-write → read-only 的工具和文件事实通过；应用选择账号或自定义 gpt-6.1-sol 后执行与续接通过；原默认 headless API Key 曾返回 402；macOS 未验证 | 按 `step_end.usage` 逐步归集，`final` 不含 usage；临时账号路径三回合 input 为 2734 / 654 / 514，不是会话累计，费用保持空值 | M5 账号、自定义 gpt-6.1-sol、窗口设置/执行/续接/停止清理通过；gpt-6 单次上游失败 |
@@ -696,3 +696,9 @@ M5 当前进度（2026-11-11）：Task 1–6、10–13 已完成。统一代理�
 基于 d1b2456，用户授权在原生窗口补验剩余核心流程；Claude 官方账号验证阻断后改由 Codex 组长执行。W1–W5、B3、B4 七项通过，含真实文件字节交付、执行停止、重启目录阻塞与人工残留确认；失败／取消／中断模型提示通过。Grok 跨模式重建后执行、Dsh 完整团队与团队用量、两者直接续接及并行讨论阶段团队停止通过。Codex 自动单次提权已核对实际 sandbox、真实提交与后续普通权限，Dsh 单次授权的 ACL 受阻与恢复均保留。该结果更新第 11 节历史 M5 进度，范围仅限已接入 CLI 的本轮 Windows 路径。
 
 pi 按当日决议未接入；macOS 未覆盖、Claude 成功路径、B1/B2 窗口注入、B5 超时、冻结供应商查询及嘴部连续帧不升级成通过。运行模型记录六条只部分通过。没有改生产代码，原数据库已恢复。详见 [核心流程验收单](核心流程验收单.md) 和 [Windows 验收记录](验收记录-2026-11-13-Windows.md)。
+
+### 2026-11-13 macOS 补记
+
+基于 `9b12dab`，Mac 前端 113 项、后端串行 342 passed/2 ignored、Node 桥接 5 项、前端构建和原生 debug 应用构建通过。Claude 2.1.322 的同 session plan→bypassPermissions→plan 已补齐 Write 工具层拒绝／成功／拒绝；Codex 0.169.0 跨模式续接、真实写入与累计用量语义通过。均为仓库外直接 CLI，不能升级成窗口通过。
+
+独立验收应用的窗口控制被宿主权限阻断，Mac 核心窗口流程与 Finder/Dock PATH 未执行，M2 不标完成。用户原数据库只读核对一致，没有迁移或写入。详见 [macOS 验收记录](验收记录-2026-11-13-macOS.md)。

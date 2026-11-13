@@ -471,3 +471,11 @@ Task 9 清单 1–5、8 已通过；其中旧第 2 项的“禁用模型框”�
 在 d1b2456 基线的真实 Tauri 窗口完成七项核心冒烟。Claude 2.1.323 官方账号验证阻断，用户明确决定改用其他 CLI，后续由 Codex 0.167.2 / gpt-6.1-sol / low 担任组长；不将该失败写成 Claude 通过。Grok 1.0.77 / grok-4.7 / low 的跨模式新会话写入、直接执行与续接通过；Dsh 0.2.2-rc.1 / Web/gpt/gpt-6.1-sol/low 的完整团队、独立团队用量、普通 write/read 直接执行与同会话续接通过。两者并行讨论停止后运行 cancelled、无关联残留。
 
 Codex 普通 .git/index.lock 拒绝后自动单次 danger-full-access 重跑，真实提交仅含指定文件，后续恢复 workspace-write；实际 low 参数保留。Dsh 团队终端初次 ACL 失败后经原生单次授权成功，失败保留，不外推原采样“无需提权”。失败／取消／中断模型未确认提示均通过，超时未测。原数据恢复并逐表一致。详细 ID、用量、字节、截图和限制集中在 [Windows 验收记录](验收记录-2026-11-13-Windows.md)，本节不重复历史测试数字。
+
+## 2026-11-13 macOS CLI 补验
+
+macOS 27.0.1 / arm64，基线 `9b12dab`，仓库外直接运行真实 CLI。Claude 2.1.322 请求 opus/high，回报 claude-opus-5-5；同 session 的 plan 实际调用 Write 并收到工具层拒绝，bypassPermissions 写入 `claude-permissions.txt` / `macos-execute-ok`，16 字节；恢复 plan 后再次 Write 被拒，文件字节不变。补齐此前 macOS Claude 的工具层拒写缺口，不承诺硬隔离，不当作原生窗口结果。
+
+Codex 0.169.0 / gpt-6.1-sol / low 在同 thread 完成 read-only→workspace-write→read-only；执行回合真实创建并读取 `codex-permissions.txt` / `macos-codex-ok`，14 字节，续接复述准确。只从该测试 thread 抽取的 turn_context 确认权限和 low，token_count 的 total_token_usage 与三次 turn.completed.usage 对应，线程累计语义仍成立。未从没有模型字段的事件伪造 CLI 报告模型。
+
+原生验收应用已独立构建，但宿主拒绝控制「imates Mac验收」，窗口冒烟与 Finder/Dock PATH 未执行；Dsh 当前环境未找到，Grok 仅探测版本。详细回合 ID、用量和验证范围见 [macOS 验收记录](验收记录-2026-11-13-macOS.md)，原始输出不入仓库。
