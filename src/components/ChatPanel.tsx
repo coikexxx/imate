@@ -4,6 +4,7 @@ import { useStore } from "zustand";
 import { api } from "../api";
 import { mentionCandidates, parseMention, shouldSendOnEnter } from "../lib/mentions";
 import { errorHint } from "../lib/errorHint";
+import { describeCleanup, describeRunFinished } from "../lib/runErrors";
 import { modelNote } from "../lib/modelNote";
 import { shirtColor } from "../office/layout";
 import { attachProjectEvents, projectStore } from "../stores/project";
@@ -91,6 +92,9 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
   const visibleMessages = projectMatches ? state.messages : [];
   const visibleStreams = projectMatches ? Object.values(state.streams) : [];
   const visibleCleanup = projectMatches ? state.cleanupRequired : [];
+  const lastRun = projectMatches ? state.lastRun : null;
+  const runNotice = lastRun ? describeRunFinished(lastRun.status, lastRun.error) : null;
+  const hint = errorHint(lastRun?.error) ?? errorHint(state.error);
   const busy = projectMatches && (Boolean(state.activeRunId) || state.sending);
   const candidates = mentionCandidates(input, agents, projectId);
   async function send() {
@@ -211,12 +215,17 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       </article>)}
       <div ref={tail} />
     </div>
-    {visibleCleanup.map((notice) => <div key={notice.runId} className="border-t border-amber-900 bg-amber-950/40 p-3 text-xs text-amber-200">
-      <p>上次运行被中断，需确认残留已处理：{notice.folderPath}</p>
+    {visibleCleanup.map((notice) => { const view = describeCleanup(notice.folderPath); return <div key={notice.runId} role="alert" className="border-t border-amber-900 bg-amber-950/40 p-3 text-xs text-amber-200">
+      <p><strong>{view.title}</strong> · 上次运行被中断：{view.detail}</p>
+      <p className="mt-1 text-amber-200/80">{view.next}</p>
       <Button className="mt-2" onClick={() => cleanup(notice.runId)}>我已处理残留进程，解除阻塞</Button>
-    </div>)}
+    </div>; })}
+    {runNotice && <div role="alert" className="mx-3 mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-800">
+      <p><strong>{runNotice.title}</strong>{runNotice.detail && <span className="ml-2 break-words text-red-700">{runNotice.detail}</span>}</p>
+      <p className="mt-1 text-red-700/80">{runNotice.next}</p>
+    </div>}
     {projectMatches && state.error && <p role="alert" className="px-3 py-2 text-xs text-red-300">{state.error}</p>}
-    {projectMatches && errorHint(state.error) && <p className="mx-3 mb-2 rounded-lg border border-[#d8b878] bg-[#fbf3df] px-3 py-2 text-xs leading-5 text-[#6b4a12]">提示：{errorHint(state.error)}</p>}
+    {projectMatches && hint && <p className="mx-3 mb-2 rounded-lg border border-[#d8b878] bg-[#fbf3df] px-3 py-2 text-xs leading-5 text-[#6b4a12]">提示：{hint}</p>}
     {projectMatches && <InstructionBar projectStatus={projectStatus} instruction={instruction} tasks={tasks} agents={agents}
       supplement={supplement} busy={acting || busy} onSupplementChange={setSupplement}
       onRetry={() => void resume("retry")} onSupplement={() => void resume("supplement", supplement)} onAbandon={() => void resume("abandon")}

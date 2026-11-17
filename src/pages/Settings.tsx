@@ -1,12 +1,14 @@
 import { useState } from "react";
 import { AppManager } from "../components/AppManager";
 import { ProxySettingsPanel } from "../components/ProxySettings";
+import { RuntimeSettingsPanel } from "../components/RuntimeSettingsPanel";
 import { AppShell } from "../components/AppShell";
 import { Icon, type IconName } from "../components/Icon";
 
-type Section = "apps" | "proxy";
+type Section = "apps" | "runtime" | "proxy";
 const sections: { key: Section; label: string; icon: IconName; description: string }[] = [
   { key: "apps", label: "应用管理", icon: "grid", description: "连接本机 CLI，为你的团队准备合适的模型" },
+  { key: "runtime", label: "运行设置", icon: "settings", description: "内置助理用哪个 CLI，以及讨论轮数、回合数和超时的护栏" },
   { key: "proxy", label: "网络代理", icon: "connection", description: "统一设置团队成员和内置助理的网络连接" },
 ];
 
@@ -21,8 +23,10 @@ export default function Settings() {
     </nav>
     <section role="tabpanel" id={`settings-panel-${section}`} aria-labelledby={`settings-tab-${section}`} className="studio-settings-content">
       <div className="mb-6"><h2 className="text-lg font-medium">{sections.find((s) => s.key === section)?.label}</h2><p className="studio-subtitle mt-1">{sections.find((s) => s.key === section)?.description}</p></div>
-      {section === "apps" ? <AppManager /> : <div className="max-w-2xl rounded-xl border border-slate-800 bg-white p-6"><ProxySettingsPanel key={`proxy:${savedTick}`} embedded onClose={saved} /></div>}
-      {section !== "apps" && savedTick > 0 && <p role="status" className="mt-3 text-sm text-emerald-400">已保存，从下一回合生效</p>}
+      {section === "apps" && <AppManager />}
+      {section === "runtime" && <div className="max-w-3xl rounded-xl border border-slate-800 bg-white p-6"><RuntimeSettingsPanel /></div>}
+      {section === "proxy" && <div className="max-w-2xl rounded-xl border border-slate-800 bg-white p-6"><ProxySettingsPanel key={`proxy:${savedTick}`} embedded onClose={saved} /></div>}
+      {section === "proxy" && savedTick > 0 && <p role="status" className="mt-3 text-sm text-emerald-400">已保存，从下一回合生效</p>}
     </section>
   </main></AppShell>;
 }

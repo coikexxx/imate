@@ -2,6 +2,7 @@ import type { Agent, Instruction, TaskItem } from "../types";
 import { Button, inputClass } from "./ui";
 import { instructionBarState, taskRowLabel } from "../lib/instructionActions";
 import { errorHint } from "../lib/errorHint";
+import { describeWaitReason } from "../lib/runErrors";
 
 interface Props {
   projectStatus: string;
@@ -29,6 +30,7 @@ export function InstructionBar({
   if (!instruction && tasks.length === 0) return null;
   const blocked = tasks.filter((task) => task.status === "blocked");
   const canAuthorize = blocked.length > 0 && instruction?.status === "waiting_user";
+  const wait = describeWaitReason(instruction?.waitReason);
   return <div className="border-t border-slate-800 px-3 py-2">
     {tasks.length > 0 && <ul aria-label="任务列表" className="mb-2 space-y-1 text-xs text-slate-300">
       {tasks.map((task) => {
@@ -43,7 +45,10 @@ export function InstructionBar({
       </div>)}
     </div>}
     {actions.showActions && <div className="space-y-2">
-      {instruction?.waitReason && <p className="text-xs text-[#6b4a12]">{instruction.waitReason}</p>}
+      {wait && <div className="text-xs text-[#6b4a12]">
+        <p><strong>{wait.title}</strong>{wait.detail && <span className="ml-2 break-words">{wait.detail}</span>}</p>
+        {!canAuthorize && <p className="mt-1 opacity-80">{wait.next}</p>}
+      </div>}
       {errorHint(instruction?.waitReason) && <p className="rounded-lg border border-[#d8b878] bg-[#fbf3df] px-3 py-2 text-xs leading-5 text-[#6b4a12]">提示：{errorHint(instruction?.waitReason)}</p>}
       <div className="flex flex-wrap items-center gap-2">
         {!canAuthorize && <Button disabled={busy} onClick={onRetry}>重试</Button>}

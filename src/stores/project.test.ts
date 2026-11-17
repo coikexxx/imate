@@ -111,6 +111,27 @@ describe("运行输出归并", () => {
     state.applyEvent("run:finished", { projectId: "甲", runId: "别的回合", agentId: "b", seq: 1, status: "failed", error: null });
     expect(store.getState().activeRunId).toBe("r1");
   });
+  it("回合终态单独记录，不混入接口错误；自动重开成功后不留失败提醒；新回合开始即清除", () => {
+    const store = createProjectStore(); const state = store.getState();
+    state.beginHydrate("甲");
+    state.hydrate("甲", [], { active: null, cleanupRequired: [] });
+    state.applyEvent("run:finished", { projectId: "甲", runId: "r1", agentId: "a", seq: 1, status: "failed", error: "CLI 不可用：未找到已安装的 claude" });
+    expect(store.getState().lastRun).toEqual({ runId: "r1", agentId: "a", status: "failed", error: "CLI 不可用：未找到已安装的 claude" });
+    expect(store.getState().error).toBeNull();
+    state.setError("接口错误");
+    expect(store.getState().lastRun?.error).toBe("CLI 不可用：未找到已安装的 claude");
+    state.applyEvent("message:delta", { projectId: "甲", runId: "r2", agentId: "a", seq: 1, text: "新回合" });
+    expect(store.getState().lastRun).toBeNull();
+    state.applyEvent("run:finished", { projectId: "甲", runId: "r2", agentId: "a", seq: 1, status: "failed", error: null,
+      replacement: { runId: "r3", messageId: 1 } });
+    expect(store.getState().lastRun).toBeNull();
+    state.applyEvent("run:finished", { projectId: "甲", runId: "r3", agentId: "a", seq: 1, status: "ok", error: null });
+    expect(store.getState().lastRun).toBeNull();
+    state.applyEvent("run:finished", { projectId: "甲", runId: "r4", agentId: "b", seq: 1, status: "timeout", error: "回合超过总时长，已停止" });
+    expect(store.getState().lastRun).toMatchObject({ status: "timeout" });
+    state.beginHydrate("乙");
+    expect(store.getState().lastRun).toBeNull();
+  });
   it("文件变化以后端给出的全集为准，并推动文件树刷新", () => {
     const store = createProjectStore(); const state = store.getState();
     state.beginHydrate("甲");

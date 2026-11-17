@@ -48,6 +48,20 @@ export interface CliConfigInput {
 
 export interface CliModelCatalog { models: CliModel[]; error: string | null; providerHost: string | null }
 
+/** 与后端 RuntimeLimits 对应：轮数、次数、回合按整数，时长按整秒；窗口按分钟展示 */
+export interface RuntimeLimits {
+  discussRounds: number;
+  reworksPerTask: number;
+  turnsPerInstruction: number;
+  modelIdleSeconds: number;
+  discussToolSeconds: number;
+  executeToolSeconds: number;
+  discussTotalSeconds: number;
+  executeTotalSeconds: number;
+}
+/** 系统设置里的运行设置；assistantCli 为空表示内置助理自动选择 */
+export interface RuntimeSettings { assistantCli: string | null; limits: RuntimeLimits }
+
 export type ProjectStatus = "idle" | "discussing" | "executing" | "waiting_user";
 
 export const STATUS_LABELS: Record<ProjectStatus, string> = {

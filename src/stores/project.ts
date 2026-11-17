@@ -1,5 +1,5 @@
 import { createStore } from "zustand/vanilla";
-import type { AgentStatus, Message, ProjectEventMap, ProjectRuntime } from "../types";
+import type { AgentStatus, Message, ProjectEventMap, ProjectRuntime, RunFinished } from "../types";
 
 export interface StreamText { projectId: string; runId: string; seq: number; text: string }
 export interface TextDelta { projectId: string; runId: string; seq: number; text: string }
@@ -9,6 +9,8 @@ export function applyDelta(current: StreamText, delta: TextDelta): StreamText {
 }
 interface Stream extends StreamText { agentId: string; messageId: number | null; finished: boolean; final: boolean; superseded?: boolean }
 type Buffered = { name: keyof ProjectEventMap; payload: ProjectEventMap[keyof ProjectEventMap] };
+/** 最近一个没有成功结束的回合。成功、自动重开或新回合开始时清空；与接口错误 `error` 分开。 */
+export interface LastRun { runId: string; agentId: string; status: RunFinished["status"]; error: string | null }
 interface ProjectState {
   projectId: string;
   messages: Message[];
@@ -22,6 +24,8 @@ interface ProjectState {
   rulesTick: number;
   setChangedFiles: (projectId: string, paths: string[]) => void;
   cleanupRequired: ProjectRuntime["cleanupRequired"];
+  lastRun: LastRun | null;
+  /** 接口调用失败的说明；回合终态不写这里。 */
   error: string | null;
   sending: boolean;
   hydrating: boolean;
@@ -51,10 +55,10 @@ function latestRun(live: string[]): string | null {
 export function createProjectStore() {
   return createStore<ProjectState>((set, get) => ({
     projectId: "", messages: [], streams: {}, agentStatuses: {}, activeRunId: null, liveRuns: [],
-    cleanupRequired: [], error: null, sending: false, hydrating: false, buffered: [],
+    cleanupRequired: [], lastRun: null, error: null, sending: false, hydrating: false, buffered: [],
     changedFiles: [], filesTick: 0, rulesTick: 0,
     beginHydrate: (projectId) => set({ projectId, messages: [], streams: {}, agentStatuses: {}, activeRunId: null, liveRuns: [],
-      cleanupRequired: [], error: null, sending: false, hydrating: true, buffered: [],
+      cleanupRequired: [], lastRun: null, error: null, sending: false, hydrating: true, buffered: [],
       changedFiles: [], filesTick: 0, rulesTick: 0 }),
     mergeHistory: (projectId, messages) => {
       if (projectId !== get().projectId) return;
@@ -106,7 +110,7 @@ export function createProjectStore() {
           if (previous.finished || previous.final) return {};
           streams[delta.runId] = { ...previous, ...applyDelta(previous, delta) };
           agentStatuses[delta.agentId] = "talking";
-          return { streams, agentStatuses, liveRuns: withRun(state.liveRuns, delta.runId), activeRunId: delta.runId };
+          return { streams, agentStatuses, liveRuns: withRun(state.liveRuns, delta.runId), activeRunId: delta.runId, lastRun: null };
         }
         if (name === "message:new") {
           const event = payload as ProjectEventMap["message:new"];
@@ -122,7 +126,7 @@ export function createProjectStore() {
           agentStatuses[event.agentId] = event.status;
           const active = ["thinking", "talking", "working"].includes(event.status);
           if (!active || !event.runId) return { agentStatuses };
-          return { agentStatuses, liveRuns: withRun(state.liveRuns, event.runId), activeRunId: event.runId };
+          return { agentStatuses, liveRuns: withRun(state.liveRuns, event.runId), activeRunId: event.runId, lastRun: null };
         }
         if (name === "files:changed") {
           const event = payload as ProjectEventMap["files:changed"];
@@ -141,13 +145,16 @@ export function createProjectStore() {
           streams[runId] = { ...next, messageId };
           const liveRuns = next.finished ? remaining : withRun(remaining, runId);
           if (!next.finished) agentStatuses[event.agentId] = next.text ? "talking" : "thinking";
-          return { streams, agentStatuses, liveRuns, activeRunId: latestRun(liveRuns) };
+          // 自动重开：失败的旧回合不留提醒，由新回合的终态决定。
+          return { streams, agentStatuses, liveRuns, activeRunId: latestRun(liveRuns), lastRun: null };
         }
         streams[event.runId] = finished;
         agentStatuses[event.agentId] = event.status === "ok" || event.status === "cancelled" ? "idle" : "error";
+        const lastRun: LastRun | null = event.status === "ok" ? null
+          : { runId: event.runId, agentId: event.agentId, status: event.status, error: event.error };
         return { streams, agentStatuses, liveRuns: remaining,
           activeRunId: state.activeRunId === event.runId ? latestRun(remaining) : state.activeRunId,
-          error: event.error ?? state.error, sending: false };
+          lastRun, sending: false };
       });
     },
     setError: (error) => set({ error }),

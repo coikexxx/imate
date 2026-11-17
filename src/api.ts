@@ -25,6 +25,7 @@ import type {
   ProjectDetail,
   ProjectSummary,
   RuleDoc,
+  RuntimeSettings,
 } from "./types";
 
 // 后端失败时 invoke 会 reject，值是一句中文说明；调用方用 String(e) 展示即可。
@@ -34,6 +35,8 @@ export const api = {
   listDshModels: (profile: import("./types").DshProfile) => invoke<import("./types").DshCatalog>("list_dsh_models", { profile }),
   getNetworkProxy: () => invoke<ProxyState>("get_network_proxy"),
   saveNetworkProxy: (settings: ProxySettings) => invoke<ProxyState>("save_network_proxy", { settings }),
+  getRuntimeSettings: () => invoke<RuntimeSettings>("get_runtime_settings"),
+  saveRuntimeSettings: (settings: RuntimeSettings) => invoke<RuntimeSettings>("save_runtime_settings", { settings }),
   draftRules: (input: DraftInput) => invoke<DraftResponse>("draft_rules", { input }),
   draftPersona: (input: DraftInput) => invoke<DraftResponse>("draft_persona", { input }),
   cancelDraft: (draftId: string) => invoke<void>("cancel_draft", { draftId }),
