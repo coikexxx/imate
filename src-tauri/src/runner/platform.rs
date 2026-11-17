@@ -147,7 +147,24 @@ struct MacProcessIdentity { pid: u32, started: (u64, u64) }
 struct MacProcessInfo { identity: MacProcessIdentity, parent: u32, group: u32, zombie: bool }
 
 #[cfg(target_os = "macos")]
+fn mac_process_info_with_fallback(
+    pid: u32,
+    primary: impl FnOnce(u32) -> std::io::Result<Option<MacProcessInfo>>,
+    fallback: impl FnOnce(u32) -> std::io::Result<Option<MacProcessInfo>>,
+) -> std::io::Result<Option<MacProcessInfo>> {
+    match primary(pid) {
+        Err(error) if error.raw_os_error() == Some(libc::EPERM) => fallback(pid),
+        result => result,
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn mac_process_info(pid: u32) -> std::io::Result<Option<MacProcessInfo>> {
+    mac_process_info_with_fallback(pid, mac_bsd_process_info, mac_sysctl_process_info)
+}
+
+#[cfg(target_os = "macos")]
+fn mac_bsd_process_info(pid: u32) -> std::io::Result<Option<MacProcessInfo>> {
     let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
     let size = std::mem::size_of_val(&info) as i32;
     let read = unsafe { libc::proc_pidinfo(pid as i32, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut _, size) };
@@ -159,6 +176,93 @@ fn mac_process_info(pid: u32) -> std::io::Result<Option<MacProcessInfo>> {
     }
     let error = std::io::Error::last_os_error();
     if read == 0 && error.raw_os_error() == Some(libc::ESRCH) { Ok(None) } else { Err(error) }
+}
+
+// 公开 SDK sys/proc.h、sys/sysctl.h 的 64 位 kinfo_proc ABI 视图。
+// libc 未绑定此结构；未读取的字段保留原位，不把其他 BSD 的结构误用于 macOS。
+#[cfg(all(target_os = "macos", target_pointer_width = "64"))]
+#[repr(C)]
+struct MacKinfoProc {
+    started: libc::timeval,
+    _before_status: [u8; 20],
+    status: i8,
+    pid: i32,
+    _before_parent: [u8; 516],
+    parent: i32,
+    group: i32,
+    _tail: [u8; 80],
+}
+
+#[cfg(all(target_os = "macos", target_pointer_width = "64"))]
+const _: () = {
+    assert!(std::mem::size_of::<MacKinfoProc>() == 648);
+    assert!(std::mem::offset_of!(MacKinfoProc, started) == 0);
+    assert!(std::mem::offset_of!(MacKinfoProc, status) == 36);
+    assert!(std::mem::offset_of!(MacKinfoProc, pid) == 40);
+    assert!(std::mem::offset_of!(MacKinfoProc, parent) == 560);
+    assert!(std::mem::offset_of!(MacKinfoProc, group) == 564);
+};
+
+#[cfg(all(target_os = "macos", target_pointer_width = "64"))]
+fn mac_kinfo_process_info(pid: u32, info: &MacKinfoProc, size: usize) -> std::io::Result<Option<MacProcessInfo>> {
+    // 零长度只表示本次未列到目标，调用方还须确认 ESRCH；短读、错 PID 和无效字段失败关闭。
+    if size == 0 { return Ok(None); }
+    let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidData, "系统进程信息不完整或身份字段无效");
+    if size != std::mem::size_of::<MacKinfoProc>() || info.pid <= 0 || info.pid as u32 != pid
+        || info.started.tv_sec <= 0 || !(0..1_000_000).contains(&info.started.tv_usec)
+        || info.parent < 0 || info.group <= 0 || !(libc::SIDL..=libc::SZOMB).contains(&(info.status as u32)) {
+        return Err(invalid());
+    }
+    Ok(Some(MacProcessInfo {
+        identity: MacProcessIdentity { pid, started: (info.started.tv_sec as u64, info.started.tv_usec as u64) },
+        parent: info.parent as u32, group: info.group as u32, zombie: info.status as u32 == libc::SZOMB,
+    }))
+}
+
+#[cfg(target_os = "macos")]
+fn mac_empty_process_snapshot(probe: std::io::Result<()>) -> std::io::Result<Option<MacProcessInfo>> {
+    match probe {
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(None),
+        Err(error) => Err(error),
+        Ok(()) => Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "系统进程快照未覆盖仍存在的目标")),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_sysctl_process_info(pid: u32) -> std::io::Result<Option<MacProcessInfo>> {
+    #[cfg(target_pointer_width = "64")]
+    {
+        let pid_value = i32::try_from(pid).ok().filter(|value| *value > 0)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "系统进程编号无效"))?;
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid_value];
+        let mut info = unsafe { std::mem::zeroed::<MacKinfoProc>() };
+        let mut size = std::mem::size_of_val(&info);
+        let result = unsafe { libc::sysctl(mib.as_mut_ptr(), mib.len() as u32, &mut info as *mut _ as *mut _, &mut size,
+            std::ptr::null_mut(), 0) };
+        if result != 0 { return Err(std::io::Error::last_os_error()); }
+        if size == 0 {
+            // sysctl 会略过创建中的进程；零信号只探测存在性，不能把暂时漏列误当已退出。
+            let exists = unsafe { libc::kill(pid_value, 0) };
+            return mac_empty_process_snapshot(if exists == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) });
+        }
+        // 两种接口都从内核 p_start 取秒与微秒；补证不改变既有身份与前后关系复核。
+        mac_kinfo_process_info(pid, &info, size)
+    }
+    #[cfg(not(target_pointer_width = "64"))]
+    { let _ = pid; Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "当前架构未核对系统进程信息布局")) }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_process_list_count(query: impl FnOnce() -> i32) -> std::io::Result<usize> {
+    // libproc 把底层 -1 转成 0 并保留 errno；必须区分真实失败与合法空表，且不能读取旧 errno。
+    unsafe { *libc::__error() = 0; }
+    let found = query();
+    let error = unsafe { *libc::__error() };
+    if found < 0 || (found == 0 && error != 0) {
+        return Err(if error != 0 { std::io::Error::from_raw_os_error(error) }
+            else { std::io::Error::other("系统进程列表返回无效结果") });
+    }
+    Ok(found as usize)
 }
 
 #[cfg(target_os = "macos")]
@@ -173,14 +277,12 @@ fn mac_process_ids(owner: u32, children: bool) -> std::io::Result<Vec<u32>> {
         else { libc::proc_listpgrppids(owner as i32, buffer, size) }
     };
     // 这两个 libproc 包装器返回 PID 个数，不是缓冲区字节数。
-    let capacity = list(std::ptr::null_mut(), 0);
-    if capacity < 0 { return Err(std::io::Error::last_os_error()); }
-    let mut pids = vec![0i32; capacity as usize + 32];
+    let capacity = mac_process_list_count(|| list(std::ptr::null_mut(), 0))?;
+    let mut pids = vec![0i32; capacity + 32];
     for _ in 0..3 {
-        let found = list(pids.as_mut_ptr() as *mut _, std::mem::size_of_val(pids.as_slice()) as i32);
-        if found < 0 { return Err(std::io::Error::last_os_error()); }
-        if (found as usize) < pids.len() {
-            pids.truncate(found as usize);
+        let found = mac_process_list_count(|| list(pids.as_mut_ptr() as *mut _, std::mem::size_of_val(pids.as_slice()) as i32))?;
+        if found < pids.len() {
+            pids.truncate(found);
             return Ok(pids.into_iter().filter(|pid| *pid > 0).map(|pid| pid as u32).collect());
         }
         pids.resize(pids.len() * 2, 0);
@@ -611,6 +713,132 @@ pub async fn terminate_tree(child: &mut Child, pid: u32, _tree: &ProcessTree) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_eperm_fallback_keeps_the_same_microsecond_identity() {
+        let original = mac_process_info(std::process::id()).unwrap().unwrap();
+        let expected = original.identity;
+        let mut fallback_called = false;
+        let recovered = mac_process_info_with_fallback(expected.pid,
+            |_| Err(std::io::Error::from_raw_os_error(libc::EPERM)),
+            |pid| { fallback_called = true; assert_eq!(pid, expected.pid); Ok(Some(original)) },
+        ).expect("EPERM 必须可由独立的公共进程信息补证").unwrap();
+        assert!(fallback_called);
+        assert_eq!(recovered.identity, expected, "补证后仍使用同一 PID 与微秒级启动时间");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_eperm_fallback_preserves_real_errors_and_exited_results() {
+        let pid = std::process::id();
+        let failed = mac_process_info_with_fallback(pid,
+            |_| Err(std::io::Error::from_raw_os_error(libc::EPERM)),
+            |_| Err(std::io::Error::from_raw_os_error(libc::EIO)),
+        );
+        assert_eq!(failed.err().unwrap().raw_os_error(), Some(libc::EIO), "真实补证失败不能当成进程退出");
+        assert!(mac_process_info_with_fallback(pid,
+            |_| Err(std::io::Error::from_raw_os_error(libc::EPERM)), |_| Ok(None),
+        ).unwrap().is_none(), "补证确认无目标时才是已退出");
+        let mut fallback_called = false;
+        let failed = mac_process_info_with_fallback(pid,
+            |_| Err(std::io::Error::from_raw_os_error(libc::EACCES)),
+            |_| { fallback_called = true; Ok(None) },
+        );
+        assert_eq!(failed.err().unwrap().raw_os_error(), Some(libc::EACCES));
+        assert!(!fallback_called, "只为完整 BSD 查询的 EPERM 启用补证");
+        let mut unknown = MacObservedTree { root: pid, root_confirmed: true, seen: Vec::new(), complete: true,
+            first_error: None, last_cleanup: None };
+        unknown.incomplete("child_identity", Some(libc::EIO));
+        assert!(!unknown.gone(0, true), "真实观察错误仍须阻止宣称清理完成");
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64"))]
+    fn macos_sysctl_identity_matches_bsd_and_rejects_pid_reuse() {
+        let pid = std::process::id();
+        let full = mac_bsd_process_info(pid).unwrap().unwrap();
+        let fallback = mac_process_info_with_fallback(pid,
+            |_| Err(std::io::Error::from_raw_os_error(libc::EPERM)), mac_sysctl_process_info,
+        ).unwrap().unwrap();
+        assert_eq!(fallback.identity, full.identity, "公共补证和完整查询必须逐微秒指向同一进程");
+        assert_eq!((fallback.parent, fallback.group, fallback.zombie), (full.parent, full.group, full.zombie));
+        let stale = MacProcessIdentity { started: (full.identity.started.0, full.identity.started.1.wrapping_add(1)), ..full.identity };
+        assert!(mac_matching_process(fallback.identity).unwrap().is_some());
+        assert!(mac_matching_process(stale).unwrap().is_none(), "补证后仍不可把同 PID 的其他启动身份认作原进程");
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64"))]
+    fn macos_sysctl_reads_public_identity_when_full_bsd_is_restricted() {
+        // launchd 归系统用户；普通本地测试进程的完整 BSD 查询会遇到本次真实的 EPERM。
+        let expected = mac_sysctl_process_info(1).unwrap().unwrap();
+        let actual = mac_process_info(1).unwrap().unwrap();
+        assert_eq!(actual.identity, expected.identity);
+        assert_eq!((actual.parent, actual.group, actual.zombie), (expected.parent, expected.group, expected.zombie));
+        assert!(actual.identity.started.0 > 0);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64"))]
+    fn macos_sysctl_rejects_short_reads_and_invalid_identity_fields() {
+        let mut info = unsafe { std::mem::zeroed::<MacKinfoProc>() };
+        info.started.tv_sec = 123; info.started.tv_usec = 456;
+        info.status = libc::SRUN as i8; info.pid = 1234; info.parent = 1; info.group = 1234;
+        let size = std::mem::size_of_val(&info);
+        assert_eq!(mac_kinfo_process_info(1234, &info, size).unwrap().unwrap().identity.started, (123, 456));
+        assert!(mac_kinfo_process_info(1234, &info, 0).unwrap().is_none(), "零长度保留为无记录，再由调用方补证进程已退出");
+        assert!(mac_kinfo_process_info(1234, &info, size - 1).is_err());
+        assert!(mac_kinfo_process_info(1235, &info, size).is_err());
+        info.started.tv_sec = 0; assert!(mac_kinfo_process_info(1234, &info, size).is_err());
+        info.started.tv_sec = 123;
+        for usec in [-1, 1_000_000] {
+            info.started.tv_usec = usec; assert!(mac_kinfo_process_info(1234, &info, size).is_err());
+        }
+        info.started.tv_usec = 456;
+        info.parent = -1; assert!(mac_kinfo_process_info(1234, &info, size).is_err());
+        info.parent = 1; info.group = 0; assert!(mac_kinfo_process_info(1234, &info, size).is_err());
+        info.group = 1234; info.status = 0; assert!(mac_kinfo_process_info(1234, &info, size).is_err());
+        info.status = libc::SZOMB as i8;
+        assert!(mac_kinfo_process_info(1234, &info, size).unwrap().unwrap().zombie);
+    }
+
+    #[test]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64"))]
+    fn macos_sysctl_confirms_exited_child_with_zero_length() {
+        let mut child = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = child.id();
+        assert!(child.wait().unwrap().success());
+        assert!(mac_sysctl_process_info(pid).unwrap().is_none(), "已回收的测试进程应由零长度结果确认消失");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_empty_sysctl_snapshot_requires_independent_esrch() {
+        assert!(mac_empty_process_snapshot(Err(std::io::Error::from_raw_os_error(libc::ESRCH))).unwrap().is_none());
+        assert!(mac_empty_process_snapshot(Ok(())).is_err(), "零长度不能覆盖仍存在的创建中进程");
+        for error in [libc::EPERM, libc::EACCES, libc::EIO] {
+            assert_eq!(mac_empty_process_snapshot(Err(std::io::Error::from_raw_os_error(error))).err().unwrap().raw_os_error(), Some(error));
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_process_list_distinguishes_wrapper_errors_from_empty_results() {
+        for code in [libc::EPERM, libc::EIO] {
+            let result = mac_process_list_count(|| { unsafe { *libc::__error() = code; } 0 });
+            assert_eq!(result.err().expect("libproc 的零返回值带真实 errno 时不能算空表").raw_os_error(), Some(code));
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_process_list_does_not_reuse_stale_errno() {
+        unsafe { *libc::__error() = libc::EPERM; }
+        assert_eq!(mac_process_list_count(|| 0).unwrap(), 0, "合法空表不得继承上一次系统调用的 errno");
+        assert_eq!(unsafe { *libc::__error() }, 0, "调用前必须清除旧 errno");
+        assert_eq!(mac_process_list_count(|| 3).unwrap(), 3);
+    }
+
     #[tokio::test]
     #[cfg(target_os = "macos")]
     async fn macos_pending_root_cancel_can_confirm_cleanup_after_the_pid_disappears() {
