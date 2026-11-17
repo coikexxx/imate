@@ -62,6 +62,22 @@ export interface RuntimeLimits {
 /** 系统设置里的运行设置；assistantCli 为空表示内置助理自动选择 */
 export interface RuntimeSettings { assistantCli: string | null; limits: RuntimeLimits }
 
+/** 一项用量的合计与证据数；reported 为 0 时 total 没有证据 */
+export interface UsageTotal { total: number; reported: number }
+/** 成员或项目的用量汇总：只含已结束回合，归一字段分列，rawUsage 不参与 */
+export interface UsageSummary {
+  runs: number;
+  okRuns: number;
+  usageRuns: number;
+  inputTokens: UsageTotal;
+  outputTokens: UsageTotal;
+  cacheReadInputTokens: UsageTotal;
+  cacheCreationInputTokens: UsageTotal;
+  costUsd: UsageTotal;
+}
+export interface MemberUsage { agentId: string; name: string; cli: string; isLeader: boolean; summary: UsageSummary }
+export interface ProjectUsage { projectId: string; members: MemberUsage[]; total: UsageSummary }
+
 export type ProjectStatus = "idle" | "discussing" | "executing" | "waiting_user";
 
 export const STATUS_LABELS: Record<ProjectStatus, string> = {

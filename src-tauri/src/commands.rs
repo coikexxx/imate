@@ -1074,6 +1074,12 @@ pub fn get_project_runtime(state: State<'_, AppState>, project_id: String) -> Ap
 }
 #[tauri::command]
 pub fn confirm_runtime_cleanup(state: State<'_, AppState>, run_id: String) -> AppResult<()> { state.confirm_cleanup(&run_id) }
+/// 按成员与项目汇总已结束回合的用量；只接受项目 ID，不读 CLI 日志。
+#[tauri::command]
+pub fn get_project_usage(state: State<'_, AppState>, project_id: String) -> AppResult<crate::store::runs::ProjectUsage> {
+    let conn = lock(&state)?;
+    crate::store::runs::project_usage(&conn, &project_id)
+}
 
 #[tauri::command]
 pub async fn send_message(app: tauri::AppHandle, state: State<'_, AppState>, project_id: String, content: String) -> AppResult<SendMessageResponse> {

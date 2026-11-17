@@ -60,6 +60,7 @@ pub fn run() {
             commands::retry_blocked_task,
             commands::get_project_runtime,
             commands::confirm_runtime_cleanup,
+            commands::get_project_usage,
             commands::list_clis,
             cli_config::list_cli_configs,
             cli_config::save_cli_config,

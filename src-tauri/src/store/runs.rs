@@ -2,6 +2,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::adapters::Usage;
 use crate::error::{AppError, AppResult};
 use crate::store::{messages, new_id, now_ms};
 
@@ -207,6 +208,103 @@ pub fn latest_usage(conn: &Connection, agent_id: &str, session_id: &str) -> AppR
         .transpose()
 }
 
+/// 一项用量的合计及证据范围：`reported` 是提供了该字段的回合数，为 0 时 `total` 没有证据，界面显示「未报告」。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTotal<T> {
+    pub total: T,
+    pub reported: u32,
+}
+
+impl<T: std::ops::AddAssign + Copy> UsageTotal<T> {
+    fn add(&mut self, value: Option<T>) {
+        if let Some(value) = value {
+            self.total += value;
+            self.reported += 1;
+        }
+    }
+}
+
+/// 一个成员或整个项目的用量汇总。口径：
+/// - 只统计已结束的回合（`status != 'running'`），`runs` 含失败、超时、停止与中断；
+/// - `usage_runs` 是 `usage_json` 可解析的回合数，缺失或损坏的记录不算有用量，让覆盖范围如实变小；
+/// - 归一字段逐项相加，提供了该字段（含 0）才计入 `reported`；缓存字段不并入输入，`rawUsage` 是会话累计值，一律忽略。
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSummary {
+    pub runs: u32,
+    pub ok_runs: u32,
+    pub usage_runs: u32,
+    pub input_tokens: UsageTotal<u64>,
+    pub output_tokens: UsageTotal<u64>,
+    pub cache_read_input_tokens: UsageTotal<u64>,
+    pub cache_creation_input_tokens: UsageTotal<u64>,
+    pub cost_usd: UsageTotal<f64>,
+}
+
+impl UsageSummary {
+    fn add(&mut self, status: &str, usage: Option<&Usage>) {
+        self.runs += 1;
+        if status == "ok" {
+            self.ok_runs += 1;
+        }
+        let Some(usage) = usage else { return };
+        self.usage_runs += 1;
+        self.input_tokens.add(usage.input_tokens);
+        self.output_tokens.add(usage.output_tokens);
+        self.cache_read_input_tokens.add(usage.cache_read_input_tokens);
+        self.cache_creation_input_tokens.add(usage.cache_creation_input_tokens);
+        self.cost_usd.add(usage.cost_usd);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberUsage {
+    pub agent_id: String,
+    pub name: String,
+    pub cli: String,
+    pub is_leader: bool,
+    pub summary: UsageSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectUsage {
+    pub project_id: String,
+    /// 按座位顺序列出当前全部成员，没有回合的成员也在内。
+    pub members: Vec<MemberUsage>,
+    pub total: UsageSummary,
+}
+
+/// 按成员与项目汇总 `runs.usage_json`。只看本项目成员的回合，起草回合没有成员，不属于任何项目。
+pub fn project_usage(conn: &Connection, project_id: &str) -> AppResult<ProjectUsage> {
+    super::projects::get(conn, project_id)?;
+    let mut members: Vec<MemberUsage> = super::agents::list(conn, project_id)?
+        .into_iter()
+        .map(|agent| MemberUsage {
+            agent_id: agent.id, name: agent.name, cli: agent.cli, is_leader: agent.is_leader, summary: UsageSummary::default(),
+        })
+        .collect();
+    let mut statement = conn.prepare(
+        "SELECT r.agent_id, r.status, r.usage_json FROM runs r \
+         JOIN agents a ON a.id = r.agent_id \
+         WHERE a.project_id = ?1 AND r.status != 'running' ORDER BY r.started_at, r.rowid",
+    )?;
+    let rows = statement.query_map([project_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+    })?;
+    let mut total = UsageSummary::default();
+    for row in rows {
+        let (agent_id, status, usage_json) = row?;
+        let Some(member) = members.iter_mut().find(|member| member.agent_id == agent_id) else { continue };
+        let usage = usage_json.as_deref().and_then(|raw| serde_json::from_str::<Usage>(raw).ok());
+        member.summary.add(&status, usage.as_ref());
+        total.add(&status, usage.as_ref());
+    }
+    Ok(ProjectUsage { project_id: project_id.into(), members, total })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,5 +457,75 @@ mod tests {
         assert_eq!(latest_usage(&conn, &agent_id, "thread-1").unwrap().unwrap(), serde_json::from_str::<serde_json::Value>(first).unwrap());
         assert_eq!(latest_usage(&conn, &agent_id, "thread-2").unwrap(), None);
         assert_eq!(latest_usage(&conn, "other-agent", "thread-1").unwrap(), None);
+    }
+    fn team(conn: &rusqlite::Connection, project: &str, members: &[&str]) -> (String, Vec<String>) {
+        let project = projects::create(conn, project, "", &format!("/tmp/{project}")).unwrap();
+        let ids = members.iter().enumerate().map(|(index, name)| agents::create(conn, &project.id, &agents::NewAgent {
+            name: (*name).into(), role: (*name).into(), persona: PERSONA.into(), cli: "codex".into(), model: None,
+            is_leader: index == 0, reasoning_effort: None,
+        }).unwrap().id).collect();
+        (project.id, ids)
+    }
+
+    fn finished(conn: &rusqlite::Connection, agent_id: Option<&str>, status: &str, usage: Option<&str>) {
+        let run = insert_running(conn, agent_id, "execute", "codex exec", None).unwrap();
+        assert!(finish(conn, &run.id, status, None, usage, None).unwrap());
+    }
+
+    #[test]
+    fn project_usage_sums_normalized_fields_separately_and_keeps_projects_apart() {
+        let conn = open_in_memory().unwrap();
+        let (first, members) = team(&conn, "甲", &["组长", "开发"]);
+        let (second, others) = team(&conn, "乙", &["组长"]);
+        let (leader, dev) = (members[0].as_str(), members[1].as_str());
+        // 归一字段逐项相加；缓存不并入输入；rawUsage 是会话累计值，不参与合计。
+        finished(&conn, Some(leader), "ok", Some(r#"{"inputTokens":100,"outputTokens":20,"cacheReadInputTokens":30,"cacheCreationInputTokens":0,"costUsd":0.5,"rawUsage":{"input_tokens":9999,"total_cost_usd":99}}"#));
+        finished(&conn, Some(leader), "ok", Some(r#"{"inputTokens":10,"outputTokens":5}"#));
+        finished(&conn, Some(dev), "ok", None);
+        finished(&conn, Some(dev), "failed", None);
+        finished(&conn, Some(dev), "ok", Some("{oops"));
+        finished(&conn, Some(dev), "ok", Some(r#"{"inputTokens":0,"outputTokens":0,"costUsd":0}"#));
+        finished(&conn, Some(dev), "interrupted", None);
+        // 仍在运行的回合没有结果，起草回合不属于任何成员，两者都不计入。
+        insert_running(&conn, Some(leader), "execute", "codex exec", None).unwrap();
+        finished(&conn, None, "ok", Some(r#"{"inputTokens":5000,"costUsd":9}"#));
+        finished(&conn, Some(&others[0]), "ok", Some(r#"{"inputTokens":7,"costUsd":1.25}"#));
+
+        let usage = project_usage(&conn, &first).unwrap();
+        assert_eq!(usage.project_id, first);
+        assert_eq!(usage.members.iter().map(|m| (m.name.as_str(), m.cli.as_str(), m.is_leader)).collect::<Vec<_>>(),
+            vec![("组长", "codex", true), ("开发", "codex", false)]);
+        let total = &usage.total;
+        assert_eq!((total.runs, total.ok_runs, total.usage_runs), (7, 5, 3));
+        assert_eq!(total.input_tokens, UsageTotal { total: 110, reported: 3 });
+        assert_eq!(total.output_tokens, UsageTotal { total: 25, reported: 3 });
+        assert_eq!(total.cache_read_input_tokens, UsageTotal { total: 30, reported: 1 });
+        assert_eq!(total.cache_creation_input_tokens, UsageTotal { total: 0, reported: 1 });
+        assert_eq!(total.cost_usd, UsageTotal { total: 0.5, reported: 2 });
+        let leader_usage = &usage.members[0].summary;
+        assert_eq!((leader_usage.runs, leader_usage.ok_runs, leader_usage.usage_runs), (2, 2, 2));
+        assert_eq!(leader_usage.input_tokens, UsageTotal { total: 110, reported: 2 });
+        assert_eq!(leader_usage.cost_usd, UsageTotal { total: 0.5, reported: 1 });
+        let dev_usage = &usage.members[1].summary;
+        assert_eq!((dev_usage.runs, dev_usage.ok_runs, dev_usage.usage_runs), (5, 3, 1));
+        assert_eq!(dev_usage.input_tokens, UsageTotal { total: 0, reported: 1 });
+        assert_eq!(dev_usage.cost_usd, UsageTotal { total: 0.0, reported: 1 });
+        assert_eq!(dev_usage.cache_read_input_tokens, UsageTotal { total: 0, reported: 0 });
+        assert!(dev_usage.usage_runs < dev_usage.runs, "失败、中断与未知用量的回合都算覆盖不足");
+
+        let other = project_usage(&conn, &second).unwrap();
+        assert_eq!((other.total.runs, other.total.ok_runs, other.total.usage_runs), (1, 1, 1));
+        assert_eq!(other.total.input_tokens, UsageTotal { total: 7, reported: 1 });
+        assert_eq!(other.total.cost_usd, UsageTotal { total: 1.25, reported: 1 });
+        assert_eq!(other.total.output_tokens, UsageTotal { total: 0, reported: 0 });
+        assert!(matches!(project_usage(&conn, "不存在"), Err(AppError::NotFound(_))));
+
+        // 前后端字段一律 camelCase，每项都带数值与证据数。
+        let json = serde_json::to_value(&usage).unwrap();
+        assert_eq!(json["total"]["okRuns"], 5);
+        assert_eq!(json["total"]["usageRuns"], 3);
+        assert_eq!(json["total"]["costUsd"], serde_json::json!({ "total": 0.5, "reported": 2 }));
+        assert_eq!(json["members"][1]["agentId"], dev);
+        assert_eq!(json["members"][1]["summary"]["cacheReadInputTokens"]["reported"], 0);
     }
 }

@@ -11,6 +11,7 @@ import { AgentForm } from "../components/AgentForm";
 import { MemberList } from "../components/MemberList";
 import { RulesPanel } from "../components/RulesPanel";
 import { FileTree } from "../components/FileTree";
+import { ProjectUsagePanel } from "../components/ProjectUsagePanel";
 import { OfficeCanvas } from "../office/OfficeCanvas";
 import { Button, Modal } from "../components/ui";
 import { AppShell } from "../components/AppShell";
@@ -27,6 +28,7 @@ import {
 
 const EMPTY_AGENT_STATUSES: Record<string, import("../types").AgentStatus> = {};
 const EMPTY_FILES: string[] = [];
+const TAB_LABELS = { chat: "团队讨论", files: "项目文件", rules: "规章制度", usage: "用量" } as const;
 
 type Editing = { kind: "new" } | { kind: "edit"; agent: Agent } | null;
 
@@ -38,7 +40,8 @@ export default function Project() {
   const [templates, setTemplates] = useState<PersonaTemplate[]>([]);
   const [projectRules, setProjectRules] = useState<RuleDoc[]>([]);
   const [editing, setEditing] = useState<Editing>(null);
-  const [tab, setTab] = useState<"chat" | "files" | "rules">("chat");
+  const [tab, setTab] = useState<"chat" | "files" | "rules" | "usage">("chat");
+  const [usageTick, setUsageTick] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [mention, setMention] = useState<string | undefined>();
   const activeRunId = useStore(projectStore, (state) => state.projectId === id ? state.activeRunId : null);
@@ -52,7 +55,8 @@ export default function Project() {
     setDetail(await api.getProject(id));
   }, [id]);
 
-  const refreshAfterRun = useCallback(() => { reload().catch((e) => setError(String(e))); }, [reload]);
+  // 回合结束后刷新成员状态，并让用量区域重读一次。
+  const refreshAfterRun = useCallback(() => { setUsageTick((n) => n + 1); reload().catch((e) => setError(String(e))); }, [reload]);
 
   useEffect(() => {
     reload().catch((e) => setError(String(e)));
@@ -154,7 +158,7 @@ export default function Project() {
       <div className="studio-project-body">
         <section className="studio-workspace">
           <div className="studio-work-tabs" role="tablist" aria-label="项目工作区">
-            {(["chat", "files", "rules"] as const).map((key) => <button key={key} type="button" role="tab" id={`project-tab-${key}`} aria-controls={`project-panel-${key}`} aria-selected={tab === key} onClick={() => setTab(key)}><Icon name={key} />{key === "chat" ? "团队讨论" : key === "files" ? "项目文件" : "规章制度"}{key === "files" && changedFiles.length > 0 && <span className="font-mono text-xs text-amber-200">{changedFiles.length}</span>}</button>)}
+            {(["chat", "files", "rules", "usage"] as const).map((key) => <button key={key} type="button" role="tab" id={`project-tab-${key}`} aria-controls={`project-panel-${key}`} aria-selected={tab === key} onClick={() => setTab(key)}><Icon name={key} />{TAB_LABELS[key]}{key === "files" && changedFiles.length > 0 && <span className="font-mono text-xs text-amber-200">{changedFiles.length}</span>}</button>)}
           </div>
           {/* 群聊始终挂载，切换视图时继续接收运行事件并保留输入。 */}
           <div id="project-panel-chat" role="tabpanel" aria-labelledby="project-tab-chat" hidden={tab !== "chat"} className={tab === "chat" ? "studio-work-panel" : "hidden"}>
@@ -167,6 +171,10 @@ export default function Project() {
           {tab === "files" && <div id="project-panel-files" role="tabpanel" aria-labelledby="project-tab-files" className="studio-work-panel">
             <div className="border-b border-slate-800 px-4 py-3 text-xs text-slate-500">点击文件，在系统默认程序中打开 · 改动不区分修改者</div>
             <div className="min-h-0 flex-1">{detail.folderExists ? <FileTree key={project.folderPath} projectId={id} changed={changedFiles} tick={filesTick} /> : <p className="p-4 text-sm text-slate-500">项目文件夹不存在，无法列出文件。</p>}</div>
+          </div>}
+          {tab === "usage" && <div id="project-panel-usage" role="tabpanel" aria-labelledby="project-tab-usage" className="studio-work-panel">
+            <div className="border-b border-slate-800 px-4 py-3 text-xs text-slate-500">按成员与项目合计已结束回合的用量 · 每次回合结束后刷新</div>
+            <div className="min-h-0 flex-1 overflow-y-auto"><ProjectUsagePanel projectId={id} clis={clis} refreshTick={usageTick} /></div>
           </div>}
         </section>
         <aside className="studio-team-panel">

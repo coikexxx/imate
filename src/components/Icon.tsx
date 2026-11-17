@@ -14,6 +14,7 @@ const paths = {
   close: "M6 6l12 12 M18 6 6 18",
   info: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18 M12 11v5 M12 8h.01",
   grid: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
+  usage: "M4 20h16 M7 16V10 M12 16V5 M17 16v-3",
 } as const;
 
 export type IconName = keyof typeof paths;

@@ -7,6 +7,7 @@ import type {
   Message,
   FileListing,
   ProjectRuntime,
+  ProjectUsage,
   SendMessageResponse,
   Instruction,
   TaskItem,
@@ -60,6 +61,7 @@ export const api = {
   listTasks: (instructionId: string) => invoke<TaskItem[]>("list_tasks", { instructionId }),
   getProjectRuntime: (projectId: string) => invoke<ProjectRuntime>("get_project_runtime", { projectId }),
   confirmRuntimeCleanup: (runId: string) => invoke<void>("confirm_runtime_cleanup", { runId }),
+  getProjectUsage: (projectId: string) => invoke<ProjectUsage>("get_project_usage", { projectId }),
   listenProjectEvent: <K extends keyof ProjectEventMap>(name: K, receive: (payload: ProjectEventMap[K]) => void) =>
     listen<ProjectEventMap[K]>(name, (event) => receive(event.payload)),
 
