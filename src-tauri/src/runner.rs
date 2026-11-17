@@ -148,7 +148,7 @@ pub async fn run_turn_managed(
     let mut out = RunOutcome::failed(String::new()); out.error = None;
     out.session_id = request.session_id.clone();
     if let Err(e) = on_started(pid) {
-        out.error = Some(e); out.cleanup_complete = platform::terminate_tree(&mut child, pid).await; return out;
+        out.error = Some(e); out.cleanup_complete = platform::terminate_tree(&mut child, pid, &_tree).await; return out;
     }
     let (tx, mut rx) = mpsc::channel(64);
     let stdout = tokio::spawn(read_stream(child.stdout.take().unwrap(), true, tx.clone()));
@@ -174,7 +174,11 @@ pub async fn run_turn_managed(
         if latched.is_some() { break; }
         let now = Instant::now();
         if exited.is_none() {
-            match child.try_wait() {
+            #[cfg(target_os = "macos")]
+            let status = platform::try_wait(&mut child, pid, &_tree).await;
+            #[cfg(not(target_os = "macos"))]
+            let status = child.try_wait();
+            match status {
                 Ok(Some(status)) => { out.exit_code = status.code(); exited = Some(now); }
                 Err(e) => { latched = Some("failed"); out.error = Some(format!("读取进程状态失败：{e}")); break; }
                 _ => {}
@@ -252,7 +256,9 @@ pub async fn run_turn_managed(
         }
     }
     let finished_cleanly = latched.is_none() && completed && out.exit_code == Some(0);
-    out.cleanup_complete = if finished_cleanly { true } else { platform::terminate_tree(&mut child, pid).await };
+    // macOS 成功根进程也可能留下关闭管道的独立后代，仍须清理并核对。
+    out.cleanup_complete = if finished_cleanly && !cfg!(target_os = "macos") { true }
+        else { platform::terminate_tree(&mut child, pid, &_tree).await };
     // 等待取消完成，确保不留下读写任务或持有管道的 future。
     for task in [stdout, stderr, stdin] { task.abort(); let _ = task.await; }
     out.status = latched.unwrap_or(if completed && out.exit_code == Some(0) { "ok" } else { "failed" }).into();
@@ -342,6 +348,23 @@ mod tests {
                 let mut child = std::process::Command::new("/bin/sh").args(["-c", "echo $$ >> pids; /bin/sh -c 'echo $$ >> pids; sleep 30' & wait"]).spawn().unwrap();
                 if scenario == "orphan_pipe" { event("complete", "父进程退出"); std::process::exit(0); }
                 event("text", "进程树已启动"); std::io::stdout().flush().unwrap(); let _ = child.wait();
+            }
+            #[cfg(target_os = "macos")]
+            "detached_tree" | "detached_orphan_pipe" | "detached_success" => {
+                use std::os::unix::process::CommandExt;
+                std::fs::write("parent-pid", std::process::id().to_string()).unwrap();
+                let mut command = std::process::Command::new("/bin/sh");
+                // 只生成有限寿命的隔离测试后代，失败时也会自行退出。
+                command.args(["-c", "trap '' TERM; echo $$ >> pids; /bin/sh -c 'trap \"\" TERM; echo $$ >> pids; sleep 3' & wait"]);
+                if scenario == "detached_success" { command.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()); }
+                unsafe { command.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }); }
+                let mut child = command.spawn().unwrap();
+                let group = unsafe { libc::getpgid(child.id() as i32) };
+                assert_eq!(group, child.id() as i32, "后代必须真的离开根进程组");
+                std::fs::write("detached-group", group.to_string()).unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+                if scenario != "detached_tree" { event("complete", "父进程先退出"); std::process::exit(0); }
+                event("text", "独立进程组已启动"); std::io::stdout().flush().unwrap(); let _ = child.wait();
             }
             #[cfg(windows)]
             "tree" | "orphan_pipe" => {
@@ -482,6 +505,36 @@ mod tests {
         assert_tree_gone(folder.path());
         let (out, folder) = run("tree", Some(Duration::from_millis(150)), config()).await;
         assert_eq!(out.status, "cancelled"); assert_tree_gone(folder.path());
+    }
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn macos_detached_process_tree_cancel_and_timeout_are_cleaned() {
+        for cancelled in [true, false] {
+            let mut cfg = config();
+            if cancelled { cfg.model_idle_timeout = Duration::from_secs(2); }
+            let (out, folder) = run("detached_tree", cancelled.then_some(Duration::from_millis(250)), cfg).await;
+            assert_eq!(out.status, if cancelled { "cancelled" } else { "timeout" }, "{:?}", out.error);
+            assert!(out.cleanup_complete, "独立进程组的后代也必须确认清理完成");
+            assert_ne!(std::fs::read_to_string(folder.path().join("detached-group")).unwrap(),
+                std::fs::read_to_string(folder.path().join("parent-pid")).unwrap());
+            assert_tree_gone(folder.path());
+        }
+    }
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn macos_observed_detached_tree_is_cleaned_after_parent_exit() {
+        let (out, folder) = run("detached_orphan_pipe", None, config()).await;
+        assert_eq!(out.status, "failed");
+        assert!(out.cleanup_complete, "根进程先退出后仍须清理已观察到的独立进程组后代");
+        assert_tree_gone(folder.path());
+    }
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn macos_successful_root_cleans_observed_detached_children_without_inherited_pipes() {
+        let (out, folder) = run("detached_success", None, config()).await;
+        assert_eq!(out.status, "ok", "{:?}", out.error);
+        assert!(out.cleanup_complete, "根进程成功不等于已观察后代清理完成");
+        assert_tree_gone(folder.path());
     }
     #[tokio::test]
     #[cfg(windows)]
