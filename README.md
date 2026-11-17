@@ -6,6 +6,8 @@
 
 M5 的 Grok、Dsh 与统一代理已接入。Windows 实测通过 Grok 跨模式重建会话后写文件、两者直接执行与同会话续接、Dsh 完整团队与团队用量，以及并行讨论停止后的进程清理。Dsh 团队终端首次被 Windows ACL 拦截，单次授权后成功，失败记录保留；gpt-6 历史上游错误不改写。pi 按 2026-11-13 决议保持未接入，可选的仅 Grok/Dsh 安装环境助理路径未覆盖。Codex 的自动单次提权已核对实际 sandbox、文件与 Git 提交，后续恢复普通权限。见 [M5 计划](docs/plans/2026-11-11-M5-其余适配器.md) 和 [提权记录](docs/plans/2026-11-13-受阻与一次性提权.md)。
 
+M6 打磨打包（2026-11-17）：系统设置新增「运行设置」（内置助理所用 CLI 与讨论轮数、返工、回合总数、空闲／工具／总时长护栏，团队指令开始时冻结、点名与起草每次启动读取）；群聊按停止、超时、CLI 不可用、权限受阻、回合失败、等待清理分别提示下一步；项目页新增「用量」标签，按成员与项目合计 CLI 回报的用量并标注覆盖范围，不设费用上限、不估算未报告的费用。Windows x64 已构建出未签名的 NSIS 安装包；macOS DMG 与两平台干净机验收未做，不把任何平台记为完成。见 [M6 计划](docs/plans/2026-11-12-M6-打磨打包.md)。
+
 Dsh 使用：进入「系统设置 / 应用管理 / DeepSeek Harness」配置认证与模型来源；也可从 Dsh 成员表单进入设置。成员模型可选择已配置的 Web/headless provider、model 和所声明的推理强度。明确选择后沿用该供应商在 Dsh 中的凭据；留空沿用全局默认认证。应用不保存登录令牌或 API Key。
 
 ## 开发
@@ -16,6 +18,8 @@ npm run tauri dev
 ```
 
 测试：`npm test`（前端）、`cd src-tauri && cargo test`（后端）。
+
+打包：Windows 执行 `npm run tauri build -- --bundles nsis`，macOS 执行 `npm run tauri build -- --bundles dmg`，产物在 `src-tauri/target/release/bundle/`。打包器首次运行会从 GitHub 下载 NSIS 工具链，网络不稳时会报 `timeout: global`，重试即可，已下载的组件会缓存。产物未签名，正式发布所需签名与公证另行处理。
 
 ## 文档
 
