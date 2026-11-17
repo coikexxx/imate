@@ -596,7 +596,7 @@ fn schedule_mention(conn: &Connection, instruction: &Instruction) -> AppResult<V
 
 fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agent: &Agent, outcome: &RunOutcome) -> AppResult<()> {
     if outcome.status != "ok" {
-        finish_run(conn, &run.id, outcome, "failed")?;
+        finish_run(conn, &run.id, outcome, &outcome.status)?;
         return mark_waiting(conn, instruction, outcome.error.as_deref().unwrap_or("组长回合失败"));
     }
     let roster = agents::list(conn, &instruction.project_id)?;
@@ -729,7 +729,7 @@ fn apply_execute(conn: &Connection, run: &RunRow, instruction: &Instruction, age
     } else {
         instructions::finish_task(conn, &task_id, "failed", Some(report.id))?;
     }
-    finish_run(conn, &run.id, outcome, if outcome.status == "ok" { "ok" } else { "failed" })?;
+    finish_run(conn, &run.id, outcome, &outcome.status)?;
     remember_agent(conn, run, agent, outcome)?;
     let pending: i64 = conn.query_row(
         "SELECT COUNT(*) FROM tasks WHERE instruction_id = ?1 AND batch_id = ?2 AND status IN ('pending', 'running')",
@@ -820,7 +820,7 @@ fn apply_member_discuss(conn: &Connection, instruction: &Instruction, agent: &Ag
         // 记为未发言，本轮照常继续。半截输出不当成发言。
         let reason = outcome.error.as_deref().unwrap_or("回合没有完成");
         messages::insert(conn, &instruction.project_id, "system", None, "system", &format!("{} 本轮未发言：{reason}", agent.name))?;
-        finish_run(conn, &run.id, outcome, "failed")?;
+        finish_run(conn, &run.id, outcome, &outcome.status)?;
     }
     remember_agent(conn, &run, agent, outcome)?;
     if running_count(conn, &instruction.id)? == 0 {
@@ -1299,7 +1299,7 @@ fn apply_mention(conn: &Connection, run: &RunRow, instruction: &Instruction, age
     };
     let report = messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "report", &content)?;
     messages::set_run(conn, report.id, &run.id)?;
-    finish_run(conn, &run.id, outcome, if outcome.status == "ok" { "ok" } else { "failed" })?;
+    finish_run(conn, &run.id, outcome, &outcome.status)?;
     remember_agent(conn, run, agent, outcome)?;
     let fresh = instructions::get(conn, &instruction.id)?;
     let mut snap = load_snapshot(&fresh.context_snapshot_json)?;
@@ -1626,6 +1626,13 @@ mod tests {
 
     fn failed_text(text: &str) -> RunOutcome {
         RunOutcome { status: "failed".into(), error: Some("执行失败".into()), ..ok_text(text) }
+    }
+
+    fn timed_out_text(text: &str) -> RunOutcome {
+        RunOutcome {
+            status: "timeout".into(), error: Some("回合超过总时长，已停止".into()),
+            exit_code: None, ..ok_text(text)
+        }
     }
 
     fn denied_text(text: &str, detail: &str) -> RunOutcome {
@@ -2524,6 +2531,138 @@ mod tests {
         let active = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
         assert_eq!((active.status.as_str(), active.phase.as_str()), ("running", "decide"));
         assert!(advance(&conn, &project_id).unwrap()[0].prompt.contains("前端 本轮未发言：CLI 长时间没有输出"));
+    }
+
+    #[test]
+    fn timed_out_leader_keeps_timeout_and_waits_without_advancing_the_cursor() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap().remove(0);
+        let cursor = agents::get(&conn, &agents[0].id).unwrap().last_seen_message_id;
+        let outcome = timed_out_text("");
+
+        apply_outcome(&conn, &leader.run_id, &outcome).unwrap();
+
+        let run = crate::store::runs::get(&conn, &leader.run_id).unwrap();
+        assert_eq!(run.status, "timeout", "组长的回合超时不能改写成普通失败");
+        assert_eq!(run.error, outcome.error);
+        assert_eq!(run.exit_code, None);
+        let waiting = instructions::get(&conn, &leader.instruction_id).unwrap();
+        assert_eq!(waiting.status, "waiting_user");
+        assert_eq!(waiting.wait_reason, outcome.error);
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
+        assert_eq!(agents::get(&conn, &agents[0].id).unwrap().last_seen_message_id, cursor);
+    }
+
+    #[test]
+    fn timed_out_discussion_member_keeps_timeout_while_other_members_continue() {
+        let (conn, project_id, agents) = setup(&["前端", "测试"]);
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap().remove(0);
+        apply_outcome(&conn, &leader.run_id, &ok_text(&fence(
+            "先讨论。", r#"{"action":"discuss","to":["前端","测试"],"topic":"登录校验"}"#,
+        ))).unwrap();
+        let members = advance(&conn, &project_id).unwrap();
+        let cursor = agents::get(&conn, &agents[1].id).unwrap().last_seen_message_id;
+        let outcome = timed_out_text("未完成的讨论");
+
+        apply_outcome(&conn, &members[0].run_id, &outcome).unwrap();
+
+        let run = crate::store::runs::get(&conn, &members[0].run_id).unwrap();
+        assert_eq!(run.status, "timeout", "讨论超时仍是超时，不能丢掉终态事实");
+        assert_eq!(run.error, outcome.error);
+        assert_eq!(crate::store::runs::get(&conn, &members[1].run_id).unwrap().status, "running");
+        let current = instructions::get(&conn, &leader.instruction_id).unwrap();
+        assert_eq!((current.status.as_str(), current.phase.as_str()), ("running", "discuss"));
+        assert_eq!(agents::get(&conn, &agents[1].id).unwrap().last_seen_message_id, cursor);
+        let stored = messages::list(&conn, &project_id, None, 50).unwrap();
+        assert!(stored.iter().any(|message| message.kind == "system" && message.content.contains("前端 本轮未发言：回合超过总时长")));
+        assert!(stored.iter().all(|message| message.content != "未完成的讨论"));
+
+        apply_outcome(&conn, &members[1].run_id, &ok_text("测试的看法")).unwrap();
+        assert_eq!(instructions::get(&conn, &leader.instruction_id).unwrap().phase, "decide");
+    }
+
+    #[test]
+    fn timed_out_execution_keeps_timeout_and_fails_the_task_without_replaying_it() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap().remove(0);
+        apply_outcome(&conn, &leader.run_id, &ok_text(&fence(
+            "分两步。", r#"{"action":"assign","decision":"分两步做","tasks":[{"to":"前端","title":"第一步","detail":"做第一步"},{"to":"前端","title":"第二步","detail":"做第二步"}]}"#,
+        ))).unwrap();
+        let executing = advance(&conn, &project_id).unwrap().remove(0);
+        let outcome = timed_out_text("第一步已有部分改动");
+
+        apply_outcome(&conn, &executing.run_id, &outcome).unwrap();
+
+        let run = crate::store::runs::get(&conn, &executing.run_id).unwrap();
+        assert_eq!(run.status, "timeout", "任务失败与回合超时必须分别记录");
+        assert_eq!(run.error, outcome.error);
+        let tasks = instructions::list_tasks(&conn, &executing.instruction_id).unwrap();
+        assert_eq!(tasks[0].status, "failed");
+        assert_eq!(tasks[1].status, "cancelled");
+        let report = messages::get(&conn, tasks[0].report_message_id.unwrap()).unwrap();
+        assert_eq!(report.content, "第一步已有部分改动");
+        assert_eq!(report.model_info.unwrap().run_status.as_deref(), Some("timeout"));
+        assert!(apply_outcome(&conn, &executing.run_id, &ok_text("迟到的完成")).is_err());
+        assert_eq!(crate::store::runs::get(&conn, &executing.run_id).unwrap().status, "timeout");
+        assert_eq!(instructions::get_task(&conn, &tasks[0].id).unwrap().status, "failed");
+        let review = advance(&conn, &project_id).unwrap();
+        assert_eq!(review.len(), 1);
+        assert_eq!(review[0].mode, "discuss");
+        assert!(review[0].task_id.is_none());
+        assert!(review[0].prompt.contains("第一步已有部分改动"));
+    }
+
+    #[test]
+    fn timed_out_queued_mention_keeps_timeout_and_returns_to_intervention() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let executing = assign_one(&conn, &project_id);
+        queue_user_text(&conn, &project_id, "@前端 先检查按钮").unwrap();
+        apply_outcome(&conn, &executing.run_id, &ok_text("原任务已完成")).unwrap();
+        let mention = advance(&conn, &project_id).unwrap().remove(0);
+        assert_eq!(mention.mode, "execute");
+        assert_eq!(mention.agent_id, agents[1].id);
+        assert!(mention.task_id.is_none());
+        let outcome = timed_out_text("点名检查尚未完成");
+
+        apply_outcome(&conn, &mention.run_id, &outcome).unwrap();
+
+        let run = crate::store::runs::get(&conn, &mention.run_id).unwrap();
+        assert_eq!(run.status, "timeout", "团队中的点名回合也必须保留超时状态");
+        assert_eq!(run.error, outcome.error);
+        let current = instructions::get(&conn, &mention.instruction_id).unwrap();
+        assert_eq!((current.status.as_str(), current.phase.as_str()), ("running", "intervention"));
+        let report = messages::list(&conn, &project_id, None, 50).unwrap().into_iter()
+            .find(|message| message.content == "点名检查尚未完成").unwrap();
+        assert_eq!(report.model_info.unwrap().run_status.as_deref(), Some("timeout"));
+        let follow = advance(&conn, &project_id).unwrap();
+        assert_eq!(follow.len(), 1);
+        assert_eq!(follow[0].agent_id, agents[0].id);
+        assert!(follow[0].prompt.contains("点名检查尚未完成"));
+    }
+
+    #[test]
+    fn timed_out_result_cannot_overwrite_a_stopped_or_interrupted_run() {
+        for status in ["cancelled", "interrupted"] {
+            let (conn, project_id, _) = setup(&["前端"]);
+            start_team(&conn, &project_id);
+            let executing = assign_one(&conn, &project_id);
+            if status == "cancelled" {
+                stop_instruction(&conn, &project_id).unwrap();
+            } else {
+                crate::store::runs::finish(&conn, &executing.run_id, status, None, None, Some("应用被中断")).unwrap();
+            }
+            let before = crate::store::runs::get(&conn, &executing.run_id).unwrap();
+
+            assert!(apply_outcome(&conn, &executing.run_id, &timed_out_text("迟到的超时结果")).is_err());
+
+            assert_eq!(crate::store::runs::get(&conn, &executing.run_id).unwrap(), before);
+            assert!(messages::list(&conn, &project_id, None, 50).unwrap().iter()
+                .all(|message| message.content != "迟到的超时结果"));
+        }
     }
 
     fn dead_session(session: &str) -> RunOutcome {
