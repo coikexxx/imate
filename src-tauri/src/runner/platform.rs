@@ -189,53 +189,69 @@ fn mac_process_ids(owner: u32, children: bool) -> std::io::Result<Vec<u32>> {
 }
 
 #[cfg(target_os = "macos")]
-struct MacObservedTree { root: u32, root_confirmed: bool, seen: Vec<MacProcessIdentity>, complete: bool }
+struct MacObservedTree {
+    root: u32, root_confirmed: bool, seen: Vec<MacProcessIdentity>, complete: bool,
+    first_error: Option<(&'static str, Option<i32>)>, last_cleanup: Option<serde_json::Value>,
+}
 
 #[cfg(target_os = "macos")]
 impl MacObservedTree {
+    fn incomplete(&mut self, stage: &'static str, error: Option<i32>) {
+        self.complete = false;
+        self.first_error.get_or_insert((stage, error));
+    }
+
     fn observe_waitable_root(&mut self, root: u32) {
         // libproc 不返回 zombie 的 BSD 信息；WNOWAIT 确认原 child 尚未回收，PID 不能复用。
         if self.root != root || !matches!(mac_root_waitable(root), Ok(true)) {
-            self.complete = false; return;
+            self.incomplete("waitable_root", None); return;
         }
         let members = match mac_process_ids(root, false) {
             Ok(members) => members,
-            Err(_) => { self.complete = false; return; }
+            Err(error) => { self.incomplete("waitable_group_list", error.raw_os_error()); return; }
         };
         let mut observed = Vec::new();
         for pid in members {
             match mac_process_info(pid) {
                 Ok(Some(info)) if info.group == root && !info.zombie => observed.push(info.identity),
                 Ok(_) => {}
-                Err(_) => { self.complete = false; }
+                Err(error) => { self.incomplete("waitable_group_identity", error.raw_os_error()); }
             }
         }
-        if !matches!(mac_root_waitable(root), Ok(true)) { self.complete = false; return; }
+        if !matches!(mac_root_waitable(root), Ok(true)) { self.incomplete("waitable_root_recheck", None); return; }
         self.root_confirmed = true;
         for identity in observed { if !self.seen.contains(&identity) { self.seen.push(identity); } }
         self.observe();
     }
 
     fn observe_root_group(&mut self, root: u32) {
+        let recovering = !self.root_confirmed;
+        // 初次 ESRCH 后，只能用尚未回收的原 child 归属补证，不能仅凭旧 PID 接受新进程。
+        if recovering && !matches!(mac_root_waitable(root), Ok(false)) { return; }
         let anchor = match mac_process_info(root) {
-            Ok(Some(info)) if info.group == root && self.seen.contains(&info.identity) => info.identity,
+            Ok(Some(info)) if info.group == root && (recovering || self.seen.contains(&info.identity)) => info.identity,
             Ok(_) => return,
-            Err(_) => { self.complete = false; return; }
+            Err(error) => { self.incomplete("root_identity", error.raw_os_error()); return; }
         };
         let members = match mac_process_ids(root, false) {
             Ok(members) => members,
-            Err(_) => { self.complete = false; return; }
+            Err(error) => { self.incomplete("root_group_list", error.raw_os_error()); return; }
         };
         let mut observed = Vec::new();
         for pid in members {
             match mac_process_info(pid) {
                 Ok(Some(info)) if info.group == root && !info.zombie => observed.push(info.identity),
                 Ok(_) => {}
-                Err(_) => { self.complete = false; }
+                Err(error) => { self.incomplete("root_group_identity", error.raw_os_error()); }
             }
         }
         // 活根的启动身份与组号必须在成员身份读取前后都一致；已退出根另走 WNOWAIT。
         if !mac_process_info(root).is_ok_and(|info| info.is_some_and(|info| info.identity == anchor && info.group == root)) { return; }
+        if recovering {
+            if !matches!(mac_root_waitable(root), Ok(false)) { return; }
+            self.root_confirmed = true;
+            if !self.seen.contains(&anchor) { self.seen.push(anchor); }
+        }
         for identity in observed { if !self.seen.contains(&identity) { self.seen.push(identity); } }
     }
 
@@ -245,25 +261,25 @@ impl MacObservedTree {
             match mac_matching_process(parent) {
                 Ok(Some(_)) => {}
                 Ok(None) => continue,
-                Err(_) => { self.complete = false; continue; }
+                Err(error) => { self.incomplete("parent_identity", error.raw_os_error()); continue; }
             }
             let children = match mac_process_ids(parent.pid, true) {
                 Ok(children) => children,
                 Err(error) if error.raw_os_error() == Some(libc::ESRCH) => continue,
-                Err(_) => { self.complete = false; continue; }
+                Err(error) => { self.incomplete("children_list", error.raw_os_error()); continue; }
             };
             let mut observed = Vec::new();
             for pid in children {
                 match mac_process_info(pid) {
                     Ok(Some(info)) if info.parent == parent.pid && !info.zombie => observed.push(info.identity),
                     Ok(_) => {}
-                    Err(_) => { self.complete = false; }
+                    Err(error) => { self.incomplete("child_identity", error.raw_os_error()); }
                 }
             }
             match mac_matching_process(parent) {
                 Ok(Some(_)) => {}
                 Ok(None) => continue,
-                Err(_) => { self.complete = false; continue; }
+                Err(error) => { self.incomplete("parent_identity_recheck", error.raw_os_error()); continue; }
             }
             for identity in observed {
                 if !self.seen.contains(&identity) { self.seen.push(identity); pending.push(identity); }
@@ -286,12 +302,37 @@ impl MacObservedTree {
         }
     }
 
-    fn gone(&mut self, group: u32) -> bool {
+    fn gone(&mut self, group: u32, reaped: bool) -> bool {
         self.observe();
-        self.root_confirmed && self.complete && self.seen.iter().all(|identity| matches!(mac_matching_process(*identity), Ok(None)))
-            && mac_process_ids(group, false).is_ok_and(|pids| pids.into_iter().all(|pid| {
-                match mac_process_info(pid) { Ok(None) => true, Ok(Some(info)) => info.zombie, Err(_) => false }
-            }))
+        let (mut alive, mut identity_errors, mut group_alive, mut group_errors) = (0, 0, 0, 0);
+        for identity in &self.seen {
+            match mac_matching_process(*identity) {
+                Ok(Some(_)) => alive += 1, Ok(None) => {}, Err(_) => identity_errors += 1,
+            }
+        }
+        let group_listed = match mac_process_ids(group, false) {
+            Ok(pids) => {
+                for pid in pids {
+                    match mac_process_info(pid) {
+                        Ok(Some(info)) if !info.zombie => group_alive += 1,
+                        Ok(_) => {}, Err(_) => group_errors += 1,
+                    }
+                }
+                true
+            }
+            Err(_) => false,
+        };
+        let gone = self.root_confirmed && self.complete && alive == 0 && identity_errors == 0
+            && group_listed && group_alive == 0 && group_errors == 0;
+        // 只保存布尔值、计数与固定阶段／错误码，不记录 PID、路径、提示词或 CLI 原文。
+        self.last_cleanup = Some(serde_json::json!({
+            "type": "process_cleanup", "cleanupComplete": gone && reaped, "rootConfirmed": self.root_confirmed,
+            "observationComplete": self.complete, "rootReaped": reaped, "trackedProcesses": self.seen.len(),
+            "aliveProcesses": alive, "identityQueryErrors": identity_errors, "groupListed": group_listed,
+            "groupAliveProcesses": group_alive, "groupIdentityErrors": group_errors,
+            "firstObservationError": self.first_error.map(|(stage, error)| serde_json::json!({ "stage": stage, "osError": error })),
+        }));
+        gone
     }
 }
 
@@ -307,10 +348,11 @@ impl MacProcessTree {
     fn new(pid: u32) -> Self {
         let root = mac_process_info(pid);
         let complete = root.is_ok();
+        let first_error = root.as_ref().err().map(|error| ("initial_root", error.raw_os_error()));
         let seen = root.ok().flatten().map(|info| vec![info.identity]).unwrap_or_default();
         let observed = std::sync::Arc::new(std::sync::Mutex::new(MacObservedTree {
             // 初次 ESRCH 可由未回收 child 的 WNOWAIT 补证；其他查询错误仍保持失败关闭。
-            root: pid, root_confirmed: !seen.is_empty(), complete, seen,
+            root: pid, root_confirmed: !seen.is_empty(), complete, seen, first_error, last_cleanup: None,
         }));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (observed_bg, stop_bg) = (observed.clone(), stop.clone());
@@ -320,7 +362,7 @@ impl MacProcessTree {
                 std::thread::sleep(Duration::from_millis(20));
             }
         }).ok();
-        if watcher.is_none() { if let Ok(mut tree) = observed.lock() { tree.complete = false; } }
+        if watcher.is_none() { if let Ok(mut tree) = observed.lock() { tree.incomplete("observer_thread", None); } }
         Self { observed, stop, watcher }
     }
 
@@ -336,9 +378,9 @@ impl MacProcessTree {
         let _ = tokio::task::spawn_blocking(move || { if let Ok(mut tree) = observed.lock() { tree.signal(group, signal); } }).await;
     }
 
-    async fn gone(&self, group: u32) -> bool {
+    async fn gone(&self, group: u32, reaped: bool) -> bool {
         let observed = self.observed.clone();
-        tokio::task::spawn_blocking(move || observed.lock().is_ok_and(|mut tree| tree.gone(group))).await.unwrap_or(false)
+        tokio::task::spawn_blocking(move || observed.lock().is_ok_and(|mut tree| tree.gone(group, reaped))).await.unwrap_or(false)
     }
 }
 
@@ -359,10 +401,19 @@ fn mac_root_waitable(root: u32) -> std::io::Result<bool> {
 
 #[cfg(target_os = "macos")]
 pub async fn try_wait(child: &mut Child, root: u32, tree: &ProcessTree) -> std::io::Result<Option<std::process::ExitStatus>> {
+    if child.id().is_none() { return child.try_wait(); }
     // 运行时只做非阻塞退出探测，不让高频流事件等待整组快照。
     if !mac_root_waitable(root)? { return Ok(None); }
     tree.macos.observe_before_reap(root).await;
     child.try_wait()
+}
+
+/// 清理诊断只返回最后一次核对的匿名元信息，沿用 runner 的受限诊断文件。
+pub fn cleanup_diagnostic(_tree: &ProcessTree) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    { _tree.macos.observed.lock().ok()?.last_cleanup.as_ref().map(serde_json::Value::to_string) }
+    #[cfg(not(target_os = "macos"))]
+    { None }
 }
 
 #[cfg(windows)]
@@ -501,10 +552,16 @@ pub async fn terminate_tree(child: &mut Child, pid: u32, _tree: &ProcessTree) ->
         tokio::time::sleep(Duration::from_millis(100)).await;
         _tree.macos.signal(pid, libc::SIGKILL).await;
         let _ = child.start_kill();
-        let reaped = tokio::time::timeout(Duration::from_secs(2), child.wait()).await.is_ok_and(|result| result.is_ok());
+        let reaped = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                // 取消期间退出的根也必须先补原组快照，再回收；Done 由 try_wait 返回缓存。
+                if let Some(status) = try_wait(child, pid, _tree).await? { return Ok::<_, std::io::Error>(status); }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.is_ok_and(|result| result.is_ok());
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         loop {
-            if _tree.macos.gone(pid).await { return reaped; }
+            if _tree.macos.gone(pid, reaped).await { return reaped; }
             if tokio::time::Instant::now() >= deadline { return false; }
             _tree.macos.signal(pid, libc::SIGKILL).await;
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -556,6 +613,80 @@ mod tests {
     use super::*;
     #[tokio::test]
     #[cfg(target_os = "macos")]
+    async fn macos_pending_root_cancel_can_confirm_cleanup_after_the_pid_disappears() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("2");
+        configure(&mut command);
+        let mut child = command.spawn().unwrap();
+        let root = child.id().unwrap();
+        assert!(!mac_root_waitable(root).unwrap());
+        let tree = track(root);
+        {
+            // 确定性重建初次 libproc 返回 ESRCH、尚待 child 归属补证的状态。
+            let mut observed = tree.macos.observed.lock().unwrap();
+            observed.seen.clear(); observed.root_confirmed = false;
+            assert!(observed.complete);
+        }
+        let cleaned = terminate_tree(&mut child, root, &tree).await;
+        assert!(mac_process_info(root).unwrap().is_none(), "隔离根进程已经消失");
+        assert!(cleaned, "不能在取消时绕过 pending root 的归属补证而误报清理未完成");
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn macos_pending_root_recovers_detached_tracking_but_keeps_real_observation_errors() {
+        use tokio::io::AsyncWriteExt;
+        for observation_failed in [false, true] {
+            let folder = tempfile::tempdir().unwrap();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--ignored", "--exact", "runner::tests::subprocess_helper", "--nocapture"])
+                .current_dir(folder.path()).stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            configure(&mut command);
+            let mut child = command.spawn().unwrap();
+            let root = child.id().unwrap();
+            let tree = track(root);
+            {
+                let mut observed = tree.macos.observed.lock().unwrap();
+                observed.seen.clear(); observed.root_confirmed = false;
+                // 首次 ESRCH 可补证；真正的观察错误不能被后续成功快照抹掉。
+                observed.complete = !observation_failed;
+                observed.first_error = observation_failed.then_some(("initial_root", Some(libc::EPERM)));
+            }
+            let mut input = child.stdin.take().unwrap();
+            input.write_all(b"detached_tree\n").await.unwrap(); input.shutdown().await.unwrap(); drop(input);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+            let tracked_detached = loop {
+                let recovered = {
+                    let observed = tree.macos.observed.lock().unwrap();
+                    let ready = std::fs::read_to_string(folder.path().join("pids")).is_ok_and(|pids| pids.lines().count() >= 2);
+                    ready && observed.root_confirmed && observed.seen.iter().any(|identity|
+                        mac_matching_process(*identity).is_ok_and(|info| info.is_some_and(|info| info.group != root)))
+                };
+                if recovered || tokio::time::Instant::now() >= deadline { break recovered; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            };
+            let cleaned = terminate_tree(&mut child, root, &tree).await;
+            assert!(tracked_detached, "活根身份恢复后必须重新记录独立进程组后代");
+            assert_eq!(cleaned, !observation_failed, "真实观察错误仍须失败关闭");
+            let diagnostic: serde_json::Value = serde_json::from_str(&cleanup_diagnostic(&tree).unwrap()).unwrap();
+            assert_eq!(diagnostic["rootConfirmed"], true);
+            assert_eq!(diagnostic["observationComplete"], !observation_failed);
+            assert_eq!(diagnostic["rootReaped"], true);
+            assert_eq!(diagnostic["aliveProcesses"], 0);
+            assert_eq!(diagnostic["groupAliveProcesses"], 0);
+            if observation_failed {
+                assert_eq!(diagnostic["firstObservationError"]["stage"], "initial_root");
+                assert_eq!(diagnostic["firstObservationError"]["osError"], libc::EPERM);
+            }
+            for line in std::fs::read_to_string(folder.path().join("pids")).unwrap().lines() {
+                assert!(mac_process_info(line.parse().unwrap()).unwrap().is_none(), "已记录测试后代必须清理");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
     async fn macos_root_already_waitable_before_tracking_can_confirm_cleanup() {
         let mut command = Command::new("/usr/bin/true");
         configure(&mut command);
@@ -578,12 +709,15 @@ mod tests {
         let stale = MacProcessIdentity { started: (identity.started.0, identity.started.1.wrapping_add(1)), ..identity };
         assert!(mac_matching_process(stale).unwrap().is_none(), "同一 PID 的启动时间不同就不是原进程");
         let group = unsafe { libc::getpgrp() } as u32;
-        let stale_tree = MacObservedTree { root: identity.pid, root_confirmed: true, seen: vec![stale], complete: true };
+        let stale_tree = MacObservedTree { root: identity.pid, root_confirmed: true, seen: vec![stale], complete: true,
+            first_error: None, last_cleanup: None };
         assert!(!stale_tree.owns_group(group), "不能仅凭复用 PID 或组号确认进程组归属");
-        let current_tree = MacObservedTree { root: identity.pid, root_confirmed: true, seen: vec![identity], complete: true };
+        let current_tree = MacObservedTree { root: identity.pid, root_confirmed: true, seen: vec![identity], complete: true,
+            first_error: None, last_cleanup: None };
         assert!(current_tree.owns_group(group));
-        let mut unknown = MacObservedTree { root: identity.pid, root_confirmed: false, seen: Vec::new(), complete: false };
-        assert!(!unknown.gone(0), "观察失败时不能把空列表当作清理完成");
+        let mut unknown = MacObservedTree { root: identity.pid, root_confirmed: false, seen: Vec::new(), complete: false,
+            first_error: None, last_cleanup: None };
+        assert!(!unknown.gone(0, false), "观察失败时不能把空列表当作清理完成");
     }
 
     #[test]

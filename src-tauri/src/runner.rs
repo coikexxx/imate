@@ -58,20 +58,25 @@ async fn read_stream<R: AsyncRead + Unpin>(mut stream: R, stdout: bool, tx: mpsc
 
 /// 诊断只记录类型与长度，不落盘原始行、工具参数、stderr 或凭据。
 fn log_diagnostic(path: Option<&PathBuf>, line: &[u8]) {
-    use std::io::Write;
-    let Some(path) = path else { return; };
+    if path.is_none() { return; }
     let kind = serde_json::from_slice::<serde_json::Value>(line).ok()
         .and_then(|v| v["type"].as_str().map(str::to_owned)).unwrap_or_else(|| "非 JSON".into());
     let kind: String = if kind == "非 JSON" { kind } else {
         kind.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '_').take(64).collect()
     };
+    append_diagnostic(path, &format!("未归一事件 type={kind} bytes={}", line.len()));
+}
+
+fn append_diagnostic(path: Option<&PathBuf>, metadata: &str) {
+    use std::io::Write;
+    let Some(path) = path else { return; };
     if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
     // 每个 run 最多记录 256 KiB 元信息。
     if std::fs::metadata(path).is_ok_and(|m| m.len() > 256 * 1024) { return; }
     let mut options = std::fs::OpenOptions::new(); options.create(true).append(true);
     #[cfg(unix)]
     { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
-    if let Ok(mut file) = options.open(path) { let _ = writeln!(file, "未归一事件 type={kind} bytes={}", line.len()); }
+    if let Ok(mut file) = options.open(path) { let _ = writeln!(file, "{metadata}"); }
 }
 
 /// 提示词文件随作用域删除，任何提前返回都不会把它留在磁盘上。
@@ -148,7 +153,9 @@ pub async fn run_turn_managed(
     let mut out = RunOutcome::failed(String::new()); out.error = None;
     out.session_id = request.session_id.clone();
     if let Err(e) = on_started(pid) {
-        out.error = Some(e); out.cleanup_complete = platform::terminate_tree(&mut child, pid, &_tree).await; return out;
+        out.error = Some(e); out.cleanup_complete = platform::terminate_tree(&mut child, pid, &_tree).await;
+        if let Some(metadata) = platform::cleanup_diagnostic(&_tree) { append_diagnostic(diagnostic_path.as_ref(), &metadata); }
+        return out;
     }
     let (tx, mut rx) = mpsc::channel(64);
     let stdout = tokio::spawn(read_stream(child.stdout.take().unwrap(), true, tx.clone()));
@@ -259,6 +266,7 @@ pub async fn run_turn_managed(
     // macOS 成功根进程也可能留下关闭管道的独立后代，仍须清理并核对。
     out.cleanup_complete = if finished_cleanly && !cfg!(target_os = "macos") { true }
         else { platform::terminate_tree(&mut child, pid, &_tree).await };
+    if let Some(metadata) = platform::cleanup_diagnostic(&_tree) { append_diagnostic(diagnostic_path.as_ref(), &metadata); }
     // 等待取消完成，确保不留下读写任务或持有管道的 future。
     for task in [stdout, stderr, stdin] { task.abort(); let _ = task.await; }
     out.status = latched.unwrap_or(if completed && out.exit_code == Some(0) { "ok" } else { "failed" }).into();
@@ -493,6 +501,22 @@ mod tests {
         assert!(log.contains("type=非 JSON"));
         assert!(log.contains("bytes="));
         assert!(!log.contains("私密原始输出"));
+        if cfg!(target_os = "macos") {
+            let cleanup: serde_json::Value = log.lines().find_map(|line| serde_json::from_str(line).ok())
+                .expect("macOS 记录可区分清理条件的匿名诊断");
+            assert_eq!(cleanup["type"], "process_cleanup");
+            assert_eq!(cleanup["cleanupComplete"], true);
+            assert_eq!(cleanup["rootConfirmed"], true);
+            assert_eq!(cleanup["observationComplete"], true);
+            assert_eq!(cleanup["rootReaped"], true);
+            assert_eq!(cleanup["aliveProcesses"], 0);
+            assert_eq!(cleanup["identityQueryErrors"], 0);
+            assert_eq!(cleanup["groupListed"], true);
+            assert_eq!(cleanup["groupAliveProcesses"], 0);
+            assert_eq!(cleanup["groupIdentityErrors"], 0);
+            assert!(!log.contains("提示词"));
+            assert!(!log.contains(&folder.path().to_string_lossy().to_string()));
+        }
     }
 
     #[tokio::test]
