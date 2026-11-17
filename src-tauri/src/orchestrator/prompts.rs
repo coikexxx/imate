@@ -7,7 +7,6 @@ use crate::store::agents::Agent;
 use crate::store::messages::Message;
 use crate::store::projects::Project;
 
-const MAX_DISCUSS_ROUNDS: u32 = 3;
 const CONSTRAINTS: &str = "\
 # 回合约束\n\
 本次调用只是你的一次发言，调度由应用负责。说完就结束，不要等其他成员回复，不要反复查看文件等别人的进展。\n\
@@ -59,6 +58,9 @@ pub struct TeamSnapshot<'a> {
     pub topic: &'a str,
     pub round_index: u32,
     pub discuss_rounds: u32,
+    /// 指令冻结的讨论轮数上限与单任务返工上限。
+    pub discuss_round_limit: u32,
+    pub rework_limit: u32,
     pub decision: Option<&'a str>,
     pub tasks: &'a [TaskBrief<'a>],
     pub current_task: Option<&'a TaskBrief<'a>>,
@@ -134,13 +136,13 @@ fn stage_body(stage: Stage, snapshot: &TeamSnapshot<'_>) -> AppResult<String> {
             snapshot.topic.trim()
         ),
         Stage::Decide => {
-            let remaining = MAX_DISCUSS_ROUNDS.saturating_sub(snapshot.discuss_rounds);
+            let remaining = snapshot.discuss_round_limit.saturating_sub(snapshot.discuss_rounds);
             let mut text = format!(
                 "# 组长裁定\n当前是第 {} 轮，已用 {} 轮，剩余 {} 轮。",
                 snapshot.round_index, snapshot.discuss_rounds, remaining
             );
             if remaining == 0 {
-                text.push_str("\n讨论已达 3 轮，必须使用 assign 或 reply。");
+                text.push_str(&format!("\n讨论已达 {} 轮，必须使用 assign 或 reply。", snapshot.discuss_round_limit));
             }
             text.push_str("\n\n");
             text.push_str(PROTOCOL);
@@ -159,11 +161,18 @@ fn stage_body(stage: Stage, snapshot: &TeamSnapshot<'_>) -> AppResult<String> {
                 task.id, task.title, task.detail.trim()
             )
         }
-        Stage::Review => format!(
-            "# 组长验收\n对照项目规章和各成员的边界检查。违反规章或越界时用 rework 打回，rework 必须写任务编号。\n\
+        Stage::Review => {
+            let rework_rule = if snapshot.rework_limit == 0 {
+                "本条指令不允许返工：不要使用 rework，违反规章或越界时用 assign 重新派工或 reply 说明。".to_string()
+            } else {
+                format!("违反规章或越界时用 rework 打回，rework 必须写任务编号；每个任务最多返工 {} 次。", snapshot.rework_limit)
+            };
+            format!(
+                "# 组长验收\n对照项目规章和各成员的边界检查。{rework_rule}\n\
 状态 blocked 表示任务因权限受阻没有完成，不算完成；它需要用户授权后才能重跑。\n{}\n\n{PROTOCOL}",
-            format_tasks(snapshot.tasks)
-        ),
+                format_tasks(snapshot.tasks)
+            )
+        }
         Stage::Intervention => format!(
             "# 干预研判\n{}\n本阶段只能使用 reply 加 continue、reply 加 end，或 assign 加 replace。其他组合都是协议错误。\n\
 不得清零已用的讨论轮数和总回合数。\n\n{PROTOCOL}",
@@ -271,6 +280,7 @@ mod tests {
             message_bound: 10, rules_version: "rules-3", roster_version: "roster-2",
             unread, recent, project, rules, agent, roster,
             goal: "当前目标是登录", topic: "登录校验", round_index: 3, discuss_rounds: 3,
+            discuss_round_limit: 3, rework_limit: 2,
             decision: Some("有效决议：用手写校验"), tasks, current_task: current,
             intervention_note: "用户补充了验收标准", recovery: false, fresh_session: false,
         }
@@ -305,6 +315,29 @@ mod tests {
         assert!(prompts[2].contains("task-7") && prompts[2].contains("已经写好校验"));
         assert!(prompts[4].contains("登录校验"));
         assert!(prompts[5].contains("不能宣布整条指令完成") && prompts[5].contains("写清校验规则"));
+    }
+
+    #[test]
+    fn decide_and_review_prompts_state_the_configured_limits() {
+        let (project, leader, _) = world();
+        let roster = vec![leader.clone()];
+        let tasks = vec![task_brief()];
+        let mut snap = snapshot(&project, &leader, &roster, &[], &[], &[], &tasks, None);
+        snap.discuss_rounds = 2;
+        snap.round_index = 2;
+        snap.discuss_round_limit = 5;
+        snap.rework_limit = 4;
+        let decide = build_leader_prompt(Stage::Decide, &snap).unwrap();
+        assert!(decide.contains("已用 2 轮，剩余 3 轮"), "{decide}");
+        assert!(!decide.contains("讨论已达"), "{decide}");
+        snap.discuss_rounds = 5;
+        let capped = build_leader_prompt(Stage::Decide, &snap).unwrap();
+        assert!(capped.contains("剩余 0 轮") && capped.contains("讨论已达 5 轮"), "{capped}");
+        let review = build_leader_prompt(Stage::Review, &snap).unwrap();
+        assert!(review.contains("最多返工 4 次"), "{review}");
+        snap.rework_limit = 0;
+        let no_rework = build_leader_prompt(Stage::Review, &snap).unwrap();
+        assert!(no_rework.contains("不允许返工"), "{no_rework}");
     }
 
     #[test]

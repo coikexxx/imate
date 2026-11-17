@@ -300,6 +300,10 @@ mod tests {
             "silent" => std::thread::sleep(Duration::from_secs(30)),
             "partial" => { event("text", "部分回答"); std::io::stdout().flush().unwrap(); std::thread::sleep(Duration::from_secs(30)); }
             "flood" => { for _ in 0..10000 { eprintln!("诊断持续输出"); } event("complete", "已完成"); }
+            "chatter" => {
+                for _ in 0..60 { event("text", "持续输出"); std::io::stdout().flush().unwrap(); std::thread::sleep(Duration::from_millis(50)); }
+                event("complete", "说完了");
+            }
             "flood_fail" => { for _ in 0..10000 { eprintln!("stderr 中的私密字节"); } event("complete", "完成事件不能掩盖非零退出"); std::process::exit(9); }
             "missing_session" => {
                 eprintln!("Error: thread/resume: thread/resume failed: no rollout found for thread id 0000-私密线程 (code -32600)");
@@ -441,6 +445,16 @@ mod tests {
         assert_eq!(run("tool_never_ends", None, config()).await.0.status, "timeout");
         let mut cfg = config(); cfg.execute_timeout = Duration::from_millis(120);
         assert_eq!(run("tool", None, cfg).await.0.status, "timeout");
+    }
+    #[tokio::test]
+    async fn continuous_output_cannot_extend_the_total_timeout_from_settings() {
+        let cfg = crate::runtime_settings::RuntimeLimits { execute_total_seconds: 1, ..Default::default() }.runner_config();
+        let started = std::time::Instant::now();
+        let (out, _) = run("chatter", None, cfg).await;
+        assert_eq!(out.status, "timeout", "err={:?}", out.error);
+        assert!(started.elapsed() < Duration::from_millis(2500), "持续输出不能延长总时长：{:?}", started.elapsed());
+        assert!(out.partial_text.contains("持续输出"));
+        assert!(out.cleanup_complete);
     }
     #[tokio::test]
     async fn diagnostics_keep_metadata_without_raw_cli_text() {

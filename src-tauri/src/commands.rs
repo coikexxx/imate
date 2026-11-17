@@ -68,6 +68,18 @@ pub fn save_network_proxy(state: State<'_, AppState>, settings: crate::proxy::Pr
 }
 
 #[tauri::command]
+pub fn get_runtime_settings(state: State<'_, AppState>) -> AppResult<crate::runtime_settings::RuntimeSettings> {
+    let conn = lock(&state)?;
+    crate::runtime_settings::load(&conn)
+}
+
+#[tauri::command]
+pub fn save_runtime_settings(state: State<'_, AppState>, settings: crate::runtime_settings::RuntimeSettings) -> AppResult<crate::runtime_settings::RuntimeSettings> {
+    let conn = lock(&state)?;
+    crate::runtime_settings::save(&conn, &settings)
+}
+
+#[tauri::command]
 pub fn get_dsh_settings(state: State<'_, AppState>) -> AppResult<crate::dsh_config::DshSettings> {
     let conn = lock(&state)?; crate::dsh_config::load(&conn)
 }
@@ -1174,6 +1186,8 @@ fn spawn_direct(app: tauri::AppHandle, project_id: String, started: StartedMessa
 
 async fn execute_project(app: tauri::AppHandle, mut started: StartedMessage, cli: crate::cli_registry::ResolvedCli) {
     let mut retried = false;
+    // 空闲点名在启动时读一次当前护栏，会话重建沿用同一份。
+    let config = app.state::<AppState>().db_lock().map(|conn| crate::runtime_settings::effective_limits(&conn)).unwrap_or_default().runner_config();
     loop {
         let mut adapter = match app.state::<AppState>().make_runtime_adapter(&cli, RunMode::Execute, started.baseline.clone()) {
             Ok(adapter) => adapter,
@@ -1192,7 +1206,7 @@ async fn execute_project(app: tauri::AppHandle, mut started: StartedMessage, cli
                 Ok(events) => emit_events(&app, events),
                 Err(_) => if let Ok(mut runtime) = state.runtime_lock() { runtime.cancel(&started.prepared.agent.project_id); },
             }
-        }, crate::runner::RunnerConfig::default(), Some(app.state::<AppState>().data_dir.join("runs").join(format!("{}.log", started.run_id))),
+        }, config.clone(), Some(app.state::<AppState>().data_dir.join("runs").join(format!("{}.log", started.run_id))),
         |pid| app.state::<AppState>().mark_started(&started.prepared.agent.project_id, &started.run_id, pid)).await;
         if crate::chat::should_rebuild_session(&outcome, started.request.session_id.is_some(), retried) {
             if let Ok(events) = app.state::<AppState>().rebuild_started(&mut started, &cli, &outcome) {
@@ -1416,7 +1430,7 @@ async fn run_orchestrated(
         shown = next;
         if let Ok(mut runtime) = app.state::<AppState>().runtime_lock() { runtime.team_status(project_id, &run_id, next); }
         emit_events(app, vec![("agent:status", json!({"projectId": project_id, "runId": run_id, "agentId": agent_id, "status": next}))]);
-    }, crate::runner::RunnerConfig::default(),
+    }, spec.limits.runner_config(),
         Some(state.data_dir.join("runs").join(format!("{run_id}.log"))),
         |pid| app.state::<AppState>().mark_started_under(project_id, hold, &run_id, pid)).await;
     if let Ok(mut runtime) = state.runtime_lock() { runtime.team_finished(project_id, &run_id); }

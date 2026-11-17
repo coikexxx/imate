@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tokio::sync::watch;
@@ -345,7 +344,7 @@ impl AppState {
 
 fn assistant_cli_setting(state: &AppState) -> AppResult<Option<String>> {
     let conn = state.db_lock()?;
-    Ok(conn.query_row("SELECT value FROM settings WHERE key='assistant_cli'", [], |row| row.get(0)).optional()?)
+    crate::runtime_settings::assistant_cli(&conn)
 }
 
 async fn resolve_assistant_cli(state: &AppState) -> AppResult<crate::cli_registry::ResolvedCli> {
@@ -365,9 +364,11 @@ pub async fn run_draft(app: tauri::AppHandle, state: &AppState, kind: DraftKind,
     let started = state.prepare_draft(kind, &input, &cli)?;
     let worker_started = StartedDraft { kind: started.kind, input: started.input.clone(), run_id: started.run_id.clone(), folder: started.folder.clone(),
         request: started.request.clone(), cancellation: started.cancellation.clone() };
+    // 起草在启动时读一次当前护栏。
+    let config = { let conn = state.db_lock()?; crate::runtime_settings::effective_limits(&conn).runner_config() };
     let worker = tokio::spawn(async move {
         use tauri::Manager;
-        execute_draft(app.state::<AppState>().inner(), &worker_started, adapter, crate::runner::RunnerConfig::default(), |seq, text| {
+        execute_draft(app.state::<AppState>().inner(), &worker_started, adapter, config, |seq, text| {
             let _ = app.emit("assistant:delta", serde_json::json!({"draftId":worker_started.input.draft_id,"runId":worker_started.run_id,"seq":seq,"text":text}));
         }).await
     });

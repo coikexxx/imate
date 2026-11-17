@@ -8,6 +8,7 @@ mod orchestrator;
 mod assistant;
 mod prompts;
 mod runner;
+mod runtime_settings;
 mod cli_registry;
 mod cli_config;
 mod provider_models;
@@ -40,6 +41,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_network_proxy,
             commands::save_network_proxy,
+            commands::get_runtime_settings,
+            commands::save_runtime_settings,
             commands::get_dsh_settings,
             commands::save_dsh_settings,
             commands::list_dsh_models,

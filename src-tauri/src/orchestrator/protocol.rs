@@ -40,10 +40,14 @@ pub struct ReplacementLimit {
     pub superseded: bool,
 }
 
-/// 阶段、返工与任务替代护栏。讨论轮数按整条指令累计。
+/// 阶段、返工与任务替代护栏。讨论轮数按整条指令累计；上限来自指令冻结的运行设置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LimitContext {
     pub discuss_rounds: u32,
+    /// 整条指令允许的讨论轮数上限。
+    pub discuss_round_limit: u32,
+    /// 单个任务允许的返工次数上限。
+    pub rework_limit: u32,
     pub task: Option<TaskLimit>,
     pub replacement_tasks: Vec<ReplacementLimit>,
 }
@@ -332,8 +336,8 @@ fn validate_phase(phase: Phase, action: &ProtocolAction, limits: &LimitContext) 
         },
         Phase::Decide => match &action.kind {
             ActionKind::Reply { .. } | ActionKind::Assign { .. } => Ok(()),
-            ActionKind::Discuss { .. } if limits.discuss_rounds < 3 => Ok(()),
-            ActionKind::Discuss { .. } => Err(invalid("讨论已达 3 轮，裁定必须使用 assign 或 reply")),
+            ActionKind::Discuss { .. } if limits.discuss_rounds < limits.discuss_round_limit => Ok(()),
+            ActionKind::Discuss { .. } => Err(invalid(format!("讨论已达 {} 轮，裁定必须使用 assign 或 reply", limits.discuss_round_limit))),
             ActionKind::Rework { .. } => Err(invalid("裁定阶段不能使用 rework")),
         },
         Phase::Review => match &action.kind {
@@ -360,8 +364,8 @@ fn validate_rework(task_id: &str, limits: &LimitContext) -> AppResult<()> {
     if task.status != "done" && task.status != "failed" {
         return Err(invalid(format!("任务状态 {} 不能返工", task.status)));
     }
-    if task.rework_count >= 2 {
-        return Err(invalid("任务已达返工上限"));
+    if task.rework_count >= limits.rework_limit {
+        return Err(invalid(format!("任务已达返工上限（{} 次）", limits.rework_limit)));
     }
     Ok(())
 }
@@ -399,7 +403,29 @@ mod tests {
         }
     }
     fn limits(rounds: u32, task: Option<TaskLimit>) -> LimitContext {
-        LimitContext { discuss_rounds: rounds, task, replacement_tasks: Vec::new() }
+        LimitContext { discuss_rounds: rounds, discuss_round_limit: 3, rework_limit: 2, task, replacement_tasks: Vec::new() }
+    }
+
+    #[test]
+    fn discuss_and_rework_limits_come_from_the_context_not_constants() {
+        let agents = vec![agent("a", "组长"), agent("b", "前端")];
+        let discuss = "```imates\n{\"action\":\"discuss\",\"to\":[\"前端\"],\"topic\":\"再议\"}\n```";
+        let mut one_round = limits(1, None);
+        one_round.discuss_round_limit = 1;
+        let error = parse_final(discuss, Phase::Decide, &agents, &one_round).unwrap_err().to_string();
+        assert!(error.contains("讨论已达 1 轮"), "{error}");
+        let mut five_rounds = limits(3, None);
+        five_rounds.discuss_round_limit = 5;
+        assert!(parse_final(discuss, Phase::Decide, &agents, &five_rounds).is_ok());
+
+        let rework = "```imates\n{\"action\":\"rework\",\"task_id\":\"t1\",\"feedback\":\"重做\"}\n```";
+        let mut no_rework = limits(0, Some(task("t1", "done", 0)));
+        no_rework.rework_limit = 0;
+        let error = parse_final(rework, Phase::Review, &agents, &no_rework).unwrap_err().to_string();
+        assert!(error.contains("返工上限"), "{error}");
+        let mut three_reworks = limits(0, Some(task("t1", "done", 2)));
+        three_reworks.rework_limit = 3;
+        assert!(parse_final(rework, Phase::Review, &agents, &three_reworks).is_ok());
     }
     #[test]
     fn assign_rejects_replacement_outside_current_instruction() {

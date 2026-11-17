@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::rules::{self, RuleDoc};
 use crate::runner::RunOutcome;
+use crate::runtime_settings::{self, RuntimeLimits};
 use crate::store::agents::{self, Agent};
 use crate::store::instructions::{self, Instruction, NewTask, TaskRecord};
 use crate::store::messages::{self, Message};
@@ -16,8 +17,6 @@ use crate::store::projects::{self, Project};
 use crate::store::{new_id, now_ms};
 use prompts::{Stage, TaskBrief, TeamSnapshot};
 use protocol::{parse_final, ActionKind, LimitContext, Phase, ReplacementLimit, TaskLimit};
-
-const TURN_LIMIT: i64 = 30;
 
 /// 事务提交后才交给调用方启动的回合。启动失败不能退回已经预留的回合数。
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +30,8 @@ pub struct TurnSpec {
     pub message_bound: i64,
     /// 这次回合使用用户授权的高权限档。
     pub elevated: bool,
+    /// 指令冻结的护栏；runner 的超时配置从这里取。
+    pub limits: RuntimeLimits,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +61,9 @@ struct StoredSnapshot {
     elevated_task: Option<String>,
     #[serde(default)]
     elevated_reason: Option<String>,
+    /// 首次启动时冻结的运行设置护栏。旧快照没有这一项，按原默认值处理。
+    #[serde(default)]
+    limits: Option<RuntimeLimits>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +87,7 @@ impl Default for StoredSnapshot {
             mention: None,
             elevated_task: None,
             elevated_reason: None,
+            limits: None,
         }
     }
 }
@@ -124,14 +129,32 @@ pub fn advance(conn: &Connection, project_id: &str) -> AppResult<Vec<TurnSpec>> 
         tx.commit()?;
         return Ok(Vec::new());
     }
+    // 首次启动把当前护栏冻结进指令快照；之后改设置只影响新指令。
+    if instruction.turn_count == 0 {
+        let mut snapshot = load_snapshot(&instruction.context_snapshot_json)?;
+        if snapshot.limits.is_none() {
+            snapshot.limits = Some(runtime_settings::effective_limits(&tx));
+            save_snapshot(&tx, &instruction.id, &snapshot)?;
+            instruction = instructions::get(&tx, &instruction.id)?;
+        }
+    }
     // 只有没有正在跑的回合时才消化队列，避免插话打断当前进程。
     if instruction.phase != "intervention" && has_queued(&tx, &instruction.id)? {
         arm_next_input(&tx, &instruction)?;
         instruction = instructions::get(&tx, &instruction.id)?;
     }
-    let specs = dispatch(&tx, &instruction)?;
+    let limits = instruction_limits(&instruction)?;
+    let mut specs = dispatch(&tx, &instruction)?;
+    for spec in &mut specs {
+        spec.limits = limits.clone();
+    }
     tx.commit()?;
     Ok(specs)
+}
+
+/// 指令冻结的护栏。升级前的旧指令没有冻结记录，沿用原默认值。
+fn instruction_limits(instruction: &Instruction) -> AppResult<RuntimeLimits> {
+    Ok(load_snapshot(&instruction.context_snapshot_json)?.limits.unwrap_or_default())
 }
 
 /// 运行中的普通消息或 `@成员` 入队。不修改已有 run。
@@ -425,7 +448,9 @@ pub fn rebuild_turn(conn: &Connection, run_id: &str, outcome: &RunOutcome) -> Ap
     };
     let new_run = insert_run(&tx, &agent, &run.mode, &instruction.id, run.task_id.as_deref(), bound, false)?;
     tx.commit()?;
-    Ok(Some(spec(new_run, agent.id, &instruction.id, run.task_id, &run.mode, prompt, bound, false)))
+    let mut rebuilt = spec(new_run, agent.id, &instruction.id, run.task_id, &run.mode, prompt, bound, false);
+    rebuilt.limits = instruction_limits(&instruction)?;
+    Ok(Some(rebuilt))
 }
 
 fn dispatch(conn: &Connection, instruction: &Instruction) -> AppResult<Vec<TurnSpec>> {
@@ -576,8 +601,10 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
     }
     let roster = agents::list(conn, &instruction.project_id)?;
     let task = rework_limit(conn, &outcome.final_text)?;
+    let guard = instruction_limits(instruction)?;
     let limits = LimitContext {
-        discuss_rounds: instruction.discuss_rounds.max(0) as u32, task,
+        discuss_rounds: instruction.discuss_rounds.max(0) as u32,
+        discuss_round_limit: guard.discuss_rounds, rework_limit: guard.reworks_per_task, task,
         replacement_tasks: replacement_limits(conn, &instruction.id)?,
     };
     let parsed = match parse_final(&outcome.final_text, protocol_phase(&instruction.phase), &roster, &limits) {
@@ -629,6 +656,7 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
             save_speech(&tx, instruction, agent, &run.id, &parsed.speech)?;
             let stored = StoredSnapshot {
                 pending: Some(StoredPending::Discuss { agent_ids: to, topic, launched: false }),
+                limits: load_snapshot(&instruction.context_snapshot_json)?.limits,
                 ..StoredSnapshot::default()
             };
             tx.execute(
@@ -811,11 +839,12 @@ fn reserve(conn: &Connection, instruction: &Instruction, needed: i64) -> AppResu
     if needed <= 0 {
         return Err(invalid("预留回合数无效"));
     }
-    if instruction.turn_count + needed > TURN_LIMIT {
+    let limit = i64::from(instruction_limits(instruction)?.turns_per_instruction);
+    if instruction.turn_count + needed > limit {
         let now = now_ms();
         conn.execute(
             "UPDATE instructions SET status = 'waiting_user', wait_reason = ?1, updated_at = ?2 WHERE id = ?3",
-            params!["单条指令已达到 30 回合上限", now, instruction.id],
+            params![format!("单条指令已达到 {limit} 回合上限"), now, instruction.id],
         )?;
         set_project_status(conn, &instruction.project_id, "waiting_user")?;
         return Ok(false);
@@ -864,6 +893,7 @@ fn compose_prompt(
     let mode = if stage == Stage::Execute { "execute" } else { "discuss" };
     let fresh = crate::store::runs::resumable_session(conn, agent, mode)?.is_none();
     let rounds = instruction.discuss_rounds.max(0) as u32;
+    let guard = instruction_limits(instruction)?;
     let snapshot = TeamSnapshot {
         message_bound: bound,
         rules_version: &rules_version,
@@ -878,6 +908,8 @@ fn compose_prompt(
         topic,
         round_index: rounds,
         discuss_rounds: rounds,
+        discuss_round_limit: guard.discuss_rounds,
+        rework_limit: guard.reworks_per_task,
         decision: decision.as_deref(),
         tasks: &briefs,
         current_task: current_brief.as_ref(),
@@ -1181,7 +1213,8 @@ fn set_project_status(conn: &Connection, project_id: &str, status: &str) -> AppR
 }
 
 fn spec(run_id: String, agent_id: String, instruction_id: &str, task_id: Option<String>, mode: &str, prompt: String, message_bound: i64, elevated: bool) -> TurnSpec {
-    TurnSpec { run_id, agent_id, instruction_id: instruction_id.to_string(), task_id, mode: mode.to_string(), prompt, message_bound, elevated }
+    TurnSpec { run_id, agent_id, instruction_id: instruction_id.to_string(), task_id, mode: mode.to_string(), prompt, message_bound, elevated,
+        limits: RuntimeLimits::default() }
 }
 
 fn invalid(message: impl Into<String>) -> AppError {
@@ -1319,8 +1352,10 @@ fn continue_instruction(conn: &Connection, instruction: &Instruction) -> AppResu
         conn.execute("UPDATE instructions SET resume_phase = NULL, updated_at = ?1 WHERE id = ?2", params![now_ms(), fresh.id])?;
         let roster = agents::list(conn, &fresh.project_id)?;
         let task = rework_limit(conn, &text)?;
+        let guard = instruction_limits(&fresh)?;
         let limits = LimitContext {
-            discuss_rounds: fresh.discuss_rounds.max(0) as u32, task,
+            discuss_rounds: fresh.discuss_rounds.max(0) as u32,
+            discuss_round_limit: guard.discuss_rounds, rework_limit: guard.reworks_per_task, task,
             replacement_tasks: replacement_limits(conn, &fresh.id)?,
         };
         let parsed = parse_final(&text, protocol_phase(&phase), &roster, &limits)?;
@@ -1404,6 +1439,7 @@ fn replay_action(conn: &Connection, instruction: &Instruction, parsed: protocol:
         ActionKind::Discuss { to, topic } => {
             let stored = StoredSnapshot {
                 pending: Some(StoredPending::Discuss { agent_ids: to, topic, launched: false }),
+                limits: load_snapshot(&instruction.context_snapshot_json)?.limits,
                 ..StoredSnapshot::default()
             };
             conn.execute(
@@ -1466,8 +1502,9 @@ fn abandon_in(conn: &Connection, instruction_id: &str) -> AppResult<()> {
 }
 
 fn retry_instruction(conn: &Connection, instruction: &Instruction) -> AppResult<Instruction> {
-    if instruction.turn_count >= TURN_LIMIT {
-        return Err(invalid("已达到 30 回合上限，不能靠重试清零"));
+    let limit = i64::from(instruction_limits(instruction)?.turns_per_instruction);
+    if instruction.turn_count >= limit {
+        return Err(invalid(format!("已达到 {limit} 回合上限，不能靠重试清零")));
     }
     if matches!(instruction.phase.as_str(), "execute" | "direct") {
         return Err(invalid("执行阶段不能重试，请补充或放弃"));
@@ -1691,6 +1728,67 @@ mod tests {
         assert_eq!(projects::get(&conn, &project_id).unwrap().status, "idle");
         let systems: Vec<_> = messages::list(&conn, &project_id, None, 20).unwrap().into_iter().filter(|message| message.kind == "system").collect();
         assert!(systems.iter().any(|message| message.content.contains("已失败") && message.content.contains("未执行")));
+    }
+
+    #[test]
+    fn limits_freeze_at_first_launch_and_new_instructions_read_new_settings() {
+        use crate::runtime_settings::{self, RuntimeLimits, RuntimeSettings};
+        let (conn, project_id, _) = setup(&["前端"]);
+        let tight = RuntimeSettings { assistant_cli: None, limits: RuntimeLimits {
+            turns_per_instruction: 3, discuss_rounds: 1, execute_total_seconds: 120, ..RuntimeLimits::default() } };
+        runtime_settings::save(&conn, &tight).unwrap();
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap();
+        assert_eq!(leader.len(), 1);
+        assert_eq!(leader[0].limits, tight.limits);
+        assert_eq!(leader[0].limits.runner_config().execute_timeout, std::time::Duration::from_secs(120));
+        // 运行中放宽设置：进行中的指令继续用冻结的值。
+        let loose = RuntimeSettings { assistant_cli: None, limits: RuntimeLimits { turns_per_instruction: 30, discuss_rounds: 3, ..RuntimeLimits::default() } };
+        runtime_settings::save(&conn, &loose).unwrap();
+        apply_outcome(&conn, &leader[0].run_id, &ok_text(&fence("讨论。", r#"{"action":"discuss","to":["前端"],"topic":"登录校验"}"#))).unwrap();
+        let members = advance(&conn, &project_id).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].limits, tight.limits);
+        apply_outcome(&conn, &members[0].run_id, &ok_text("成员发言")).unwrap();
+        let decide = advance(&conn, &project_id).unwrap();
+        assert_eq!(decide.len(), 1);
+        assert_eq!(turn_count(&conn, &project_id), 3);
+        assert!(decide[0].prompt.contains("讨论已达 1 轮"), "{}", decide[0].prompt);
+        // 冻结的 1 轮上限：再讨论是协议错误，而纠错回合又超过 3 回合上限。
+        apply_outcome(&conn, &decide[0].run_id, &ok_text(&fence("再议。", r#"{"action":"discuss","to":["前端"],"topic":"登录校验"}"#))).unwrap();
+        let run = crate::store::runs::get(&conn, &decide[0].run_id).unwrap();
+        assert_eq!(run.status, "failed");
+        assert!(run.error.as_deref().unwrap().contains("讨论已达 1 轮"), "{:?}", run.error);
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
+        let waiting = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(waiting.status, "waiting_user");
+        assert_eq!(waiting.turn_count, 3);
+        assert!(waiting.wait_reason.as_deref().unwrap().contains("3 回合上限"), "{:?}", waiting.wait_reason);
+        let error = resume_instruction(&conn, &waiting.id, "retry", None).unwrap_err().to_string();
+        assert!(error.contains("3 回合上限"), "{error}");
+        // 放弃后新指令读取新设置。
+        resume_instruction(&conn, &waiting.id, "abandon", None).unwrap();
+        begin_user_instruction(&conn, &project_id, "再来一次").unwrap();
+        let fresh = advance(&conn, &project_id).unwrap();
+        assert_eq!(fresh[0].limits, loose.limits);
+    }
+
+    #[test]
+    fn instructions_started_before_limits_existed_keep_the_original_defaults() {
+        use crate::runtime_settings::{self, RuntimeLimits, RuntimeSettings};
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        // 模拟升级前已经跑过的指令：有回合数，快照里没有护栏。
+        conn.execute("UPDATE instructions SET turn_count = 29, context_snapshot_json = '{}' WHERE project_id = ?1", [&project_id]).unwrap();
+        runtime_settings::save(&conn, &RuntimeSettings { assistant_cli: None,
+            limits: RuntimeLimits { turns_per_instruction: 5, ..RuntimeLimits::default() } }).unwrap();
+        let turn = advance(&conn, &project_id).unwrap();
+        assert_eq!(turn.len(), 1, "29+1 没有超过原默认的 30 回合");
+        assert_eq!(turn[0].limits, RuntimeLimits::default());
+        apply_outcome(&conn, &turn[0].run_id, &ok_text(&fence("讨论。", r#"{"action":"discuss","to":["前端"],"topic":"登录校验"}"#))).unwrap();
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
+        let waiting = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert!(waiting.wait_reason.as_deref().unwrap().contains("30 回合上限"), "{:?}", waiting.wait_reason);
     }
 
     #[test]
