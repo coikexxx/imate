@@ -92,7 +92,7 @@ describe("实际群聊组件的运行中干预", () => {
     expect(projectStore.getState().messages.map((message) => message.id)).toEqual([1]);
   });
 
-  it("独立点名回合仍串行，避免把消息排进不会消化的队列", async () => {
+  it("独立点名回合继续保持串行", async () => {
     const controls = render({ kind: "direct" });
     expect(controls.send.props.disabled).toBe(true);
     expect(controls.stop.props.disabled).toBe(false);
