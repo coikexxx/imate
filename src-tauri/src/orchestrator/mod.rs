@@ -1249,20 +1249,20 @@ fn arm_next_input(conn: &Connection, instruction: &Instruction) -> AppResult<()>
     )?;
     let message = messages::get(conn, input.message_id)?;
     let fresh = instructions::get(conn, &instruction.id)?;
-    if input.kind == "direct" {
-        let agent_id = input.target_agent_id.clone().ok_or_else(|| invalid("点名必须指定成员"))?;
-        let mut snap = load_snapshot(&fresh.context_snapshot_json)?;
-        snap.mention = Some(StoredMention { agent_id, content: message.content, launched: false });
-        save_snapshot(conn, &instruction.id, &snap)?;
-        set_phase(conn, &instruction.id, "direct")?;
-        return Ok(());
-    }
-    let snap = load_snapshot(&fresh.context_snapshot_json)?;
+    let mut snap = load_snapshot(&fresh.context_snapshot_json)?;
+    // 点名与普通补充都要记住当前阶段；暂存的组长动作仍由自身阶段负责恢复。
     if snap.stashed_text.is_none() && fresh.resume_phase.is_none() && !matches!(fresh.phase.as_str(), "intervention" | "direct") {
         conn.execute(
             "UPDATE instructions SET resume_phase = ?1, updated_at = ?2 WHERE id = ?3",
             params![fresh.phase, now, instruction.id],
         )?;
+    }
+    if input.kind == "direct" {
+        let agent_id = input.target_agent_id.clone().ok_or_else(|| invalid("点名必须指定成员"))?;
+        snap.mention = Some(StoredMention { agent_id, content: message.content, launched: false });
+        save_snapshot(conn, &instruction.id, &snap)?;
+        set_phase(conn, &instruction.id, "direct")?;
+        return Ok(());
     }
     conn.execute(
         "UPDATE instructions SET wait_reason = ?1, updated_at = ?2 WHERE id = ?3",
@@ -1403,7 +1403,11 @@ fn replace_batch(
     }).collect();
     let inserted = instructions::insert_batch(conn, &instruction.id, Some(&agent.id), decision, &batch)?;
     messages::set_run(conn, inserted.decision_message_id, run_id)?;
-    set_phase(conn, &instruction.id, "execute")?;
+    // 替换已消费旧干预目标；之后的插话或点名从新批次的实际阶段重新保存。
+    conn.execute(
+        "UPDATE instructions SET phase = 'execute', resume_phase = NULL, updated_at = ?1 WHERE id = ?2",
+        params![now_ms(), instruction.id],
+    )?;
     set_project_status(conn, &instruction.project_id, "executing")
 }
 
@@ -2191,6 +2195,155 @@ mod tests {
         let restored = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
         assert_eq!(restored.phase, "execute");
         assert_eq!(instructions::list_tasks(&conn, &restored.id).unwrap().len(), 1);
+    }
+
+    fn discussion_with_queued_supplement(conn: &Connection, project_id: &str, mention: bool) -> TurnSpec {
+        start_team(conn, project_id);
+        let leader = advance(conn, project_id).unwrap().remove(0);
+        apply_outcome(conn, &leader.run_id, &ok_text(&fence(
+            "先讨论。", r#"{"action":"discuss","to":["前端"],"topic":"确认文件交付边界"}"#,
+        ))).unwrap();
+        let discussion = advance(conn, project_id).unwrap().remove(0);
+        queue_user_text(conn, project_id, "补充：只写指定一行").unwrap();
+        if mention {
+            queue_user_text(conn, project_id, "@前端 只确认会核对字节，不要修改文件").unwrap();
+        }
+        apply_outcome(conn, &discussion.run_id, &ok_text("边界已确认")).unwrap();
+        let intervention = advance(conn, project_id).unwrap().remove(0);
+        assert_eq!(instructions::get(conn, &intervention.instruction_id).unwrap().resume_phase.as_deref(), Some("decide"));
+        intervention
+    }
+
+    #[test]
+    fn consecutive_interventions_replace_then_mention_executes_the_original_task() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        let intervention = discussion_with_queued_supplement(&conn, &project_id, true);
+        apply_outcome(&conn, &intervention.run_id, &ok_text(&fence(
+            "按补充条件派工。",
+            r#"{"action":"assign","disposition":"replace","decision":"创建文件并自检","tasks":[{"to":"前端","title":"唯一交付任务","detail":"创建文件并核对字节"}]}"#,
+        ))).unwrap();
+        let tasks = instructions::list_tasks(&conn, &intervention.instruction_id).unwrap();
+        assert_eq!(tasks.len(), 1);
+        let task_id = tasks[0].id.clone();
+
+        let mention = advance(&conn, &project_id).unwrap().remove(0);
+        assert_eq!(mention.agent_id, agents[1].id);
+        assert!(mention.task_id.is_none());
+        apply_outcome(&conn, &mention.run_id, &ok_text("会按字节核对，未修改文件")).unwrap();
+        let after_mention = advance(&conn, &project_id).unwrap().remove(0);
+        apply_outcome(&conn, &after_mention.run_id, &ok_text(&fence(
+            "点名已处理，执行刚才的派工。",
+            r#"{"action":"reply","disposition":"continue","message":"继续原任务"}"#,
+        ))).unwrap();
+
+        let execution = advance(&conn, &project_id).unwrap().remove(0);
+        assert_eq!(execution.task_id.as_deref(), Some(task_id.as_str()), "点名后必须执行已派工任务，不能回到裁定再次派工");
+        assert_eq!(execution.mode, "execute");
+        apply_outcome(&conn, &execution.run_id, &ok_text("文件已创建并核对")).unwrap();
+        let review = advance(&conn, &project_id).unwrap().remove(0);
+        apply_outcome(&conn, &review.run_id, &ok_text(&fence(
+            "验收完成。", r#"{"action":"reply","message":"交付完成"}"#,
+        ))).unwrap();
+        let tasks = instructions::list_tasks(&conn, &intervention.instruction_id).unwrap();
+        assert_eq!(tasks.len(), 1, "连续干预不能产生重复批次");
+        assert_eq!(tasks[0].id, task_id);
+        assert_eq!(tasks[0].status, "done");
+        assert_eq!(instructions::get(&conn, &intervention.instruction_id).unwrap().status, "completed");
+    }
+
+    #[test]
+    fn consecutive_interventions_replacement_does_not_pollute_later_review() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        let intervention = discussion_with_queued_supplement(&conn, &project_id, false);
+        apply_outcome(&conn, &intervention.run_id, &ok_text(&fence(
+            "按补充条件派工。",
+            r#"{"action":"assign","disposition":"replace","decision":"创建文件并自检","tasks":[{"to":"前端","title":"唯一交付任务","detail":"创建文件并核对字节"}]}"#,
+        ))).unwrap();
+        let execution = advance(&conn, &project_id).unwrap().remove(0);
+        assert!(execution.task_id.is_some());
+        queue_user_text(&conn, &project_id, "补充：验收时说明实际字节数").unwrap();
+        apply_outcome(&conn, &execution.run_id, &ok_text("文件已创建并核对")).unwrap();
+        let before_review = advance(&conn, &project_id).unwrap().remove(0);
+        apply_outcome(&conn, &before_review.run_id, &ok_text(&fence(
+            "补充已记录，接着验收。",
+            r#"{"action":"reply","disposition":"continue","message":"继续验收"}"#,
+        ))).unwrap();
+
+        let restored = instructions::get(&conn, &intervention.instruction_id).unwrap();
+        assert_eq!(restored.phase, "review", "替换批次的旧阶段不能污染任务完成后的验收边界");
+        assert!(restored.resume_phase.is_none());
+        let review = advance(&conn, &project_id).unwrap().remove(0);
+        assert!(review.task_id.is_none());
+        assert_eq!(instructions::list_tasks(&conn, &restored.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn consecutive_interventions_mention_keeps_a_stashed_assignment() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let leader = advance(&conn, &project_id).unwrap().remove(0);
+        queue_user_text(&conn, &project_id, "补充：只写指定文件").unwrap();
+        queue_user_text(&conn, &project_id, "@前端 先确认边界").unwrap();
+        apply_outcome(&conn, &leader.run_id, &ok_text(&fence(
+            "创建指定文件。",
+            r#"{"action":"assign","decision":"只写指定文件","tasks":[{"to":"前端","title":"创建文件","detail":"写入后自检"}]}"#,
+        ))).unwrap();
+        let intervention = advance(&conn, &project_id).unwrap().remove(0);
+        apply_outcome(&conn, &intervention.run_id, &ok_text(&fence(
+            "继续原派工。", r#"{"action":"reply","disposition":"continue","message":"继续"}"#,
+        ))).unwrap();
+        let mention = advance(&conn, &project_id).unwrap().remove(0);
+        assert!(mention.task_id.is_none());
+        assert!(instructions::list_tasks(&conn, &leader.instruction_id).unwrap().is_empty());
+        let parked = instructions::get(&conn, &leader.instruction_id).unwrap();
+        let snapshot = load_snapshot(&parked.context_snapshot_json).unwrap();
+        assert_eq!(snapshot.stashed_run_id.as_deref(), Some(leader.run_id.as_str()));
+        assert_eq!(snapshot.stashed_phase.as_deref(), Some("triage"));
+        apply_outcome(&conn, &mention.run_id, &ok_text("边界已确认")).unwrap();
+        let after_mention = advance(&conn, &project_id).unwrap().remove(0);
+        apply_outcome(&conn, &after_mention.run_id, &ok_text(&fence(
+            "点名完成，应用暂存派工。", r#"{"action":"reply","disposition":"continue","message":"继续"}"#,
+        ))).unwrap();
+
+        let restored = instructions::get(&conn, &leader.instruction_id).unwrap();
+        assert_eq!(restored.phase, "execute");
+        assert!(restored.resume_phase.is_none());
+        let tasks = instructions::list_tasks(&conn, &restored.id).unwrap();
+        assert_eq!(tasks.len(), 1, "暂存派工只应用一次");
+        let decision_run_id: Option<String> = conn.query_row(
+            "SELECT run_id FROM messages WHERE id = ?1", [tasks[0].instruction_message_id.unwrap()], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(decision_run_id.as_deref(), Some(leader.run_id.as_str()));
+        let execution = advance(&conn, &project_id).unwrap().remove(0);
+        assert_eq!(execution.task_id.as_deref(), Some(tasks[0].id.as_str()));
+    }
+
+    #[test]
+    fn consecutive_interventions_mention_keeps_a_stashed_review_reply() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let execution = assign_one(&conn, &project_id);
+        apply_outcome(&conn, &execution.run_id, &ok_text("任务完成")).unwrap();
+        let review = advance(&conn, &project_id).unwrap().remove(0);
+        queue_user_text(&conn, &project_id, "@前端 只确认没有遗留文件").unwrap();
+        apply_outcome(&conn, &review.run_id, &ok_text(&fence(
+            "文件已核验，交付完成。", r#"{"action":"reply","message":"交付完成"}"#,
+        ))).unwrap();
+        let mention = advance(&conn, &project_id).unwrap().remove(0);
+        assert!(mention.task_id.is_none());
+        let parked = instructions::get(&conn, &review.instruction_id).unwrap();
+        assert_eq!(load_snapshot(&parked.context_snapshot_json).unwrap().stashed_phase.as_deref(), Some("review"));
+        apply_outcome(&conn, &mention.run_id, &ok_text("没有遗留文件")).unwrap();
+        let intervention = advance(&conn, &project_id).unwrap().remove(0);
+        apply_outcome(&conn, &intervention.run_id, &ok_text(&fence(
+            "确认无遗留，继续交付。", r#"{"action":"reply","disposition":"continue","message":"继续"}"#,
+        ))).unwrap();
+
+        let completed = instructions::get(&conn, &review.instruction_id).unwrap();
+        assert_eq!(completed.status, "completed");
+        assert!(completed.resume_phase.is_none());
+        assert_eq!(instructions::list_tasks(&conn, &completed.id).unwrap().len(), 1);
+        assert!(advance(&conn, &project_id).unwrap().is_empty(), "暂存验收答复应直接收尾，不再执行或另起组长回合");
     }
 
     #[test]
