@@ -340,6 +340,9 @@ pub fn apply_outcome(conn: &Connection, run_id: &str, outcome: &RunOutcome) -> A
         return Err(invalid("运行已结束"));
     }
     let instruction = instructions::get(conn, &run.instruction_id)?;
+    if !outcome.cleanup_complete {
+        return pause_for_cleanup(conn, &run, &instruction, outcome);
+    }
     if instruction.status != "running" {
         return Err(invalid("指令已暂停或结束"));
     }
@@ -353,6 +356,33 @@ pub fn apply_outcome(conn: &Connection, run_id: &str, outcome: &RunOutcome) -> A
     } else {
         apply_member_discuss(conn, &instruction, &agent, run_id, outcome)
     }
+}
+
+fn pause_for_cleanup(conn: &Connection, run: &RunRow, instruction: &Instruction, outcome: &RunOutcome) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    let reason = outcome.error.as_deref().unwrap_or("进程树清理未完成，请人工确认后再运行");
+    finish_run_with(&tx, &run.id, outcome, "interrupted", reason)?;
+    if let Some(task_id) = &run.task_id {
+        let content = if outcome.partial_text.trim().is_empty() { reason } else { &outcome.partial_text };
+        let report = messages::insert(&tx, &instruction.project_id, "agent", Some(&run.agent_id), "report", content)?;
+        messages::set_run(&tx, report.id, &run.id)?;
+        tx.execute(
+            "UPDATE tasks SET status = 'failed', finished_at = ?1, report_message_id = ?2 WHERE id = ?3 AND status = 'running'",
+            params![now_ms(), report.id, task_id],
+        )?;
+    }
+    instructions::cancel_unstarted(&tx, &instruction.id)?;
+    instructions::cancel_queued(&tx, &instruction.id)?;
+    tx.execute(
+        "UPDATE runs SET status = 'cancelled', ended_at = ?1, error = ?2 WHERE instruction_id = ?3 AND status = 'running'",
+        params![now_ms(), "同一指令有待确认的进程清理，已停止本轮", instruction.id],
+    )?;
+    if instruction.status == "running" {
+        mark_waiting(&tx, instruction, reason)?;
+    }
+    messages::insert(&tx, &instruction.project_id, "system", None, "system", reason)?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// 结果处理失败后的兜底；由确认 run 原先仍在运行的调用方使用。
@@ -720,7 +750,11 @@ fn apply_execute(conn: &Connection, run: &RunRow, instruction: &Instruction, age
     let report = messages::insert(conn, &instruction.project_id, "agent", Some(&agent.id), "report", &content)?;
     messages::set_run(conn, report.id, &run.id)?;
     // 正常退出不等于做完了：权限拒绝优先，任务转为受阻或按授权重跑。
-    let denial = outcome.denial.clone().or_else(|| (outcome.status == "ok").then(|| report_denial(&content)).flatten());
+    let denial = match outcome.status.as_str() {
+        "ok" => outcome.denial.clone().or_else(|| report_denial(&content)),
+        "failed" => outcome.denial.clone(),
+        _ => None,
+    };
     if let Some(denial) = denial {
         return handle_denial(conn, run, instruction, agent, outcome, &task, report.id, denial);
     }
@@ -2739,13 +2773,17 @@ mod tests {
     #[test]
     fn timed_out_execution_keeps_timeout_and_fails_the_task_without_replaying_it() {
         let (conn, project_id, _) = setup(&["前端"]);
+        projects::set_elevation_allowed(&conn, &project_id, true).unwrap();
         start_team(&conn, &project_id);
         let leader = advance(&conn, &project_id).unwrap().remove(0);
         apply_outcome(&conn, &leader.run_id, &ok_text(&fence(
             "分两步。", r#"{"action":"assign","decision":"分两步做","tasks":[{"to":"前端","title":"第一步","detail":"做第一步"},{"to":"前端","title":"第二步","detail":"做第二步"}]}"#,
         ))).unwrap();
         let executing = advance(&conn, &project_id).unwrap().remove(0);
-        let outcome = timed_out_text("第一步已有部分改动");
+        let mut outcome = timed_out_text("第一步已有部分改动");
+        outcome.denial = Some(crate::adapters::Denial {
+            tool: "terminal".into(), detail: "权限不足".into(), source: crate::adapters::DenialSource::Adapter,
+        });
 
         apply_outcome(&conn, &executing.run_id, &outcome).unwrap();
 

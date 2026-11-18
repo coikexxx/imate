@@ -540,6 +540,10 @@ impl ActiveRuns {
     pub fn accepts_events(&self, key: &str, run_id: &str) -> bool {
         self.current(key, run_id) && self.generations.get(run_id) == Some(&0)
     }
+    fn accepts_launch(&self, key: &str, holder: &str, folder: &Path) -> bool {
+        self.accepts_events(key, holder)
+            && self.directories.get(folder).is_some_and(|owner| owner == holder)
+    }
     pub fn remove(&mut self, key: &str, run_id: &str) {
         if self.current(key, run_id) {
             self.runs.remove(key); self.directories.retain(|_, id| id != run_id);
@@ -762,10 +766,12 @@ impl AppState {
     /// 团队回合挂在项目的整段预留之下：`holder` 是预留号，`run_id` 是这次回合。
     pub fn mark_started_under(&self, key: &str, holder: &str, run_id: &str, pid: u32) -> Result<(), String> {
         let runtime = self.runtime_lock().map_err(|e| e.to_string())?;
-        if !runtime.current(key, holder) { return Err("运行预留已失效".into()); }
         let conn = self.db_lock().map_err(|e| e.to_string())?;
         let mut owner = load_owners(&conn).map_err(|e| e.to_string())?.into_iter().find(|o| o.run_id == run_id)
             .ok_or("缺少进程启动前运行记录")?;
+        if !runtime.accepts_launch(key, holder, Path::new(&owner.folder_path)) {
+            return Err("运行预留已失效".into());
+        }
         if owner.instance != self.instance { return Err("运行所有权不属于当前应用".into()); }
         owner.pid = Some(pid); owner.process_group = Some(pid);
         save_owner(&conn, &owner).map_err(|e| e.to_string())
@@ -889,7 +895,13 @@ impl AppState {
         let mut runtime = self.runtime_lock()?; let conn = self.db_lock()?;
         if runtime.runs.values().any(|(id, _)| id == run_id) { return Err(AppError::Invalid("不能确认活动回合的清理".into())); }
         let owner = load_owners(&conn)?.into_iter().find(|owner| owner.run_id == run_id).ok_or_else(|| AppError::NotFound("待清理运行".into()))?;
-        if !owner.cleanup_required || runs::get(&conn, run_id)?.status != "interrupted" { return Err(AppError::Invalid("只能确认已中断运行的清理".into())); }
+        if owner.project_id.as_ref().is_some_and(|project_id| runtime.runs.contains_key(project_id)) {
+            return Err(AppError::Invalid("请等项目停止后再确认进程清理".into()));
+        }
+        // 旧版本可能把清理未确认的团队回合记为 failed，继续允许人工确认。
+        if !owner.cleanup_required || !matches!(runs::get(&conn, run_id)?.status.as_str(), "interrupted" | "cancelled" | "failed") {
+            return Err(AppError::Invalid("只能确认已结束运行的待清理进程".into()));
+        }
         remove_owner(&conn, run_id)?;
         runtime.directories.retain(|_, id| id != run_id);
         // 同目录有多个残留时仍保持阻塞，直到逐一确认。
@@ -906,7 +918,7 @@ pub fn make_adapter(cli: &crate::cli_registry::ResolvedCli, mode: RunMode, basel
         "codex" => Ok(Box::new(crate::adapters::codex::CodexAdapter::new(cli.program.clone(), mode, baseline).with_environment(cli))),
         "grok" => Ok(Box::new(crate::adapters::grok::GrokAdapter::new(cli.program.clone(), mode).with_environment(cli))),
         "dsh" => Ok(Box::new(crate::adapters::dsh::DshAdapter::new(cli.program.clone(), mode).with_environment(cli))),
-        id => Err(AppError::Invalid(format!("CLI {id} 尚未接入，计划在 M5 实现"))),
+        id => Err(AppError::Invalid(format!("CLI {id} 尚未接入，请选择已接入的 CLI"))),
     }
 }
 
@@ -1235,6 +1247,8 @@ async fn execute_project(app: tauri::AppHandle, mut started: StartedMessage, cli
 enum StepResult { Outcome(crate::runner::RunOutcome), NotStarted(String) }
 
 fn emit_run_finished(app: &tauri::AppHandle, project_id: &str, spec: &crate::orchestrator::TurnSpec, status: &str, error: Option<String>) {
+    // 中断是持久化终态，实时事件沿用失败契约，界面另查待清理记录。
+    let status = if status == "interrupted" { "failed" } else { status };
     emit_events(app, vec![("run:finished", json!({"projectId": project_id, "runId": spec.run_id,
         "agentId": spec.agent_id, "seq": 1, "status": status, "error": error}))]);
 }
@@ -1413,17 +1427,18 @@ async fn run_orchestrated(
     record_requested_model(&state, &spec.run_id, request.model.as_deref());
     let run_id = spec.run_id.clone();
     let agent_id = spec.agent_id.clone();
-    let registered = match state.runtime_lock() {
-        Ok(mut runtime) => {
-            if runtime.current(project_id, hold) {
-                runtime.team_started(project_id, RuntimeSnapshot { project_id: project_id.to_string(), run_id: run_id.clone(),
-                    agent_id: agent_id.clone(), status: "thinking".into(), seq: 0, partial_text: String::new() });
-                true
-            } else { false }
+    {
+        let Ok(mut runtime) = state.runtime_lock() else { return refuse("运行预留已失效"); };
+        if !runtime.accepts_launch(project_id, hold, &folder) {
+            // 停止或待清理分支负责结束指令，不能在这里覆盖其终态。
+            let stopping = runtime.current(project_id, hold) && !runtime.accepts_events(project_id, hold);
+            drop(runtime);
+            let reason = "运行预留已失效";
+            return if stopping { StepResult::NotStarted(reason.into()) } else { refuse(reason) };
         }
-        Err(_) => false,
-    };
-    if !registered { return refuse("运行预留已失效"); }
+        runtime.team_started(project_id, RuntimeSnapshot { project_id: project_id.to_string(), run_id: run_id.clone(),
+            agent_id: agent_id.clone(), status: "thinking".into(), seq: 0, partial_text: String::new() });
+    }
     if let Ok(conn) = state.db_lock() {
         let _ = save_owner(&conn, &state.new_owner(&run_id, Some(project_id), None, &folder));
     }
@@ -1439,18 +1454,23 @@ async fn run_orchestrated(
     }, spec.limits.runner_config(),
         Some(state.data_dir.join("runs").join(format!("{run_id}.log"))),
         |pid| app.state::<AppState>().mark_started_under(project_id, hold, &run_id, pid)).await;
-    if let Ok(mut runtime) = state.runtime_lock() { runtime.team_finished(project_id, &run_id); }
-    // 两把锁分开拿，顺序与别处一致（先运行状态，后数据库），不嵌套。
+    if let Ok(mut runtime) = state.runtime_lock() {
+        runtime.team_finished(project_id, &run_id);
+        if !outcome.cleanup_complete {
+            runtime.block_directory(folder, &run_id);
+            runtime.cancel(project_id);
+        }
+    }
     if outcome.cleanup_complete {
         if let Ok(conn) = state.db_lock() { let _ = remove_owner(&conn, &run_id); }
     } else {
-        let marked = state.db_lock().ok().and_then(|conn| {
-            let mut owner = load_owners(&conn).ok()?.into_iter().find(|owner| owner.run_id == run_id)?;
-            owner.cleanup_required = true;
-            save_owner(&conn, &owner).ok()
-        }).is_some();
-        if marked {
-            if let Ok(mut runtime) = state.runtime_lock() { runtime.block_directory(folder, &run_id); }
+        if let Ok(conn) = state.db_lock() {
+            if let Ok(owners) = load_owners(&conn) {
+                if let Some(mut owner) = owners.into_iter().find(|owner| owner.run_id == run_id) {
+                    owner.cleanup_required = true;
+                    let _ = save_owner(&conn, &owner);
+                }
+            }
         }
     }
     StepResult::Outcome(outcome)
@@ -1735,6 +1755,84 @@ mod integration_tests {
         assert_eq!(crate::store::instructions::get(&conn, &instruction.id).unwrap().status, "waiting_user");
         assert!(messages::list(&conn, &project_id, None, 200).unwrap().iter().any(|m| m.kind == "report" && m.content == "最终正文"));
         assert!(crate::orchestrator::resume_instruction(&conn, &instruction.id, "retry", None).is_err());
+    }
+
+    #[test]
+    fn team_cleanup_uncertainty_pauses_scheduling_and_prevents_elevated_replay() {
+        use crate::orchestrator;
+        use crate::store::instructions;
+
+        let (state, _folder, project_id, _, _) = setup();
+        let conn = state.db_lock().unwrap();
+        projects::set_elevation_allowed(&conn, &project_id, true).unwrap();
+        let instruction = orchestrator::begin_user_instruction(&conn, &project_id, "写入交付文件").unwrap();
+        let leader = agents::list(&conn, &project_id).unwrap().remove(0);
+        let tasks: Vec<_> = ["写文件", "检查文件"].into_iter().map(|title| instructions::NewTask {
+            assignee_agent_id: leader.id.clone(), title: title.into(), detail: "执行".into(), replaces_task_id: None,
+        }).collect();
+        let batch = instructions::insert_batch(&conn, &instruction.id, Some(&leader.id), "顺序执行", &tasks).unwrap();
+        conn.execute("UPDATE instructions SET phase='execute' WHERE id=?1", [&instruction.id]).unwrap();
+        let turn = orchestrator::advance(&conn, &project_id).unwrap().remove(0);
+        orchestrator::queue_user_text(&conn, &project_id, "补充要求").unwrap();
+
+        let mut result = outcome("failed");
+        result.cleanup_complete = false;
+        result.error = Some("进程树清理未完成，请人工确认后再运行".into());
+        result.denial = Some(crate::adapters::Denial {
+            tool: "terminal".into(), detail: "权限不足".into(), source: crate::adapters::DenialSource::Adapter,
+        });
+        apply_team_outcome(&conn, &turn.run_id, &result).unwrap();
+
+        let run = runs::get(&conn, &turn.run_id).unwrap();
+        assert_eq!(run.status, "interrupted");
+        assert_eq!(run.error, result.error);
+        assert_eq!(instructions::get_task(&conn, &batch.tasks[0].id).unwrap().status, "failed");
+        assert_eq!(instructions::get_task(&conn, &batch.tasks[1].id).unwrap().status, "cancelled");
+        assert_eq!(instructions::list_inputs(&conn, &instruction.id).unwrap()[0].status, "cancelled");
+        assert_eq!(instructions::get(&conn, &instruction.id).unwrap().status, "waiting_user");
+        assert_eq!(projects::get(&conn, &project_id).unwrap().status, "waiting_user");
+        assert!(orchestrator::advance(&conn, &project_id).unwrap().is_empty());
+        assert!(messages::list(&conn, &project_id, None, 20).unwrap().iter().any(|message| {
+            message.kind == "report" && message.content == "部分正文"
+        }));
+    }
+
+    #[test]
+    fn team_cleanup_blocks_mark_started_and_allows_confirming_a_stopped_run() {
+        let (state, folder, project_id, other_project_id, cli) = setup();
+        let folder = folder.path().canonicalize().unwrap();
+        let hold = "团队预留";
+        {
+            let mut runtime = state.runtime_lock().unwrap();
+            runtime.reserve(&project_id, hold).unwrap();
+            runtime.reserve_directory(&folder, hold).unwrap();
+        }
+        let turn = {
+            let conn = state.db_lock().unwrap();
+            crate::orchestrator::begin_user_instruction(&conn, &project_id, "校验").unwrap();
+            let turn = crate::orchestrator::advance(&conn, &project_id).unwrap().remove(0);
+            save_owner(&conn, &state.new_owner(&turn.run_id, Some(&project_id), None, &folder)).unwrap();
+            turn
+        };
+        state.mark_started_under(&project_id, hold, &turn.run_id, 123456).unwrap();
+        {
+            let conn = state.db_lock().unwrap();
+            crate::orchestrator::stop_instruction(&conn, &project_id).unwrap();
+            let mut owner = load_owners(&conn).unwrap().into_iter().find(|owner| owner.run_id == turn.run_id).unwrap();
+            owner.cleanup_required = true;
+            save_owner(&conn, &owner).unwrap();
+        }
+        state.runtime_lock().unwrap().block_directory(folder, &turn.run_id);
+        assert!(state.mark_started_under(&project_id, hold, &turn.run_id, 234567).is_err());
+        assert!(state.confirm_cleanup(&turn.run_id).is_err());
+        state.runtime_lock().unwrap().remove(&project_id, hold);
+
+        assert!(state.prepare_send(&other_project_id, "新回合", &cli).is_err());
+        state.confirm_cleanup(&turn.run_id).unwrap();
+        let conn = state.db_lock().unwrap();
+        assert_eq!(runs::get(&conn, &turn.run_id).unwrap().status, "cancelled");
+        drop(conn);
+        assert!(state.prepare_send(&other_project_id, "新回合", &cli).is_ok());
     }
 
     #[test]
@@ -2224,7 +2322,8 @@ mod integration_tests {
             let adapter = super::make_adapter(&resolved(id), RunMode::Discuss, None).unwrap();
             assert_eq!(adapter.id(), id);
         }
-        assert!(super::make_adapter(&resolved("pi"), RunMode::Discuss, None).is_err());
+        let rejected = super::make_adapter(&resolved("pi"), RunMode::Discuss, None).err().unwrap();
+        assert!(matches!(rejected, AppError::Invalid(message) if message == "CLI pi 尚未接入，请选择已接入的 CLI"));
     }
 
     #[test]
