@@ -479,3 +479,18 @@ macOS 27.0.1 / arm64，基线 `9b12dab`，仓库外直接运行真实 CLI。Clau
 Codex 0.169.0 / gpt-6.1-sol / low 在同 thread 完成 read-only→workspace-write→read-only；执行回合真实创建并读取 `codex-permissions.txt` / `macos-codex-ok`，14 字节，续接复述准确。只从该测试 thread 抽取的 turn_context 确认权限和 low，token_count 的 total_token_usage 与三次 turn.completed.usage 对应，线程累计语义仍成立。未从没有模型字段的事件伪造 CLI 报告模型。
 
 原生验收应用已独立构建，但宿主拒绝控制「imates Mac验收」，窗口冒烟与 Finder/Dock PATH 未执行；Dsh 当前环境未找到，Grok 仅探测版本。详细回合 ID、用量和验证范围见 [macOS 验收记录](验收记录-2026-11-13-macOS.md)，原始输出不入仓库。
+
+## 2026-11-18 Windows Codex 重连事件补测
+
+本机 Codex 0.169.0，在仓库外临时目录以隔离配置、本地测试凭据、只读权限连接本地 Responses SSE 服务，不调用真实供应商、不执行工具。服务先发送响应开始及正文，再故意省略 `response.completed`，模拟流在完成前断开。
+
+| 场景 | 实际 CLI 事件与结果 |
+|---|---|
+| 前两次断开，第 3 次正常完成 | 两条顶层 `error` 分别包含 `Reconnecting... 1/5 (...)` 和 `2/5 (...)`，随后收到正文 `IMATES_RETRY_OK`、`turn.completed`，退出码 0 |
+| 每次均断开 | 初次请求及 5 次内部重试；五条重连进度后，收到不带重连前缀的顶层 `error` 和 `turn.failed`，退出码 1 |
+
+真实输出保存于 `src-tauri/tests/fixtures/codex/reconnect-success.jsonl` 与 `reconnect-exhausted.jsonl`，仅替换会话 ID。成功样本的 12 个输入、4 个输出 token 来自本地服务构造的用量，用于验证解析与传递，不代表真实供应商计费。
+
+这说明顶层 `error` 不一定是终态。原适配器在首条重连进度处锁定失败，runner 随即终止进程树，导致 CLI 没有机会完成原生恢复。本次仅放行实测完整格式，最后一条 `5/5` 进度也应等待最终结果；未知错误、畸形进度及 `turn.failed` 仍致命。
+
+回归先复现 4 项失败，再验证 4 项通过，含实际子进程向 runner 输出上述样本的集成测试；后端全量串行 357 passed、2 ignored，开发版重新构建并启动。未做真实供应商恢复或完整原生窗口验收，不据此保证供应商与网络稳定性。开发重载中断了排查期间新启动的业务回合，具体状态与续接限制见 [修复计划](plans/2026-11-18-Codex重连误判修复.md)。

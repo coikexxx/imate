@@ -289,6 +289,19 @@ mod tests {
         let Some((scenario, text)) = input.split_once('\n') else { return; };
         let event = |kind: &str, text: &str| println!("{}", serde_json::json!({"type":kind,"text":text}));
         match scenario {
+            "codex_reconnect_success" | "codex_reconnect_exhausted" => {
+                let fixture = if scenario == "codex_reconnect_success" {
+                    include_str!("../tests/fixtures/codex/reconnect-success.jsonl")
+                } else {
+                    include_str!("../tests/fixtures/codex/reconnect-exhausted.jsonl")
+                };
+                for line in fixture.lines() {
+                    println!("{line}");
+                    std::io::stdout().flush().unwrap();
+                    std::thread::sleep(Duration::from_millis(40));
+                }
+                if scenario == "codex_reconnect_exhausted" { std::process::exit(1); }
+            }
             "proxy_env" => {
                 let vars: std::collections::BTreeMap<_, _> = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
                     .into_iter().map(|key| (key, std::env::var(key).ok())).collect();
@@ -372,6 +385,42 @@ mod tests {
         RunnerConfig { model_idle_timeout: Duration::from_millis(180), discuss_tool_timeout: Duration::from_millis(800),
             execute_tool_timeout: Duration::from_millis(800), discuss_timeout: Duration::from_secs(3),
             execute_timeout: Duration::from_secs(3), stdout_close_grace: Duration::from_millis(150) }
+    }
+
+    /// 用真实子进程输出已录制的 Codex 事件，验证 runner 不在重连提示处杀进程。
+    struct CodexFixtureAdapter(crate::adapters::codex::CodexAdapter);
+    impl CliAdapter for CodexFixtureAdapter {
+        fn id(&self) -> &'static str { "codex" }
+        fn detect(&self) -> Option<crate::cli_registry::CliInfo> { None }
+        fn build_command(&self, request: &TurnRequest) -> crate::adapters::CommandSpec {
+            FakeAdapter::new(std::env::current_exe().unwrap(), vec!["--ignored".into(), "--exact".into(),
+                "runner::tests::subprocess_helper".into(), "--nocapture".into()]).build_command(request)
+        }
+        fn parse_line(&mut self, line: &str) -> Vec<AgentEvent> { self.0.parse_line(line) }
+    }
+
+    #[tokio::test]
+    async fn codex_reconnect_survives_the_runner_until_success_or_terminal_failure() {
+        for (scenario, expected) in [("codex_reconnect_success", "ok"), ("codex_reconnect_exhausted", "failed")] {
+            let folder = tempfile::tempdir().unwrap();
+            let request = TurnRequest { prompt: format!("{scenario}\n重连验证"), session_id: None,
+                cwd: folder.path().into(), mode: RunMode::Execute, model: None };
+            let adapter = CodexFixtureAdapter(crate::adapters::codex::CodexAdapter::new("codex".into(), RunMode::Execute, None));
+            let (_sender, cancellation) = tokio::sync::watch::channel(false);
+            let mut cfg = config();
+            cfg.model_idle_timeout = Duration::from_secs(2);
+            cfg.execute_timeout = Duration::from_secs(10);
+            let outcome = run_turn_with_config(Box::new(adapter), request, cancellation, |_| {}, cfg).await;
+            assert_eq!(outcome.status, expected, "{scenario}: {outcome:?}");
+            assert!(outcome.cleanup_complete);
+            if expected == "ok" {
+                assert_eq!(outcome.exit_code, Some(0));
+                assert_eq!(outcome.final_text, "IMATES_RETRY_OK");
+                assert_eq!(outcome.usage.unwrap().input_tokens, Some(12));
+            } else {
+                assert_eq!(outcome.error.as_deref(), Some("stream disconnected before completion: stream closed before response.completed"));
+            }
+        }
     }
     async fn run(scenario: &str, cancel_after: Option<Duration>, cfg: RunnerConfig) -> (RunOutcome, tempfile::TempDir) {
         let folder = tempfile::tempdir().unwrap();

@@ -80,6 +80,7 @@ impl CliAdapter for CodexAdapter {
         match v["type"].as_str() {
             Some("thread.started") => v["thread_id"].as_str()
                 .map(|id| vec![AgentEvent::SessionStarted { session_id: id.into() }]).unwrap_or_default(),
+            Some("error") if v["message"].as_str().is_some_and(is_reconnect_progress) => vec![],
             Some("turn.failed" | "error") => self.fail(v["error"]["message"].as_str()
                 .or_else(|| v["message"].as_str()).unwrap_or("Codex 回合失败").into()),
             Some("item.started" | "item.completed") => {
@@ -126,6 +127,23 @@ impl CliAdapter for CodexAdapter {
             }
             _ => vec![],
         }
+    }
+}
+
+/// Codex 0.169.0 将同一次请求的重连进度也输出为顶层 error；此时 CLI 仍会继续。
+/// 只放行实测的完整格式，未知错误及 turn.failed 仍锁定失败。
+fn is_reconnect_progress(message: &str) -> bool {
+    let Some((progress, reason)) = message.strip_prefix("Reconnecting... ")
+        .and_then(|tail| tail.strip_suffix(')'))
+        .and_then(|tail| tail.split_once(" (")) else { return false; };
+    if reason.trim().is_empty() { return false; }
+    let Some((attempt, limit)) = progress.split_once('/') else { return false; };
+    if ![attempt, limit].iter().all(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())) {
+        return false;
+    }
+    match (attempt.parse::<u32>(), limit.parse::<u32>()) {
+        (Ok(attempt), Ok(limit)) => attempt > 0 && attempt <= limit,
+        _ => false,
     }
 }
 
@@ -211,6 +229,50 @@ mod tests {
             .lines().flat_map(|line| adapter.parse_line(line)).collect();
         assert!(events.iter().any(|e| matches!(e, AgentEvent::Error { message } if message.contains("no-such-model"))));
         assert!(!events.iter().any(|e| matches!(e, AgentEvent::TurnCompleted { .. })));
+    }
+
+    #[test]
+    fn reconnect_progress_allows_the_recorded_success_and_usage() {
+        let mut adapter = CodexAdapter::new("codex".into(), RunMode::Execute, None);
+        let events: Vec<_> = include_str!("../../tests/fixtures/codex/reconnect-success.jsonl")
+            .lines().flat_map(|line| adapter.parse_line(line)).collect();
+        assert!(!events.iter().any(|event| matches!(event, AgentEvent::Error { .. })), "重连进度不能终止回合：{events:?}");
+        let (text, usage) = events.iter().find_map(|event| match event {
+            AgentEvent::TurnCompleted { final_text, usage: Some(usage) } => Some((final_text, usage)),
+            _ => None,
+        }).expect("重连后仍应接收完成及用量事件");
+        assert_eq!(text, "IMATES_RETRY_OK");
+        assert_eq!(usage.input_tokens, Some(12));
+        assert_eq!(usage.output_tokens, Some(4));
+    }
+
+    #[test]
+    fn exhausted_reconnect_reports_the_terminal_error_not_the_first_retry() {
+        let mut adapter = CodexAdapter::new("codex".into(), RunMode::Execute, None);
+        let events: Vec<_> = include_str!("../../tests/fixtures/codex/reconnect-exhausted.jsonl")
+            .lines().flat_map(|line| adapter.parse_line(line)).collect();
+        let errors: Vec<_> = events.iter().filter_map(|event| match event {
+            AgentEvent::Error { message } => Some(message.as_str()), _ => None,
+        }).collect();
+        assert_eq!(errors, ["stream disconnected before completion: stream closed before response.completed"]);
+        assert!(adapter.parse_line(r#"{"type":"turn.completed","usage":{}}"#).is_empty(), "耗尽后的迟到完成不能复活回合");
+    }
+
+    #[test]
+    fn reconnect_exception_is_narrow_and_never_applies_to_turn_failed() {
+        let mut adapter = CodexAdapter::new("codex".into(), RunMode::Discuss, None);
+        for attempt in 1..=5 {
+            let line = serde_json::json!({"type":"error","message":format!("Reconnecting... {attempt}/5 (stream disconnected before completion: Transport error: network error: error decoding response body)")});
+            assert!(adapter.parse_line(&line.to_string()).is_empty(), "第 {attempt} 次重连仍非终态");
+        }
+        assert!(matches!(adapter.parse_line(r#"{"type":"turn.failed","error":{"message":"Reconnecting... 5/5 (失败)"}}"#).as_slice(), [AgentEvent::Error { .. }]));
+        for message in ["Reconnecting...", "Reconnecting... 0/5 (失败)", "Reconnecting... 6/5 (失败)",
+            "Reconnecting... 1/0 (失败)", "Reconnecting... 1/5 ()", "Reconnecting... x/5 (失败)",
+            "Reconnecting... 1/5 (失败) extra", "未知错误"] {
+            let mut adapter = CodexAdapter::new("codex".into(), RunMode::Execute, None);
+            let line = serde_json::json!({"type":"error","message":message});
+            assert!(matches!(adapter.parse_line(&line.to_string()).as_slice(), [AgentEvent::Error { .. }]), "不应忽略未确认的错误：{message}");
+        }
     }
     fn request(session_id: Option<&str>) -> TurnRequest {
         TurnRequest { prompt: "- 第一行\n第二行".into(), session_id: session_id.map(str::to_owned),
