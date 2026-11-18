@@ -108,6 +108,7 @@ pub fn finish(
 }
 
 /// 将当前仍运行的记录原子标记为 interrupted，并返回本次被中断的快照。
+#[cfg(test)]
 pub fn interrupt_running(conn: &Connection) -> AppResult<Vec<Run>> {
     let tx = conn.unchecked_transaction()?;
     let interrupted = interrupt_running_in_transaction(&tx)?;

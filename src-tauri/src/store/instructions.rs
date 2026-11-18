@@ -452,6 +452,7 @@ pub fn cancel_queued(conn: &Connection, instruction_id: &str) -> AppResult<usize
 }
 
 /// 保留旧任务行，并记下替代它的新任务。拒绝自引用、跨指令和成环。
+#[cfg(test)]
 pub fn supersede_task(conn: &Connection, task_id: &str, successor_id: &str) -> AppResult<TaskRecord> {
     let tx = conn.unchecked_transaction()?;
     supersede_in(&tx, task_id, successor_id)?;

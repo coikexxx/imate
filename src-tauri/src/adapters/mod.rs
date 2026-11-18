@@ -105,6 +105,7 @@ pub(crate) fn denial_detail(text: &str) -> String {
 
 pub trait CliAdapter: Send + Sync {
     fn id(&self) -> &'static str;
+    #[allow(dead_code, reason = "保留手册定义的适配器探测接口，应用通过 CLI 注册表统一探测")]
     fn detect(&self) -> Option<CliInfo>;
     fn build_command(&self, req: &TurnRequest) -> CommandSpec;
     /// 只覆盖本次子进程的环境；None 表示移除继承的变量。

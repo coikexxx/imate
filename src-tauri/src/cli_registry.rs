@@ -32,6 +32,7 @@ pub enum EnvironmentSource {
     LoginShell,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliEnvironment {
     pub path: OsString,
@@ -123,6 +124,7 @@ pub fn parse_version(output: &str) -> Option<String> {
 }
 
 /// 用进程 PATH；缺失时使用调用方提供的有界登录 shell 结果。
+#[cfg(test)]
 pub fn resolve_environment_with(
     process_path: Option<OsString>,
     login_shell: impl FnOnce(Duration) -> Option<OsString>,
@@ -247,7 +249,8 @@ pub fn resolve_cli(id: &str) -> AppResult<ResolvedCli> {
     Ok(resolved)
 }
 
-/// 探测逻辑本体。查找路径和取版本号由调用方注入，便于测试。
+/// 测试用的探测入口，由调用方注入路径与版本结果。
+#[cfg(test)]
 pub fn detect_with(
     find: impl Fn(&str) -> Option<PathBuf>,
     get_version: impl Fn(&Path) -> Option<String>,

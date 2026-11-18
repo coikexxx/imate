@@ -25,6 +25,7 @@ impl CodexAdapter {
         Self { program, path_env: None, mode, elevated: false, reasoning_effort: None, usage_baseline, resumed: AtomicBool::new(false),
             active_tools: HashSet::new(), final_text: String::new(), had_text: false, failed: false, completed: false }
     }
+    #[cfg(test)]
     pub fn with_elevation(mut self, elevated: bool) -> Self { self.elevated = elevated; self }
     pub fn with_environment(mut self, resolved: &ResolvedCli) -> Self {
         self.program = resolved.program.clone(); self.path_env = Some(resolved.path_env.clone()); self

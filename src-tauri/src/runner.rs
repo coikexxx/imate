@@ -102,12 +102,14 @@ fn write_prompt_file(path: &std::path::Path, prompt: &str) -> std::io::Result<()
     result
 }
 
+#[cfg(test)]
 pub async fn run_turn(
     adapter: Box<dyn CliAdapter>, request: TurnRequest, cancellation: watch::Receiver<bool>,
     on_event: impl FnMut(AgentEvent),
 ) -> RunOutcome {
     run_turn_with_config(adapter, request, cancellation, on_event, RunnerConfig::default()).await
 }
+#[cfg(test)]
 pub async fn run_turn_with_config(
     adapter: Box<dyn CliAdapter>, request: TurnRequest, cancellation: watch::Receiver<bool>,
     on_event: impl FnMut(AgentEvent), config: RunnerConfig,

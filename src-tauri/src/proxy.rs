@@ -64,10 +64,12 @@ pub fn save(conn: &Connection, settings: &ProxySettings) -> AppResult<()> {
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn static_url(value: &str) -> AppResult<String> {
     validate_url(&if value.contains("://") { value.into() } else { format!("http://{value}") })
 }
 
+#[cfg(any(windows, test))]
 pub fn windows_proxy(server: &str, bypass: &str) -> AppResult<ProxyEnvironment> {
     let mut proxy = ProxyEnvironment::default();
     if server.contains('=') {

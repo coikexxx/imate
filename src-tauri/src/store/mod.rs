@@ -18,6 +18,7 @@ pub fn open(path: &Path) -> AppResult<Connection> {
 }
 
 /// 打开内存数据库，供测试使用。
+#[cfg(test)]
 pub fn open_in_memory() -> AppResult<Connection> {
     init(Connection::open_in_memory()?)
 }

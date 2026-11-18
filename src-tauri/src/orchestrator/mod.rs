@@ -13,7 +13,7 @@ use crate::runtime_settings::{self, RuntimeLimits};
 use crate::store::agents::{self, Agent};
 use crate::store::instructions::{self, Instruction, NewTask, TaskRecord};
 use crate::store::messages::{self, Message};
-use crate::store::projects::{self, Project};
+use crate::store::projects;
 use crate::store::{new_id, now_ms};
 use prompts::{Stage, TaskBrief, TeamSnapshot};
 use protocol::{parse_final, ActionKind, LimitContext, Phase, ReplacementLimit, TaskLimit};
@@ -1864,7 +1864,7 @@ mod tests {
 
     #[test]
     fn assign_executes_in_order_and_rework_does_not_revive_cancelled_tasks() {
-        let (conn, project_id, agents) = setup(&["前端", "测试"]);
+        let (conn, project_id, _) = setup(&["前端", "测试"]);
         start_team(&conn, &project_id);
         let leader = advance(&conn, &project_id).unwrap();
         let assign = fence("分三步。", r#"{"action":"assign","decision":"分三步做","tasks":[{"to":"前端","title":"第一步","detail":"做第一步"},{"to":"前端","title":"第二步","detail":"做第二步"},{"to":"测试","title":"第三步","detail":"做第三步"}]}"#);

@@ -37,6 +37,7 @@ impl DshAdapter {
         Self { program, path_env: None, mode, elevated: false, active_tools: HashMap::new(), steps: Vec::new(),
             had_text: false, failed: false, completed: false, settings: DshSettings::default(), catalog: None }
     }
+    #[cfg(test)]
     pub fn with_elevation(mut self, elevated: bool) -> Self { self.elevated = elevated; self }
     pub fn with_environment(mut self, resolved: &ResolvedCli) -> Self {
         self.program = resolved.program.clone();

@@ -3,6 +3,7 @@ use crate::adapters::{AgentEvent, RunMode, TurnRequest};
 use crate::error::{AppError, AppResult};
 use crate::store::agents::{self, Agent};
 use crate::store::{messages, projects};
+#[cfg(test)]
 use crate::store::messages::Message;
 use crate::prompts::{build_turn_prompt, TurnPromptSnapshot};
 
@@ -42,8 +43,8 @@ pub fn resolve_recipient<'a>(
 pub struct PreparedTurn {
     pub agent: Agent,
     pub prompt: String,
-    pub request_text: String,
     pub snapshot_message_id: i64,
+    #[cfg(test)]
     pub unread: Vec<Message>,
     pub recovery: bool,
 }
@@ -83,7 +84,14 @@ impl ChatService {
             rules: &rules, agent, roster: &roster, unread: &unread, recent: &recent, recovery });
         let mut prepared_agent = agent.clone();
         prepared_agent.model = crate::cli_config::effective_model(conn, &agent.cli, agent.model.as_deref())?;
-        Ok(PreparedTurn { agent: prepared_agent, prompt, request_text: request.into(), snapshot_message_id: user_message_id, unread, recovery })
+        Ok(PreparedTurn {
+            agent: prepared_agent,
+            prompt,
+            snapshot_message_id: user_message_id,
+            #[cfg(test)]
+            unread,
+            recovery,
+        })
     }
     pub fn request(prepared: &PreparedTurn, cwd: std::path::PathBuf) -> TurnRequest {
         TurnRequest { prompt: prepared.prompt.clone(), session_id: if prepared.recovery { None } else { prepared.agent.session_id.clone() }, cwd,
@@ -100,6 +108,7 @@ impl ChatService {
         }
         Ok(())
     }
+    #[cfg(test)]
     pub fn finish_success(conn: &Connection, prepared: &PreparedTurn, placeholder: i64, final_text: &str) -> AppResult<()> {
         let tx = conn.unchecked_transaction()?;
         messages::update_content(&tx, placeholder, final_text)?;
@@ -107,6 +116,7 @@ impl ChatService {
         tx.commit()?;
         Ok(())
     }
+    #[cfg(test)]
     pub fn finish_failure(conn: &Connection, prepared: &PreparedTurn, placeholder: i64, partial: &str, error: &str) -> AppResult<Message> {
         let tx = conn.unchecked_transaction()?;
         messages::update_content(&tx, placeholder, partial)?;
@@ -169,7 +179,7 @@ mod tests {
     }
     #[test]
     fn rejects_legacy_casefold_collision_instead_of_ambiguous_routing() {
-        let (conn, project_id, roster) = setup();
+        let (conn, project_id, _) = setup();
         conn.execute("UPDATE agents SET name=' dev ' WHERE project_id=?1 AND name='Dev Ops'", [&project_id]).unwrap();
         let roster = agents::list(&conn, &project_id).unwrap();
         assert!(resolve_recipient("@DEV 修复", &roster).is_err());
