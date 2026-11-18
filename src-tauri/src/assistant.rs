@@ -204,7 +204,7 @@ pub fn parse_persona(raw: &str) -> AppResult<String> {
 pub fn choose_cli_id(explicit: Option<&str>, clis: &[crate::cli_registry::CliInfo], enabled: &dyn Fn(&str) -> bool) -> AppResult<String> {
     if let Some(id) = explicit.map(str::trim).filter(|id| !id.is_empty()) {
         if !crate::cli_registry::is_known(id) { return Err(invalid(format!("未知的助理 CLI：{id}"))); }
-        if !crate::cli_registry::is_supported(id) { return Err(invalid(format!("助理 CLI「{id}」尚未接入，计划在 M5 实现"))); }
+        if !crate::cli_registry::is_supported(id) { return Err(invalid(format!("助理 CLI「{id}」尚未接入"))); }
         if !enabled(id) { return Err(invalid(format!("助理 CLI「{id}」已在应用管理中关闭，请先启用或更换助理 CLI"))); }
         return clis.iter().find(|cli| cli.id == id && cli.installed && cli.supported).map(|cli| cli.id.clone())
             .ok_or_else(|| invalid(format!("未找到已安装的助理 CLI：{id}")));
@@ -218,7 +218,7 @@ impl AppState {
     pub fn prepare_draft(&self, kind: DraftKind, input: &DraftInput, cli: &crate::cli_registry::ResolvedCli) -> AppResult<StartedDraft> {
         validate_input(input, kind)?;
         if !cli.info.supported {
-            return Err(invalid(format!("助理 CLI「{}」尚未接入，计划在 M5 实现", cli.info.id)));
+            return Err(invalid(format!("助理 CLI「{}」尚未接入", cli.info.id)));
         }
         let folder = Path::new(&input.folder_path).canonicalize().map_err(|_| invalid("项目目录不存在或无法读取"))?;
         if !folder.is_dir() { return Err(invalid("项目路径不是文件夹")); }

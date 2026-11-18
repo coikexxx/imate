@@ -80,7 +80,7 @@ fn normalize(input: &NewAgent) -> AppResult<(&str, &str, Option<&str>, Option<St
         return Err(AppError::Invalid(format!("不支持的 CLI：{}", input.cli)));
     }
     if !cli_registry::is_supported(&input.cli) {
-        return Err(AppError::Invalid(format!("CLI {} 尚未接入，计划在 M5 实现", input.cli)));
+        return Err(AppError::Invalid(format!("CLI {} 尚未接入", input.cli)));
     }
     persona::validate(&input.persona)?;
     let model = input

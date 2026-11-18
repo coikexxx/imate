@@ -61,7 +61,7 @@ impl ChatService {
         if current.project_id != project_id || current.sender_type != "user" { return Err(AppError::Invalid("用户消息不属于当前项目".into())); }
         let (agent, request) = resolve_recipient(&current.content, &roster)?;
         if !crate::cli_registry::is_supported(&agent.cli) {
-            return Err(AppError::Invalid(format!("CLI {} 尚未接入，计划在 M5 实现", agent.cli)));
+            return Err(AppError::Invalid(format!("CLI {} 尚未接入", agent.cli)));
         }
         let recovery = recovery || (agent.session_id.is_some()
             && crate::store::runs::resumable_session(conn, agent, "execute")?.is_none());
