@@ -38,4 +38,25 @@ describe("回合终态文案", () => {
     expect(describeWaitReason("CLI 不可用：成员不存在")).toMatchObject({ kind: "cli_unavailable" });
     expect(describeWaitReason("组长回合失败")).toMatchObject({ kind: "failed", title: "回合失败", detail: "组长回合失败" });
   });
+
+  it("超时后说明设置只影响新指令，不引导用新阈值重试冻结的旧指令", () => {
+    for (const notice of [describeRunFinished("timeout", "回合超过总时长，已停止"), describeWaitReason("工具运行超过时限，已停止")]) {
+      expect(notice?.next).toMatch(/运行设置/);
+      expect(notice?.next).toMatch(/只对新指令生效/);
+      expect(notice?.next).toMatch(/原指令.*冻结阈值/);
+      expect(notice?.next).toMatch(/检查.*文件/);
+      expect(notice?.next).toMatch(/放弃原指令后发新指令/);
+      expect(notice?.next).not.toMatch(/再重试或补充/);
+    }
+  });
+
+  it("用尽回合额度时说明重试和补充不会增加额度，指向检查产出后新建指令", () => {
+    const notice = describeWaitReason("单条指令已达到 30 回合上限");
+    expect(notice?.kind).toBe("turn_limit");
+    expect(notice?.next).toMatch(/额度已用尽/);
+    expect(notice?.next).toMatch(/重试或补充.*不会增加额度/);
+    expect(notice?.next).toMatch(/检查.*任务和文件/);
+    expect(notice?.next).toMatch(/放弃后发新指令/);
+    expect(notice?.next).not.toMatch(/补充说明可以继续/);
+  });
 });

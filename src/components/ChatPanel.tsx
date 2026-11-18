@@ -43,6 +43,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
   const [supplement, setSupplement] = useState("");
   const [acting, setActing] = useState(false);
   const [allowElevated, setAllowElevated] = useState(false);
+  const sendPending = useRef(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const tail = useRef<HTMLDivElement>(null);
 
@@ -96,11 +97,19 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
   const runNotice = lastRun ? describeRunFinished(lastRun.status, lastRun.error) : null;
   const hint = errorHint(lastRun?.error) ?? errorHint(state.error);
   const busy = projectMatches && (Boolean(state.activeRunId) || state.sending);
+  const canQueue = instruction?.projectId === projectId && instruction.kind === "team" && instruction.status === "running";
+  function canSend(current: typeof state) {
+    return ready && current.projectId === projectId && !sendPending.current && !current.sending && !stopping && !acting
+      && folderExists && current.cleanupRequired.length === 0 && Boolean(input.trim())
+      && (!current.activeRunId || canQueue);
+  }
   const candidates = mentionCandidates(input, agents, projectId);
   async function send() {
-    if (!ready || busy || !folderExists || state.cleanupRequired.length > 0) return;
+    if (!canSend(projectStore.getState())) return;
     const recipient = parseMention(input, agents);
     if ("error" in recipient) { state.setError(recipient.error); return; }
+    // 同步锁独立于回合事件，防止重渲染前双击，或旧回合结束时再次提交同一条消息。
+    sendPending.current = true;
     const content = input.trim(); state.setSending(true); state.setError(null);
     try {
       // 先落盘开关，保证本次指令创建时快照到的是用户刚选的档位。
@@ -116,7 +125,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       setInput("");
       await refreshTeam();
     } catch (error) { if (projectStore.getState().projectId === projectId) state.setError(String(error)); }
-    finally { if (projectStore.getState().projectId === projectId) state.setSending(false); }
+    finally { sendPending.current = false; if (projectStore.getState().projectId === projectId) state.setSending(false); }
   }
   async function stop() {
     setStopping(true);
@@ -236,6 +245,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
         disabled={!folderExists} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => {
           if (shouldSendOnEnter({ key: event.key, shiftKey: event.shiftKey, isComposing: event.nativeEvent.isComposing, keyCode: event.nativeEvent.keyCode })) { event.preventDefault(); void send(); }
         }} />
+      {canQueue && <p className="mt-2 text-[11px] leading-5 text-slate-500">团队运行中发送的补充或点名会排队，当前回合结束后处理；并行讨论会等本轮结束。</p>}
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <p className="text-[11px] text-slate-500"><kbd className="rounded border border-slate-700 bg-white px-1">Enter</kbd> 发送 · Shift+Enter 换行</p>
@@ -249,7 +259,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
           </div>
         </div>
         <div className="flex shrink-0 gap-2"><Button variant="danger" disabled={!projectMatches || !state.activeRunId || stopping} onClick={stop}>{stopping ? "正在停止…" : "停止"}</Button>
-          <Button variant="primary" disabled={!ready || busy || !input.trim() || !folderExists || state.cleanupRequired.length > 0} onClick={send}>发送指令<Icon name="arrow" width="16" height="16" /></Button></div>
+          <Button variant="primary" disabled={!canSend(state)} onClick={send}>发送指令<Icon name="arrow" width="16" height="16" /></Button></div>
       </div>
     </div>
   </section>;
