@@ -442,8 +442,10 @@ mod tests {
 
         let mut unsupported = input("测试", false);
         unsupported.cli = "pi".into();
-        let error = normalize(&unsupported).unwrap_err().to_string();
-        assert!(error.contains("M5"), "{error}");
+        assert!(matches!(
+            normalize(&unsupported),
+            Err(AppError::Invalid(message)) if message == "CLI pi 尚未接入"
+        ));
     }
 
     #[test]
