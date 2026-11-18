@@ -2,9 +2,10 @@ import { Children, isValidElement, type ReactElement, type ReactNode } from "rea
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import { ChatPanel } from "../components/ChatPanel";
+import { InstructionBar } from "../components/InstructionBar";
 import { Button } from "../components/ui";
 import { projectStore } from "../stores/project";
-import type { Agent, Instruction, ProjectRuntime, SendMessageResponse } from "../types";
+import type { Agent, Instruction, ProjectRuntime, SendMessageResponse, TaskItem } from "../types";
 
 const hooks = vi.hoisted(() => ({ index: 0, values: new Map<number, unknown>() }));
 
@@ -23,6 +24,7 @@ vi.mock("zustand", () => ({ useStore: (store: { getState: () => unknown }) => st
 vi.mock("../api", () => ({ api: {
   saveProjectElevation: vi.fn(), sendMessage: vi.fn(), getProject: vi.fn(),
   listInstructions: vi.fn(), listTasks: vi.fn(), listMessages: vi.fn(), stopProject: vi.fn(),
+  resumeInstruction: vi.fn(), retryBlockedTask: vi.fn(),
 } }));
 
 const agent: Agent = {
@@ -135,5 +137,45 @@ describe("实际群聊组件的运行中干预", () => {
     expect(controls.stop.props.disabled).toBe(false);
     await click(controls.stop);
     expect(api.stopProject).toHaveBeenCalledExactlyOnceWith("project");
+  });
+});
+
+describe("进程清理待确认时的指令恢复", () => {
+  const blockedTask: TaskItem = {
+    id: "task", projectId: "project", instructionMessageId: 1, assigneeAgentId: agent.id,
+    title: "待重试任务", detail: "写入文件", orderIndex: 0, status: "blocked", reworkCount: 0,
+    reportMessageId: null, createdAt: 1, finishedAt: 2, instructionId: instruction.id,
+    batchId: "batch", supersededByTaskId: null,
+  };
+
+  function recoveryBar(tasks: TaskItem[]) {
+    hooks.index = 0;
+    hooks.values = new Map<number, unknown>([[4, true], [5, "waiting_user"],
+      [6, { ...instruction, status: "waiting_user" }], [7, tasks], [8, "补充要求"]]);
+    const tree = ChatPanel({ projectId: "project", agents: [agent], folderExists: true });
+    const bar = find(tree, (element) => element.type === InstructionBar);
+    return InstructionBar(bar.props as unknown as Parameters<typeof InstructionBar>[0]);
+  }
+
+  it.each([["重试", []], ["补充", []], ["授权并继续", [blockedTask]]] as const)(
+    "清理待确认时禁用%s，并拦截处理器", (label, tasks) => {
+      projectStore.setState({ activeRunId: null,
+        cleanupRequired: [{ runId: "old", projectId: "other", folderPath: "/tmp/project" }] });
+      const tree = recoveryBar([...tasks]);
+      const button = find(tree, (element) => element.type === Button && element.props.children === label);
+      expect(button.props.disabled).toBe(true);
+      void click(button);
+      expect(api.resumeInstruction).not.toHaveBeenCalled();
+      expect(api.retryBlockedTask).not.toHaveBeenCalled();
+    },
+  );
+
+  it("清理待确认时仍可放弃指令", () => {
+    projectStore.setState({ activeRunId: null,
+      cleanupRequired: [{ runId: "old", projectId: "project", folderPath: "/tmp/project" }] });
+    const button = find(recoveryBar([]), (element) => element.type === Button && element.props.children === "放弃");
+    expect(button.props.disabled).toBe(false);
+    void click(button);
+    expect(api.resumeInstruction).toHaveBeenCalledExactlyOnceWith(instruction.id, "abandon", null);
   });
 });

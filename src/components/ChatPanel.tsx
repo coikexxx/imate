@@ -155,7 +155,9 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
     if (projectStore.getState().projectId === projectId) projectStore.getState().mergeHistory(projectId, history);
   }
   async function resume(action: "retry" | "supplement" | "abandon", note?: string) {
-    if (!instruction || acting) return;
+    const current = projectStore.getState();
+    if (!instruction || instruction.projectId !== projectId || current.projectId !== projectId || acting) return;
+    if (action !== "abandon" && current.cleanupRequired.length > 0) return;
     if (action === "supplement" && !note?.trim()) return;
     setActing(true);
     state.setError(null);
@@ -168,7 +170,8 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
     finally { if (projectStore.getState().projectId === projectId) setActing(false); }
   }
   async function authorizeElevated(taskId: string) {
-    if (acting) return;
+    const current = projectStore.getState();
+    if (acting || current.projectId !== projectId || current.cleanupRequired.length > 0) return;
     setActing(true);
     state.setError(null);
     try {
@@ -225,7 +228,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       <div ref={tail} />
     </div>
     {visibleCleanup.map((notice) => { const view = describeCleanup(notice.folderPath); return <div key={notice.runId} role="alert" className="border-t border-amber-900 bg-amber-950/40 p-3 text-xs text-amber-200">
-      <p><strong>{view.title}</strong> · 上次运行被中断：{view.detail}</p>
+      <p><strong>{view.title}</strong> · {view.detail}</p>
       <p className="mt-1 text-amber-200/80">{view.next}</p>
       <Button className="mt-2" onClick={() => cleanup(notice.runId)}>我已处理残留进程，解除阻塞</Button>
     </div>; })}
@@ -236,7 +239,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
     {projectMatches && state.error && <p role="alert" className="px-3 py-2 text-xs text-red-300">{state.error}</p>}
     {projectMatches && hint && <p className="mx-3 mb-2 rounded-lg border border-[#d8b878] bg-[#fbf3df] px-3 py-2 text-xs leading-5 text-[#6b4a12]">提示：{hint}</p>}
     {projectMatches && <InstructionBar projectStatus={projectStatus} instruction={instruction} tasks={tasks} agents={agents}
-      supplement={supplement} busy={acting || busy} onSupplementChange={setSupplement}
+      supplement={supplement} busy={acting || busy} cleanupRequired={visibleCleanup.length > 0} onSupplementChange={setSupplement}
       onRetry={() => void resume("retry")} onSupplement={() => void resume("supplement", supplement)} onAbandon={() => void resume("abandon")}
       onAuthorizeElevated={(taskId) => void authorizeElevated(taskId)} />}
     <div className="studio-composer">

@@ -769,17 +769,21 @@ impl AppState {
         let conn = self.db_lock().map_err(|e| e.to_string())?;
         let mut owner = load_owners(&conn).map_err(|e| e.to_string())?.into_iter().find(|o| o.run_id == run_id)
             .ok_or("缺少进程启动前运行记录")?;
-        if !runtime.accepts_launch(key, holder, Path::new(&owner.folder_path)) {
-            return Err("运行预留已失效".into());
-        }
         if owner.instance != self.instance { return Err("运行所有权不属于当前应用".into()); }
-        owner.pid = Some(pid); owner.process_group = Some(pid);
-        save_owner(&conn, &owner).map_err(|e| e.to_string())
+        let accepted = runtime.accepts_launch(key, holder, Path::new(&owner.folder_path));
+        // 子进程已经启动。即使停止抢先发生，清理失败时也需要留下其 PID。
+        if accepted || owner.pid.is_none() {
+            owner.pid = Some(pid);
+            owner.process_group = Some(pid);
+            save_owner(&conn, &owner).map_err(|e| e.to_string())?;
+        }
+        if accepted { Ok(()) } else { Err("运行预留已失效".into()) }
     }
     pub fn prepare_send(&self, project_id: &str, content: &str, cli: &crate::cli_registry::ResolvedCli) -> AppResult<StartedMessage> {
         let mut runtime = self.runtime_lock()?;
         runtime.ensure_project_idle(project_id)?;
         let conn = self.db_lock()?;
+        require_project_cleanup_confirmed(&conn, project_id)?;
         let project = projects::get(&conn, project_id)?;
         let folder = Path::new(&project.folder_path).canonicalize().map_err(|_| AppError::Invalid("项目目录不存在或无法读取".into()))?;
         if !folder.is_dir() { return Err(AppError::Invalid("项目路径不是文件夹".into())); }
@@ -837,6 +841,7 @@ impl AppState {
         let mut runtime = self.runtime_lock()?;
         runtime.ensure_project_idle(project_id)?;
         let conn = self.db_lock()?;
+        require_project_cleanup_confirmed(&conn, project_id)?;
         let project = projects::get(&conn, project_id)?;
         let folder = Path::new(&project.folder_path).canonicalize().map_err(|_| AppError::Invalid("项目目录不存在或无法读取".into()))?;
         if !folder.is_dir() { return Err(AppError::Invalid("项目路径不是文件夹".into())); }
@@ -884,10 +889,7 @@ impl AppState {
     }
     pub fn runtime_snapshot(&self, project_id: &str) -> AppResult<ProjectRuntime> {
         let runtime = self.runtime_lock()?; let conn = self.db_lock()?;
-        let project = projects::get(&conn, project_id)?;
-        let folder = Path::new(&project.folder_path).canonicalize().unwrap_or_else(|_| project.folder_path.into());
-        let cleanup_required = load_owners(&conn)?.into_iter().filter(|owner| owner.cleanup_required &&
-            (owner.project_id.as_deref() == Some(project_id) || Path::new(&owner.folder_path) == folder))
+        let cleanup_required = pending_project_cleanup(&conn, project_id)?.into_iter()
             .map(|owner| CleanupNotice { run_id: owner.run_id, project_id: owner.project_id, folder_path: owner.folder_path }).collect();
         Ok(ProjectRuntime { active: runtime.active_snapshot(project_id), cleanup_required })
     }
@@ -909,6 +911,21 @@ impl AppState {
             runtime.directories.entry(PathBuf::from(pending.folder_path)).or_insert(pending.run_id);
         }
         Ok(())
+    }
+}
+
+fn pending_project_cleanup(conn: &Connection, project_id: &str) -> AppResult<Vec<RuntimeOwner>> {
+    let project = projects::get(conn, project_id)?;
+    let folder = Path::new(&project.folder_path).canonicalize().unwrap_or_else(|_| project.folder_path.into());
+    Ok(load_owners(conn)?.into_iter().filter(|owner| owner.cleanup_required &&
+        (owner.project_id.as_deref() == Some(project_id) || Path::new(&owner.folder_path) == folder)).collect())
+}
+
+fn require_project_cleanup_confirmed(conn: &Connection, project_id: &str) -> AppResult<()> {
+    if pending_project_cleanup(conn, project_id)?.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::Invalid("该项目有尚未确认的进程清理，请处理后再运行".into()))
     }
 }
 
@@ -1093,39 +1110,26 @@ pub fn get_project_usage(state: State<'_, AppState>, project_id: String) -> AppR
     crate::store::runs::project_usage(&conn, &project_id)
 }
 
+enum AcceptedMessage {
+    Queued(SendMessageResponse),
+    Instruction(crate::store::instructions::Instruction),
+    Direct,
+}
+
 #[tauri::command]
 pub async fn send_message(app: tauri::AppHandle, state: State<'_, AppState>, project_id: String, content: String) -> AppResult<SendMessageResponse> {
     let text = content.trim().to_string();
     if text.is_empty() { return Err(AppError::Invalid("消息不能为空".into())); }
-    let active_status = {
-        let conn = state.db_lock()?;
-        crate::store::instructions::active_instruction(&conn, &project_id)?.map(|item| item.status)
-    };
-    if active_status.as_deref() == Some("running") {
-        let message = {
-            let conn = state.db_lock()?;
-            crate::orchestrator::queue_user_text(&conn, &project_id, &text)?
-        };
-        let run_id = {
-            let conn = state.db_lock()?;
-            conn.query_row(
-                "SELECT runs.id FROM runs JOIN instructions ON instructions.id = runs.instruction_id \
-                 WHERE instructions.project_id = ?1 AND runs.status = 'running' ORDER BY runs.started_at DESC LIMIT 1",
-                [&project_id], |row| row.get(0),
-            ).ok()
-        }.unwrap_or_default();
-        emit_events(&app, vec![("message:new", json!({"projectId": project_id, "runId": run_id, "message": &message}))]);
-        return Ok(SendMessageResponse { run_id, user_message: message, agent_message_id: 0 });
-    }
     let mentioned = text.starts_with('@');
-    if mentioned && active_status.is_none() {
-        return launch_direct_message(app, state, project_id, text).await;
-    }
+    let instruction = match state.accept_team_message(&project_id, &text)? {
+        AcceptedMessage::Queued(response) => {
+            emit_events(&app, vec![("message:new", json!({"projectId": project_id, "runId": response.run_id, "message": &response.user_message}))]);
+            return Ok(response);
+        }
+        AcceptedMessage::Instruction(instruction) => instruction,
+        AcceptedMessage::Direct => return launch_direct_message(app, state, project_id, text).await,
+    };
     if mentioned {
-        let instruction = {
-            let conn = state.db_lock()?;
-            crate::orchestrator::begin_user_instruction(&conn, &project_id, &text)?
-        };
         let cli_id = {
             let conn = state.db_lock()?;
             agents::get(&conn, instruction.target_agent_id.as_deref().unwrap_or(""))?.cli
@@ -1135,10 +1139,6 @@ pub async fn send_message(app: tauri::AppHandle, state: State<'_, AppState>, pro
         let started = state.launch_existing_message(&project_id, instruction.source_message_id, &cli)?;
         return spawn_direct(app, project_id, started, cli);
     }
-    let instruction = {
-        let conn = state.db_lock()?;
-        crate::orchestrator::begin_user_instruction(&conn, &project_id, &text)?
-    };
     begin_change_window(&app, &project_id);
     let user_message = {
         let conn = state.db_lock()?;
@@ -1246,6 +1246,13 @@ async fn execute_project(app: tauri::AppHandle, mut started: StartedMessage, cli
 
 enum StepResult { Outcome(crate::runner::RunOutcome), NotStarted(String) }
 
+fn unstarted_team_terminal(conn: &Connection, run_id: &str, reason: String) -> (String, Option<String>) {
+    match runs::get(conn, run_id) {
+        Ok(run) if run.status != "running" => (run.status, run.error.or(Some(reason))),
+        _ => ("failed".into(), Some(reason)),
+    }
+}
+
 fn emit_run_finished(app: &tauri::AppHandle, project_id: &str, spec: &crate::orchestrator::TurnSpec, status: &str, error: Option<String>) {
     // 中断是持久化终态，实时事件沿用失败契约，界面另查待清理记录。
     let status = if status == "interrupted" { "failed" } else { status };
@@ -1256,12 +1263,13 @@ fn emit_run_finished(app: &tauri::AppHandle, project_id: &str, spec: &crate::orc
 /// 占住项目和工作目录，直到这条指令的调度结束。回合之间也不放开。
 fn begin_team_hold(app: &tauri::AppHandle, project_id: &str, hold: &str) -> Result<watch::Receiver<bool>, String> {
     let state = app.state::<AppState>();
+    let mut runtime = state.runtime_lock().map_err(|e| e.to_string())?;
     let folder = {
         let conn = state.db_lock().map_err(|e| e.to_string())?;
+        require_project_cleanup_confirmed(&conn, project_id).map_err(|e| e.to_string())?;
         let project = projects::get(&conn, project_id).map_err(|e| e.to_string())?;
         Path::new(&project.folder_path).canonicalize().map_err(|_| "项目目录不存在或无法读取".to_string())?
     };
-    let mut runtime = state.runtime_lock().map_err(|e| e.to_string())?;
     let receiver = runtime.reserve(project_id, hold).map_err(|e| e.to_string())?;
     if let Err(error) = runtime.reserve_directory(&folder, hold) {
         runtime.remove(project_id, hold);
@@ -1277,10 +1285,13 @@ fn end_team_hold(app: &tauri::AppHandle, project_id: &str, hold: &str) {
 /// 调度没能开始：已经预留的回合全部记为没有启动，指令等待用户。
 fn park_team(app: &tauri::AppHandle, project_id: &str, pending: &[crate::orchestrator::TurnSpec], reason: &str) {
     if let Ok(conn) = app.state::<AppState>().db_lock() {
-        for spec in pending { let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, reason); }
-        let _ = wait_instruction(&conn, project_id, reason);
+        let mut launch_failed = false;
+        for spec in pending {
+            launch_failed |= crate::orchestrator::fail_launch(&conn, &spec.run_id, reason).is_ok();
+        }
+        if launch_failed { let _ = wait_instruction(&conn, project_id, reason); }
     }
-    for spec in pending { emit_run_finished(app, project_id, spec, "failed", Some(reason.to_string())); }
+    for spec in pending { emit_unstarted_team_terminal(app, project_id, spec, reason.to_string()); }
 }
 
 async fn drive_team(app: tauri::AppHandle, project_id: String, mut pending: Vec<crate::orchestrator::TurnSpec>) {
@@ -1304,7 +1315,10 @@ async fn drive_team(app: tauri::AppHandle, project_id: String, mut pending: Vec<
             }
         }
         let batch = std::mem::take(&mut pending);
-        if batch.iter().any(|spec| !instruction_running(&app, &spec.instruction_id)) { break; }
+        if batch.iter().any(|spec| !instruction_running(&app, &spec.instruction_id)) {
+            for spec in &batch { emit_unstarted_team_terminal(&app, &project_id, spec, "指令已停止".into()); }
+            break;
+        }
         // 同一批（并行讨论）一起启动。执行和组长回合每批只有一个。
         let handles: Vec<_> = batch.iter().cloned().map(|spec| {
             let (app, project_id, hold, cancellation) = (app.clone(), project_id.clone(), hold.clone(), cancellation.clone());
@@ -1312,6 +1326,7 @@ async fn drive_team(app: tauri::AppHandle, project_id: String, mut pending: Vec<
         }).collect();
         // 结果按批内顺序依次落库，消息顺序可预期。有回合出问题也要等完其余的。
         let mut halted = false;
+        let mut unstarted = Vec::new();
         for (handle, original) in handles.into_iter().zip(batch.iter()) {
             match handle.await {
                 Ok((spec, StepResult::Outcome(outcome))) => {
@@ -1322,17 +1337,17 @@ async fn drive_team(app: tauri::AppHandle, project_id: String, mut pending: Vec<
                     let saved = runs::get(&conn, &spec.run_id).ok();
                     emit_messages_after(&app, &conn, &project_id, &spec, floor);
                     drop(conn);
-                    let error = match &applied {
-                        Ok(()) => saved.as_ref().and_then(|run| run.error.clone()).or_else(|| outcome.error.clone()),
+                    let error = saved.as_ref().and_then(|run| run.error.clone()).or_else(|| match &applied {
+                        Ok(()) => outcome.error.clone(),
                         Err(failure) => Some(failure.to_string()),
-                    };
+                    });
                     let status = saved.as_ref().filter(|run| run.status != "running").map(|run| run.status.as_str())
                         .unwrap_or_else(|| finished_status(&outcome.status, applied.is_ok()));
                     emit_run_finished(&app, &project_id, &spec, status, error);
                     if applied.is_err() { halted = true; }
                 }
                 Ok((spec, StepResult::NotStarted(reason))) => {
-                    emit_run_finished(&app, &project_id, &spec, "failed", Some(reason));
+                    unstarted.push((spec, reason));
                     halted = true;
                 }
                 Err(_) => {
@@ -1341,14 +1356,27 @@ async fn drive_team(app: tauri::AppHandle, project_id: String, mut pending: Vec<
                         let _ = crate::orchestrator::fail_launch(&conn, &original.run_id, reason);
                         let _ = wait_instruction(&conn, &project_id, reason);
                     }
-                    emit_run_finished(&app, &project_id, original, "failed", Some(reason.to_string()));
+                    emit_unstarted_team_terminal(&app, &project_id, original, reason.into());
                     halted = true;
                 }
             }
         }
+        // 同批清理失败会在结果落库时一并取消其余回合，等这些终态确定后再发送。
+        for (spec, reason) in unstarted {
+            emit_unstarted_team_terminal(&app, &project_id, &spec, reason);
+        }
         if halted { break; }
     }
     end_team_hold(&app, &project_id, &hold);
+}
+
+fn emit_unstarted_team_terminal(app: &tauri::AppHandle, project_id: &str, spec: &crate::orchestrator::TurnSpec, reason: String) {
+    let state = app.state::<AppState>();
+    let (status, error) = match state.db_lock() {
+        Ok(conn) => unstarted_team_terminal(&conn, &spec.run_id, reason),
+        Err(_) => ("failed".into(), Some(reason)),
+    };
+    emit_run_finished(app, project_id, spec, &status, error);
 }
 
 /// 跑一个回合。会话在启动阶段被拒绝时重建一次再跑。
@@ -1380,11 +1408,16 @@ async fn run_orchestrated(
     // 回合没能启动：结束这次 run，指令等待用户，并让同批已经在跑的成员停下。
     // 调用它之前必须已经放开数据库锁。
     let refuse = |reason: &str| -> StepResult {
-        if let Ok(conn) = state.db_lock() {
-            let _ = crate::orchestrator::fail_launch(&conn, &spec.run_id, reason);
-            let _ = wait_instruction(&conn, project_id, reason);
+        if let Ok(mut runtime) = state.runtime_lock() {
+            if runtime.accepts_events(project_id, hold) {
+                if let Ok(conn) = state.db_lock() {
+                    if crate::orchestrator::fail_launch(&conn, &spec.run_id, reason).is_ok() {
+                        let _ = wait_instruction(&conn, project_id, reason);
+                    }
+                }
+                runtime.cancel(project_id);
+            }
         }
-        if let Ok(mut runtime) = state.runtime_lock() { runtime.cancel(project_id); }
         StepResult::NotStarted(reason.to_string())
     };
     let prepared: Result<(Agent, PathBuf, Option<String>), &'static str> = (|| {
@@ -1431,16 +1464,18 @@ async fn run_orchestrated(
         let Ok(mut runtime) = state.runtime_lock() else { return refuse("运行预留已失效"); };
         if !runtime.accepts_launch(project_id, hold, &folder) {
             // 停止或待清理分支负责结束指令，不能在这里覆盖其终态。
-            let stopping = runtime.current(project_id, hold) && !runtime.accepts_events(project_id, hold);
+            let still_active = runtime.accepts_events(project_id, hold);
             drop(runtime);
             let reason = "运行预留已失效";
-            return if stopping { StepResult::NotStarted(reason.into()) } else { refuse(reason) };
+            return if still_active { refuse(reason) } else { StepResult::NotStarted(reason.into()) };
+        }
+        let owned = state.db_lock().and_then(|conn| save_owner(&conn, &state.new_owner(&run_id, Some(project_id), None, &folder)));
+        if let Err(error) = owned {
+            drop(runtime);
+            return refuse(&error.to_string());
         }
         runtime.team_started(project_id, RuntimeSnapshot { project_id: project_id.to_string(), run_id: run_id.clone(),
             agent_id: agent_id.clone(), status: "thinking".into(), seq: 0, partial_text: String::new() });
-    }
-    if let Ok(conn) = state.db_lock() {
-        let _ = save_owner(&conn, &state.new_owner(&run_id, Some(project_id), None, &folder));
     }
     emit_events(app, vec![("agent:status", json!({"projectId": project_id, "runId": run_id, "agentId": agent_id, "status": "thinking"}))]);
     let mut shown: &'static str = "thinking";
@@ -1456,19 +1491,17 @@ async fn run_orchestrated(
         |pid| app.state::<AppState>().mark_started_under(project_id, hold, &run_id, pid)).await;
     if let Ok(mut runtime) = state.runtime_lock() {
         runtime.team_finished(project_id, &run_id);
-        if !outcome.cleanup_complete {
+        if outcome.cleanup_complete {
+            if let Ok(conn) = state.db_lock() { let _ = remove_owner(&conn, &run_id); }
+        } else {
             runtime.block_directory(folder, &run_id);
             runtime.cancel(project_id);
-        }
-    }
-    if outcome.cleanup_complete {
-        if let Ok(conn) = state.db_lock() { let _ = remove_owner(&conn, &run_id); }
-    } else {
-        if let Ok(conn) = state.db_lock() {
-            if let Ok(owners) = load_owners(&conn) {
-                if let Some(mut owner) = owners.into_iter().find(|owner| owner.run_id == run_id) {
-                    owner.cleanup_required = true;
-                    let _ = save_owner(&conn, &owner);
+            if let Ok(conn) = state.db_lock() {
+                if let Ok(owners) = load_owners(&conn) {
+                    if let Some(mut owner) = owners.into_iter().find(|owner| owner.run_id == run_id) {
+                        owner.cleanup_required = true;
+                        let _ = save_owner(&conn, &owner);
+                    }
                 }
             }
         }
@@ -1555,6 +1588,47 @@ pub fn save_project_elevation(state: State<'_, AppState>, project_id: String, al
     Ok(allowed)
 }
 
+impl AppState {
+    fn accept_team_message(&self, project_id: &str, text: &str) -> AppResult<AcceptedMessage> {
+        let _runtime = self.runtime_lock()?;
+        let conn = self.db_lock()?;
+        require_project_cleanup_confirmed(&conn, project_id)?;
+        let active = crate::store::instructions::active_instruction(&conn, project_id)?;
+        if active.as_ref().is_some_and(|item| item.status == "running") {
+            let user_message = crate::orchestrator::queue_user_text(&conn, project_id, text)?;
+            let run_id = conn.query_row(
+                "SELECT runs.id FROM runs JOIN instructions ON instructions.id = runs.instruction_id \
+                 WHERE instructions.project_id = ?1 AND runs.status = 'running' ORDER BY runs.started_at DESC LIMIT 1",
+                [project_id], |row| row.get(0),
+            ).unwrap_or_default();
+            return Ok(AcceptedMessage::Queued(SendMessageResponse { run_id, user_message, agent_message_id: 0 }));
+        }
+        if text.starts_with('@') && active.is_none() { return Ok(AcceptedMessage::Direct); }
+        let instruction = crate::orchestrator::begin_user_instruction(&conn, project_id, text)?;
+        Ok(AcceptedMessage::Instruction(instruction))
+    }
+
+    fn resume_team(&self, instruction_id: &str, action: &str, note: Option<&str>) -> AppResult<crate::store::instructions::Instruction> {
+        let runtime = self.runtime_lock()?;
+        let conn = self.db_lock()?;
+        if matches!(action, "retry" | "supplement") {
+            let instruction = crate::store::instructions::get(&conn, instruction_id)?;
+            require_project_cleanup_confirmed(&conn, &instruction.project_id)?;
+            runtime.ensure_project_idle(&instruction.project_id)?;
+        }
+        crate::orchestrator::resume_instruction(&conn, instruction_id, action, note)
+    }
+
+    fn authorize_blocked_team_task(&self, task_id: &str) -> AppResult<crate::store::instructions::Instruction> {
+        let runtime = self.runtime_lock()?;
+        let conn = self.db_lock()?;
+        let task = crate::store::instructions::get_task(&conn, task_id)?;
+        require_project_cleanup_confirmed(&conn, &task.project_id)?;
+        runtime.ensure_project_idle(&task.project_id)?;
+        crate::orchestrator::authorize_blocked_task(&conn, task_id)
+    }
+}
+
 /// 用户在受阻任务上点「授权并继续」：只对这一次重试有效，随后自动用最高权限重跑。
 #[tauri::command]
 pub async fn retry_blocked_task(
@@ -1562,10 +1636,7 @@ pub async fn retry_blocked_task(
     state: State<'_, AppState>,
     task_id: String,
 ) -> AppResult<crate::store::instructions::Instruction> {
-    let instruction = {
-        let conn = state.db_lock()?;
-        crate::orchestrator::authorize_blocked_task(&conn, &task_id)?
-    };
+    let instruction = state.authorize_blocked_team_task(&task_id)?;
     let project_id = instruction.project_id.clone();
     let specs = {
         let conn = state.db_lock()?;
@@ -1590,10 +1661,7 @@ pub async fn resume_instruction(
     action: String,
     note: Option<String>,
 ) -> AppResult<crate::store::instructions::Instruction> {
-    let instruction = {
-        let conn = state.db_lock()?;
-        crate::orchestrator::resume_instruction(&conn, &instruction_id, &action, note.as_deref())?
-    };
+    let instruction = state.resume_team(&instruction_id, &action, note.as_deref())?;
     if instruction.status != "running" {
         return Ok(instruction);
     }
@@ -1615,12 +1683,15 @@ pub async fn resume_instruction(
 
 #[tauri::command]
 pub async fn stop_project(state: State<'_, AppState>, project_id: String) -> AppResult<()> {
-    let run_id = { let mut runtime = state.runtime_lock()?;
-        let id = runtime.runs.get(&project_id).map(|(id, _)| id.clone()); runtime.cancel(&project_id); id };
-    {
-        let conn = state.db_lock()?;
-        crate::orchestrator::stop_instruction(&conn, &project_id)?;
-    }
+    let run_id = {
+        let mut runtime = state.runtime_lock()?;
+        let id = runtime.runs.get(&project_id).map(|(id, _)| id.clone());
+        // 先保存停止终态。回合看到取消信号时，指令和运行记录已经更新。
+        let stopped = state.db_lock().and_then(|conn| crate::orchestrator::stop_instruction(&conn, &project_id));
+        runtime.cancel(&project_id);
+        stopped?;
+        id
+    };
     if let Some(run_id) = run_id {
         let start = tokio::time::Instant::now();
         while state.runtime_lock()?.current(&project_id, &run_id) {
@@ -1833,6 +1904,61 @@ mod integration_tests {
         assert_eq!(runs::get(&conn, &turn.run_id).unwrap().status, "cancelled");
         drop(conn);
         assert!(state.prepare_send(&other_project_id, "新回合", &cli).is_ok());
+    }
+
+    #[test]
+    fn team_cleanup_rejects_recovery_without_changing_instructions_tasks_or_messages() {
+        use crate::orchestrator;
+        use crate::store::instructions;
+
+        let (state, folder, project_id, other_project_id, _) = setup();
+        let (instruction, task, messages_before, prior_run) = {
+            let conn = state.db_lock().unwrap();
+            let instruction = orchestrator::begin_user_instruction(&conn, &project_id, "执行任务").unwrap();
+            let leader = agents::list(&conn, &project_id).unwrap().remove(0);
+            let batch = instructions::insert_batch(&conn, &instruction.id, Some(&leader.id), "执行", &[instructions::NewTask {
+                assignee_agent_id: leader.id.clone(), title: "任务".into(), detail: "写入".into(), replaces_task_id: None,
+            }]).unwrap();
+            let task_id = &batch.tasks[0].id;
+            let turn = orchestrator::advance(&conn, &project_id).unwrap().remove(0);
+            orchestrator::stop_instruction(&conn, &project_id).unwrap();
+            conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?1", [task_id]).unwrap();
+            let mut owner = state.new_owner(&turn.run_id, Some(&other_project_id), None, &folder.path().canonicalize().unwrap());
+            owner.cleanup_required = true;
+            save_owner(&conn, &owner).unwrap();
+            (instructions::get(&conn, &instruction.id).unwrap(), instructions::get_task(&conn, task_id).unwrap(),
+                messages::list(&conn, &project_id, None, 20).unwrap(), turn.run_id)
+        };
+        for result in [state.resume_team(&instruction.id, "retry", None),
+            state.resume_team(&instruction.id, "supplement", Some("补充内容")), state.authorize_blocked_team_task(&task.id)] {
+            assert!(result.unwrap_err().to_string().contains("清理"));
+        }
+        for text in ["发送新指令", "@组长 新任务"] {
+            assert!(state.accept_team_message(&project_id, text).err().unwrap().to_string().contains("清理"));
+        }
+        {
+            let conn = state.db_lock().unwrap();
+            assert_eq!(instructions::get(&conn, &instruction.id).unwrap(), instruction);
+            assert_eq!(instructions::get_task(&conn, &task.id).unwrap().status, "blocked");
+            assert_eq!(messages::list(&conn, &project_id, None, 20).unwrap(), messages_before);
+            assert_eq!(projects::get(&conn, &project_id).unwrap().status, "waiting_user");
+        }
+        let abandoned = state.resume_team(&instruction.id, "abandon", None).unwrap();
+        assert_eq!(abandoned.status, "abandoned");
+        state.confirm_cleanup(&prior_run).unwrap();
+    }
+
+    #[test]
+    fn unstarted_team_terminal_reports_saved_cancellation() {
+        let (state, _, project_id, _, _) = setup();
+        let conn = state.db_lock().unwrap();
+        crate::orchestrator::begin_user_instruction(&conn, &project_id, "执行任务").unwrap();
+        let turn = crate::orchestrator::advance(&conn, &project_id).unwrap().remove(0);
+        crate::orchestrator::stop_instruction(&conn, &project_id).unwrap();
+        let saved = runs::get(&conn, &turn.run_id).unwrap();
+        let (status, error) = unstarted_team_terminal(&conn, &turn.run_id, "运行预留已失效".into());
+        assert_eq!(status, "cancelled");
+        assert_eq!(error, saved.error);
     }
 
     #[test]
