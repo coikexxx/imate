@@ -40,6 +40,7 @@ pub struct TaskBrief<'a> {
     pub status: &'a str,
     pub detail: &'a str,
     pub report: Option<&'a str>,
+    pub in_effective_batch: bool,
 }
 
 /// 一轮开始前固定下来的上下文。后启动的成员也只能看到这个上界之内的消息。
@@ -165,7 +166,11 @@ fn stage_body(stage: Stage, snapshot: &TeamSnapshot<'_>) -> AppResult<String> {
             let rework_rule = if snapshot.rework_limit == 0 {
                 "本条指令不允许返工：不要使用 rework，违反规章或越界时用 assign 重新派工或 reply 说明。".to_string()
             } else {
-                format!("违反规章或越界时用 rework 打回，rework 必须写任务编号；每个任务最多返工 {} 次。", snapshot.rework_limit)
+                format!(
+                    "违反规章或越界时，可用 rework 打回当前有效批次中未被替代的 done/failed 任务。\
+必须写任务编号，每个任务最多返工 {} 次。需要处理其他未完成的工作时，用 assign 派发新任务。",
+                    snapshot.rework_limit
+                )
             };
             format!(
                 "# 组长验收\n对照项目规章和各成员的边界检查。{rework_rule}\n\
@@ -193,7 +198,8 @@ fn format_tasks(tasks: &[TaskBrief<'_>]) -> String {
     }
     tasks.iter().map(|task| {
         let report = task.report.unwrap_or("尚无汇报");
-        format!("- 编号 {}｜{}｜{}｜状态 {}｜汇报：{}", task.id, task.title, task.assignee, task.status, report)
+        let batch = if task.in_effective_batch { "当前有效批次" } else { "非当前有效任务" };
+        format!("- 编号 {}｜{}｜{}｜{}｜状态 {}｜汇报：{}", task.id, task.title, task.assignee, batch, task.status, report)
     }).collect::<Vec<_>>().join("\n")
 }
 
@@ -269,7 +275,8 @@ mod tests {
     }
 
     fn task_brief<'a>() -> TaskBrief<'a> {
-        TaskBrief { id: "task-7", title: "登录校验", assignee: "前端", status: "done", detail: "写清校验规则", report: Some("已经写好校验") }
+        TaskBrief { id: "task-7", title: "登录校验", assignee: "前端", status: "done", detail: "写清校验规则",
+            report: Some("已经写好校验"), in_effective_batch: true }
     }
 
     fn snapshot<'a>(
@@ -370,7 +377,8 @@ mod tests {
     fn recovery_keeps_goal_decision_and_task_state_and_limits_recent_history() {
         let (project, leader, _) = world();
         let roster = vec![leader.clone()];
-        let tasks = vec![TaskBrief { id: "t1", title: "校验", assignee: "前端", status: "failed", detail: "补齐失败路径", report: Some("写到一半失败") }];
+        let tasks = vec![TaskBrief { id: "t1", title: "校验", assignee: "前端", status: "failed", detail: "补齐失败路径",
+            report: Some("写到一半失败"), in_effective_batch: true }];
         let mut recent: Vec<Message> = (0..25).map(|index| message(index, &format!("历史{index}"), None)).collect();
         recent.push(message(200, "越界消息不能出现", None));
         let mut snap = snapshot(&project, &leader, &roster, &[], &[], &recent, &tasks, None);

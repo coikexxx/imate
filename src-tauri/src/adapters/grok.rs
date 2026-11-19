@@ -9,6 +9,7 @@ pub struct GrokAdapter {
     program: PathBuf,
     path_env: Option<std::ffi::OsString>,
     mode: RunMode,
+    bounded_background_wait: bool,
     reasoning_effort: Option<String>,
     active_tools: HashSet<String>,
     failed: bool,
@@ -17,11 +18,14 @@ pub struct GrokAdapter {
 
 impl GrokAdapter {
     pub fn new(program: PathBuf, mode: RunMode) -> Self {
-        Self { program, path_env: None, mode, reasoning_effort: None, active_tools: HashSet::new(), failed: false, completed: false }
+        Self { program, path_env: None, mode, bounded_background_wait: false, reasoning_effort: None,
+            active_tools: HashSet::new(), failed: false, completed: false }
     }
     pub fn with_environment(mut self, resolved: &ResolvedCli) -> Self {
         self.program = resolved.program.clone();
         self.path_env = Some(resolved.path_env.clone());
+        self.bounded_background_wait = resolved.info.version.as_deref()
+            .and_then(stable_version).is_some_and(|version| version >= (1, 0, 89));
         self
     }
     /// plan 只是讨论意图：它拦住工作目录里的写，但 grok 仍会写自己的会话目录。
@@ -34,6 +38,17 @@ impl GrokAdapter {
     }
 }
 
+fn stable_version(version: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = version.split('.');
+    let mut number = || {
+        let part = parts.next()?;
+        if !part.bytes().all(|byte| byte.is_ascii_digit()) { return None; }
+        part.parse().ok()
+    };
+    let version = (number()?, number()?, number()?);
+    parts.next().is_none().then_some(version)
+}
+
 impl CliAdapter for GrokAdapter {
     fn id(&self) -> &'static str { "grok" }
     fn set_reasoning_effort(&mut self, effort: Option<String>) { self.reasoning_effort = effort; }
@@ -44,6 +59,10 @@ impl CliAdapter for GrokAdapter {
         let mut args = vec!["--prompt-file".into(), prompt_file.to_string_lossy().into_owned(),
             "--output-format".into(), "streaming-messages-json".into(),
             "--permission-mode".into(), self.permission().into()];
+        if self.bounded_background_wait {
+            // 1.0.89 实测支持。给短后台任务留出收尾时间，超期由 CLI 报错并清理。
+            args.extend(["--background-wait-timeout".into(), "60".into()]);
+        }
         if let Some(id) = &req.session_id { args.extend(["-r".into(), id.clone()]); }
         if let Some(model) = req.model.as_ref().filter(|model| !model.trim().is_empty()) {
             args.extend(["-m".into(), model.clone()]);
@@ -137,6 +156,30 @@ mod tests {
         }).collect();
         assert_eq!(found.len(), 1, "应当恰好完成一次");
         found[0]
+    }
+
+    #[test]
+    fn background_wait_is_bounded_on_supported_versions_without_breaking_older_grok() {
+        for (version, expected) in [(None, false), (Some("1.0.77"), false), (Some("1.0.88"), false),
+            (Some("1.0.89"), true), (Some("1.0.100"), true), (Some("1.1.0"), true),
+            (Some("1.0.89-rc.1"), false), (Some("unknown"), false)] {
+            let resolved = ResolvedCli {
+                info: CliInfo { id: "grok".into(), label: "Grok".into(), installed: true, supported: true,
+                    path: None, version: version.map(str::to_string) },
+                program: "grok".into(), path_env: Default::default(),
+                environment_source: cli_registry::EnvironmentSource::Process,
+            };
+            for mode in [RunMode::Discuss, RunMode::Execute] {
+                let request = TurnRequest { prompt: "测试".into(), session_id: Some("续接".into()),
+                    cwd: std::env::temp_dir(), mode, model: None };
+                let adapter = GrokAdapter::new("grok".into(), mode).with_environment(&resolved);
+                let spec = adapter.build_command(&request);
+                assert_eq!(spec.args.windows(2).any(|pair| pair == ["--background-wait-timeout", "60"]),
+                    expected, "{version:?} {mode:?}");
+                assert!(spec.args.windows(2).any(|pair| pair == ["-r", "续接"]));
+                assert!(!spec.args.iter().any(|arg| arg == "--no-wait-for-background"));
+            }
+        }
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub struct RunnerConfig {
     pub execute_tool_timeout: Duration,
     pub discuss_timeout: Duration,
     pub execute_timeout: Duration,
+    /// 从收到完成事件、观察到 stdout 关闭或观察到进程退出中最早的一项起算。
     pub stdout_close_grace: Duration,
 }
 impl Default for RunnerConfig {
@@ -172,15 +173,19 @@ pub async fn run_turn_managed(
     let mut stdout_closed: Option<Instant> = None;
     let mut stderr_closed = false;
     let mut exited: Option<Instant> = None;
-    let mut completed = false;
-    let mut latched: Option<&str> = None;
+    let mut completed_at: Option<Instant> = None;
+    let mut latched: Option<(&str, &str)> = None;
     let mut line = Vec::new(); let mut dropping_line = false;
     let mut stderr_tail = Vec::new();
     let total_timeout = match request.mode { RunMode::Discuss => config.discuss_timeout, RunMode::Execute => config.execute_timeout };
     let tool_timeout = match request.mode { RunMode::Discuss => config.discuss_tool_timeout, RunMode::Execute => config.execute_tool_timeout };
     loop {
-        if *cancellation.borrow() { latched = Some("cancelled"); out.error = Some("回合已停止，文件修改不会自动撤销".into()); }
         if latched.is_some() { break; }
+        if *cancellation.borrow() {
+            latched = Some(("cancelled", "cancelled"));
+            out.error = Some("回合已停止，文件修改不会自动撤销".into());
+            break;
+        }
         let now = Instant::now();
         if exited.is_none() {
             #[cfg(target_os = "macos")]
@@ -189,22 +194,42 @@ pub async fn run_turn_managed(
             let status = child.try_wait();
             match status {
                 Ok(Some(status)) => { out.exit_code = status.code(); exited = Some(now); }
-                Err(e) => { latched = Some("failed"); out.error = Some(format!("读取进程状态失败：{e}")); break; }
+                Err(e) => {
+                    latched = Some(("failed", "process_status_error"));
+                    out.error = Some(format!("读取进程状态失败：{e}"));
+                    break;
+                }
                 _ => {}
             }
         }
         if stdout_closed.is_some() && stderr_closed && exited.is_some() { break; }
-        if exited.is_some_and(|at| now.duration_since(at) >= config.stdout_close_grace) ||
-            (exited.is_none() && stdout_closed.is_some_and(|at| now.duration_since(at) >= config.stdout_close_grace)) {
-            latched = Some("failed"); out.error = Some("CLI 退出或输出关闭后仍有进程/管道未结束，已清理进程树".into()); break;
-        }
         if now.duration_since(start) >= total_timeout {
-            latched = Some("timeout"); out.error = Some("回合超过总时长，已停止".into()); break;
+            latched = Some(("timeout", "total_timeout"));
+            out.error = Some("回合超过总时长，已停止".into());
+            break;
         }
-        if let Some(at) = tool_start {
-            if now.duration_since(at) >= tool_timeout { latched = Some("timeout"); out.error = Some("工具运行超过时限，已停止".into()); break; }
-        } else if exited.is_none() && stdout_closed.is_none() && now.duration_since(last_output) >= config.model_idle_timeout {
-            latched = Some("timeout"); out.error = Some("CLI 长时间没有输出，已停止".into()); break;
+        let shutdown_started = [completed_at, stdout_closed, exited].into_iter().flatten().min();
+        if let Some(at) = shutdown_started {
+            if now.duration_since(at) >= config.stdout_close_grace {
+                let (reason, message) = if completed_at.is_some() {
+                    ("completion_grace", "CLI 已报告回合完成，但进程或输出管道未在宽限期内结束，已启动清理")
+                } else {
+                    ("output_close_grace", "CLI 退出或输出关闭后仍有进程或管道未结束，已启动清理")
+                };
+                latched = Some(("failed", reason));
+                out.error = Some(message.into());
+                break;
+            }
+        } else if let Some(at) = tool_start {
+            if now.duration_since(at) >= tool_timeout {
+                latched = Some(("timeout", "tool_timeout"));
+                out.error = Some("工具运行超过时限，已停止".into());
+                break;
+            }
+        } else if now.duration_since(last_output) >= config.model_idle_timeout {
+            latched = Some(("timeout", "model_idle"));
+            out.error = Some("CLI 长时间没有输出，已停止".into());
+            break;
         }
         let event = tokio::select! { item = rx.recv() => item, _ = tokio::time::sleep(Duration::from_millis(10)) => continue };
         let mut lines = Vec::new();
@@ -229,8 +254,14 @@ pub async fn run_turn_managed(
             }
             Some(StreamEvent::Eof(true)) => { stdout_closed = Some(Instant::now()); if !line.is_empty() { lines.push(std::mem::take(&mut line)); } }
             Some(StreamEvent::Eof(false)) => stderr_closed = true,
-            Some(StreamEvent::ReadError(is_stdout)) => { latched = Some("failed"); out.error = Some(format!("读取 CLI {} 失败", if is_stdout { "stdout" } else { "stderr" })); }
-            Some(StreamEvent::StdinDone(Err(e))) => { latched = Some("failed"); out.error = Some(format!("写入 CLI 提示词失败：{e}")); }
+            Some(StreamEvent::ReadError(is_stdout)) => {
+                latched = Some(("failed", if is_stdout { "stdout_read_error" } else { "stderr_read_error" }));
+                out.error = Some(format!("读取 CLI {} 失败", if is_stdout { "stdout" } else { "stderr" }));
+            }
+            Some(StreamEvent::StdinDone(Err(e))) => {
+                latched = Some(("failed", "stdin_write_error"));
+                out.error = Some(format!("写入 CLI 提示词失败：{e}"));
+            }
             _ => {}
         }
         for bytes in lines {
@@ -257,21 +288,32 @@ pub async fn run_turn_managed(
                             });
                         }
                     }
-                    AgentEvent::TurnCompleted { final_text, usage } => { completed = true; out.final_text = final_text.clone(); out.usage = usage.clone(); }
-                    AgentEvent::Error { message } => { latched = Some("failed"); out.error = Some(message.clone()); }
+                    AgentEvent::TurnCompleted { final_text, usage } => {
+                        completed_at.get_or_insert_with(Instant::now);
+                        out.final_text = final_text.clone();
+                        out.usage = usage.clone();
+                    }
+                    AgentEvent::Error { message } => {
+                        latched = Some(("failed", "cli_error"));
+                        out.error = Some(message.clone());
+                    }
                 }
                 on_event(event);
             }
         }
     }
-    let finished_cleanly = latched.is_none() && completed && out.exit_code == Some(0);
+    let (status, reason) = latched.unwrap_or(match (completed_at, out.exit_code) {
+        (Some(_), Some(0)) => ("ok", "normal_exit"),
+        (None, Some(0)) => ("failed", "missing_completion"),
+        _ => ("failed", "process_exit_error"),
+    });
     // macOS 成功根进程也可能留下关闭管道的独立后代，仍须清理并核对。
-    out.cleanup_complete = if finished_cleanly && !cfg!(target_os = "macos") { true }
+    out.cleanup_complete = if status == "ok" && !cfg!(target_os = "macos") { true }
         else { platform::terminate_tree(&mut child, pid, &_tree).await };
     if let Some(metadata) = platform::cleanup_diagnostic(&_tree) { append_diagnostic(diagnostic_path.as_ref(), &metadata); }
     // 等待取消完成，确保不留下读写任务或持有管道的 future。
     for task in [stdout, stderr, stdin] { task.abort(); let _ = task.await; }
-    out.status = latched.unwrap_or(if completed && out.exit_code == Some(0) { "ok" } else { "failed" }).into();
+    out.status = status.into();
     if !out.cleanup_complete {
         out.status = "failed".into();
         let cleanup = "进程树清理未完成，请人工确认后再运行";
@@ -285,6 +327,22 @@ pub async fn run_turn_managed(
         } else {
             format!("CLI 未正常完成（退出码 {exit}，stderr 尾部 {} 字节，诊断内容未写入日志）", stderr_tail.len())
         });
+    }
+    if diagnostic_path.is_some() {
+        let metadata = serde_json::json!({
+            "type": "run_end",
+            "cli": adapter.id(),
+            "status": out.status,
+            "reason": reason,
+            "completionReceived": completed_at.is_some(),
+            "completionElapsedMs": completed_at.map(|at| at.duration_since(start).as_millis()),
+            "processExited": exited.is_some(),
+            "exitCode": out.exit_code,
+            "stdoutClosed": stdout_closed.is_some(),
+            "stderrClosed": stderr_closed,
+            "cleanupComplete": out.cleanup_complete,
+        });
+        append_diagnostic(diagnostic_path.as_ref(), &metadata.to_string());
     }
     out
 }
@@ -325,6 +383,17 @@ mod tests {
             }
             "echo" => { event("text", text); event("complete", "已完成"); }
             "completed_but_failed" => { event("complete", "已输出"); std::process::exit(7); }
+            "completed_but_hung" | "completed_then_exit" => {
+                println!("{{\"type\":\"tool\",\"active\":true}}");
+                event("text", "部分回答");
+                event("complete", "CLI 私密最终正文");
+                std::io::stdout().flush().unwrap();
+                std::thread::sleep(if scenario == "completed_then_exit" {
+                    Duration::from_millis(280)
+                } else {
+                    Duration::from_secs(10)
+                });
+            }
             "error_then_complete" => { event("text", "部分回答"); event("error", "致命错误"); event("complete", "迟到成功"); }
             "silent" => std::thread::sleep(Duration::from_secs(30)),
             "partial" => { event("text", "部分回答"); std::io::stdout().flush().unwrap(); std::thread::sleep(Duration::from_secs(30)); }
@@ -495,6 +564,54 @@ mod tests {
         let (out, _) = run("error_then_complete", None, config()).await;
         assert_eq!(out.status, "failed"); assert_eq!(out.partial_text, "部分回答"); assert!(out.error.unwrap().contains("致命错误"));
     }
+    #[tokio::test]
+    async fn completion_has_its_own_deadline_even_with_an_open_tool_and_pipes() {
+        let folder = tempfile::tempdir().unwrap();
+        let request = TurnRequest { prompt: "completed_but_hung\n提示词".into(), session_id: None,
+            cwd: folder.path().into(), mode: RunMode::Execute, model: None };
+        let adapter = FakeAdapter::new(std::env::current_exe().unwrap(), vec!["--ignored".into(), "--exact".into(),
+            "runner::tests::subprocess_helper".into(), "--nocapture".into()]);
+        let (_sender, cancellation) = watch::channel(false);
+        let path = folder.path().join("诊断.log");
+        let mut cfg = config();
+        cfg.execute_timeout = Duration::from_secs(2);
+        let outcome = run_turn_managed(Box::new(adapter), request, cancellation, |_| {}, cfg, Some(path.clone()), |_| Ok(())).await;
+        assert_eq!(outcome.status, "failed", "{outcome:?}");
+        assert_eq!(outcome.error.as_deref(), Some("CLI 已报告回合完成，但进程或输出管道未在宽限期内结束，已启动清理"));
+        assert_eq!(outcome.exit_code, None);
+        assert!(outcome.cleanup_complete);
+        assert_eq!(outcome.partial_text, "部分回答");
+        assert_eq!(outcome.final_text, "CLI 私密最终正文");
+        let log = std::fs::read_to_string(path).unwrap();
+        let metadata: serde_json::Value = log.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|value| value["type"] == "run_end").expect("应记录回合的结束条件");
+        assert_eq!(metadata["completionReceived"], true);
+        assert_eq!(metadata["processExited"], false);
+        assert_eq!(metadata["stdoutClosed"], false);
+        assert_eq!(metadata["stderrClosed"], false);
+        assert_eq!(metadata["status"], "failed");
+        assert_eq!(metadata["reason"], "completion_grace");
+        assert_eq!(metadata["cleanupComplete"], true);
+        assert!(!log.contains("提示词") && !log.contains("私密最终正文") && !log.contains("部分回答"));
+    }
+
+    #[tokio::test]
+    async fn completion_can_wait_for_a_clean_exit_beyond_the_model_and_tool_deadlines() {
+        let mut cfg = config();
+        cfg.execute_tool_timeout = Duration::from_millis(200);
+        cfg.stdout_close_grace = Duration::from_secs(2);
+        let (outcome, _) = run("completed_then_exit", None, cfg.clone()).await;
+        assert_eq!(outcome.status, "ok", "{outcome:?}");
+        assert_eq!(outcome.exit_code, Some(0));
+        assert_eq!(outcome.final_text, "CLI 私密最终正文");
+
+        cfg.execute_timeout = Duration::from_millis(220);
+        let (outcome, _) = run("completed_but_hung", None, cfg).await;
+        assert_eq!(outcome.status, "timeout");
+        assert_eq!(outcome.error.as_deref(), Some("回合超过总时长，已停止"));
+        assert!(outcome.cleanup_complete);
+    }
+
     #[tokio::test]
     async fn cancellation_and_idle_timeout_preserve_partial_and_never_revive() {
         let (out, _) = run("partial", Some(Duration::from_millis(100)), config()).await;

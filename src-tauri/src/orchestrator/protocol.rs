@@ -24,7 +24,7 @@ pub enum Phase {
     Direct,
 }
 
-/// 返工校验所需的目标任务。调用方只传入本条指令当前批次中的任务。
+/// 返工校验所需的目标任务。调用方只传入本条指令当前批次中未被替代的任务。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskLimit {
     pub id: String,
@@ -117,6 +117,15 @@ pub fn parse_final(
     validate_phase(phase, &action, limits)?;
     validate_replacements(&action, limits)?;
     Ok(ParsedLeaderTurn { speech, action })
+}
+
+/// 查询返工目标前先按正式协议定位围栏，并按相同规则裁掉编号的首尾空白。
+pub(super) fn rework_target_id(text: &str) -> Option<String> {
+    let (_, json) = split_trailing_fence(text).ok()?;
+    if json.len() > BLOCK_MAX_BYTES { return None; }
+    let value: Value = serde_json::from_str(&json).ok()?;
+    if value["action"].as_str()? != "rework" { return None; }
+    Some(value["task_id"].as_str()?.trim().to_string())
 }
 
 fn invalid(message: impl Into<String>) -> AppError {
@@ -355,12 +364,9 @@ fn validate_phase(phase: Phase, action: &ProtocolAction, limits: &LimitContext) 
 }
 
 fn validate_rework(task_id: &str, limits: &LimitContext) -> AppResult<()> {
-    let Some(task) = limits.task.as_ref() else {
-        return Err(invalid("rework 缺少可返工的任务"));
+    let Some(task) = limits.task.as_ref().filter(|task| task.id == task_id) else {
+        return Err(invalid("rework 的 task_id 必须指向本条指令当前批次中未被替代的任务，需要继续处理时请用 assign 派工"));
     };
-    if task.id != task_id {
-        return Err(invalid(format!("task_id「{task_id}」不属于当前任务")));
-    }
     if task.status != "done" && task.status != "failed" {
         return Err(invalid(format!("任务状态 {} 不能返工", task.status)));
     }

@@ -16,7 +16,7 @@ use crate::store::messages::{self, Message};
 use crate::store::projects;
 use crate::store::{new_id, now_ms};
 use prompts::{Stage, TaskBrief, TeamSnapshot};
-use protocol::{parse_final, ActionKind, LimitContext, Phase, ReplacementLimit, TaskLimit};
+use protocol::{parse_final, rework_target_id, ActionKind, LimitContext, Phase, ReplacementLimit, TaskLimit};
 
 /// 事务提交后才交给调用方启动的回合。启动失败不能退回已经预留的回合数。
 #[derive(Debug, Clone, PartialEq)]
@@ -630,7 +630,8 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
         return mark_waiting(conn, instruction, outcome.error.as_deref().unwrap_or("组长回合失败"));
     }
     let roster = agents::list(conn, &instruction.project_id)?;
-    let task = rework_limit(conn, &outcome.final_text)?;
+    let target = rework_target_id(&outcome.final_text);
+    let task = rework_limit(conn, instruction, target.as_deref())?;
     let guard = instruction_limits(instruction)?;
     let limits = LimitContext {
         discuss_rounds: instruction.discuss_rounds.max(0) as u32,
@@ -701,16 +702,7 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
         ActionKind::Rework { task_id, .. } => {
             let tx = conn.unchecked_transaction()?;
             save_speech(&tx, instruction, agent, &run.id, &parsed.speech)?;
-            let changed = tx.execute(
-                "UPDATE tasks SET status = 'pending', rework_count = rework_count + 1, finished_at = NULL \
-                 WHERE id = ?1 AND instruction_id = ?2",
-                params![task_id, instruction.id],
-            )?;
-            if changed == 0 {
-                return Err(AppError::NotFound(format!("任务 {task_id}")));
-            }
-            tx.execute("UPDATE instructions SET phase = 'execute', updated_at = ?1 WHERE id = ?2", params![now_ms(), instruction.id])?;
-            set_project_status(&tx, &instruction.project_id, "executing")?;
+            queue_rework(&tx, instruction, &task_id)?;
             finish_run(&tx, &run.id, outcome, "ok")?;
             remember_agent(&tx, run, agent, outcome)?;
             tx.commit()?;
@@ -766,7 +758,8 @@ fn apply_execute(conn: &Connection, run: &RunRow, instruction: &Instruction, age
     finish_run(conn, &run.id, outcome, &outcome.status)?;
     remember_agent(conn, run, agent, outcome)?;
     let pending: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM tasks WHERE instruction_id = ?1 AND batch_id = ?2 AND status IN ('pending', 'running')",
+        "SELECT COUNT(*) FROM tasks WHERE instruction_id = ?1 AND batch_id = ?2 \
+         AND superseded_by_task_id IS NULL AND status IN ('pending', 'running')",
         params![instruction.id, instruction.current_batch],
         |row| row.get(0),
     )?;
@@ -904,19 +897,19 @@ fn compose_prompt(
     let goal_message = messages::get(conn, instruction.source_message_id)?;
     let tasks = instructions::list_tasks(conn, &instruction.id)?;
     let reports = task_reports(conn, &tasks)?;
-    let names = roster.iter().map(|member| (member.id.clone(), member.name.clone())).collect::<Vec<_>>();
-    let owned_tasks: Vec<(String, String, String, String, String, Option<String>)> = tasks.iter().map(|task| {
-        let assignee = task.assignee_agent_id.as_ref().and_then(|id| names.iter().find(|(agent_id, _)| agent_id == id)).map(|(_, name)| name.clone()).unwrap_or_else(|| "未知成员".to_string());
-        let report = task.report_message_id.and_then(|id| reports.iter().find(|(message_id, _)| *message_id == id).map(|(_, content)| content.clone()));
-        (task.id.clone(), task.title.clone(), assignee, task.status.clone(), task.detail.clone(), report)
+    let briefs: Vec<TaskBrief<'_>> = tasks.iter().map(|task| {
+        let assignee = task.assignee_agent_id.as_deref()
+            .and_then(|id| roster.iter().find(|member| member.id == id))
+            .map(|member| member.name.as_str()).unwrap_or("未知成员");
+        let report = task.report_message_id.and_then(|id| {
+            reports.iter().find(|(message_id, _)| *message_id == id).map(|(_, content)| content.as_str())
+        });
+        TaskBrief {
+            id: &task.id, title: &task.title, assignee, status: &task.status, detail: &task.detail,
+            report, in_effective_batch: in_effective_batch(instruction, task),
+        }
     }).collect();
-    let briefs: Vec<TaskBrief<'_>> = owned_tasks.iter().map(|task| TaskBrief {
-        id: &task.0, title: &task.1, assignee: &task.2, status: &task.3, detail: &task.4, report: task.5.as_deref(),
-    }).collect();
-    let current_owned = current.and_then(|task| owned_tasks.iter().find(|item| item.0 == task.id));
-    let current_brief = current_owned.map(|task| TaskBrief {
-        id: &task.0, title: &task.1, assignee: &task.2, status: &task.3, detail: &task.4, report: task.5.as_deref(),
-    });
+    let current_brief = current.and_then(|task| briefs.iter().find(|brief| brief.id == task.id));
     let decision = latest_decision(conn, &instruction.project_id)?;
     let bound = message_bound(conn, &instruction.project_id)?;
     let unread = unread_for(conn, &instruction.project_id, agent, bound)?;
@@ -946,7 +939,7 @@ fn compose_prompt(
         rework_limit: guard.reworks_per_task,
         decision: decision.as_deref(),
         tasks: &briefs,
-        current_task: current_brief.as_ref(),
+        current_task: current_brief,
         intervention_note: instruction.wait_reason.as_deref().unwrap_or(""),
         recovery: fresh,
         fresh_session: fresh,
@@ -981,33 +974,45 @@ fn leftover_notice(tasks: &[TaskRecord]) -> Option<String> {
     }
 }
 
-fn rework_limit(conn: &Connection, text: &str) -> AppResult<Option<TaskLimit>> {
-    let Some(json) = fence_body(text) else { return Ok(None) };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else { return Ok(None) };
-    if value.get("action").and_then(|item| item.as_str()) != Some("rework") {
-        return Ok(None);
+fn in_effective_batch(instruction: &Instruction, task: &TaskRecord) -> bool {
+    instruction.current_batch.is_some()
+        && task.instruction_id.as_deref() == Some(instruction.id.as_str())
+        && task.batch_id == instruction.current_batch
+        && task.superseded_by_task_id.is_none()
+}
+
+fn rework_limit(conn: &Connection, instruction: &Instruction, task_id: Option<&str>) -> AppResult<Option<TaskLimit>> {
+    let Some(task_id) = task_id else { return Ok(None); };
+    match instructions::get_task(conn, task_id) {
+        Ok(task) if in_effective_batch(instruction, &task) => Ok(Some(TaskLimit {
+            id: task.id, status: task.status,
+            rework_count: u32::try_from(task.rework_count.max(0)).unwrap_or(u32::MAX),
+        })),
+        Ok(_) | Err(AppError::NotFound(_)) => Ok(None),
+        Err(error) => Err(error),
     }
-    let Some(task_id) = value.get("task_id").and_then(|item| item.as_str()) else { return Ok(None) };
-    let task = match instructions::get_task(conn, task_id) {
-        Ok(task) => task,
-        Err(AppError::NotFound(_)) => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    Ok(Some(TaskLimit { id: task.id, status: task.status, rework_count: task.rework_count.max(0) as u32 }))
+}
+
+/// 普通验收和暂存动作共用同一个写入条件，避免让调度器拿不到已重排的任务。
+fn queue_rework(conn: &Connection, instruction: &Instruction, task_id: &str) -> AppResult<()> {
+    let changed = conn.execute(
+        "UPDATE tasks SET status = 'pending', rework_count = rework_count + 1, finished_at = NULL \
+         WHERE id = ?1 AND instruction_id = ?2 \
+         AND batch_id = (SELECT current_batch FROM instructions WHERE id = ?2) \
+         AND superseded_by_task_id IS NULL AND status IN ('done', 'failed') AND MAX(rework_count, 0) < ?3",
+        params![task_id, instruction.id, instruction_limits(instruction)?.reworks_per_task],
+    )?;
+    if changed != 1 {
+        return Err(invalid("返工任务已不可执行，请按当前批次重新验收"));
+    }
+    set_phase(conn, &instruction.id, "execute")?;
+    set_project_status(conn, &instruction.project_id, "executing")
 }
 
 fn replacement_limits(conn: &Connection, instruction_id: &str) -> AppResult<Vec<ReplacementLimit>> {
     Ok(instructions::list_tasks(conn, instruction_id)?.into_iter().map(|task| ReplacementLimit {
         id: task.id, status: task.status, superseded: task.superseded_by_task_id.is_some(),
     }).collect())
-}
-
-fn fence_body(text: &str) -> Option<&str> {
-    let marker = "```imates";
-    let start = text.rfind(marker)?;
-    let after = text[start + marker.len()..].trim_start_matches(['\r', '\n']);
-    let end = after.rfind("```")?;
-    Some(after[..end].trim())
 }
 
 /// 保存组长的发言，并把消息链接到产生它的运行（用于显示该次运行使用的模型）。
@@ -1060,8 +1065,8 @@ fn leader(conn: &Connection, project_id: &str) -> AppResult<Agent> {
 
 fn next_pending(conn: &Connection, instruction_id: &str, batch_id: &str) -> AppResult<Option<TaskRecord>> {
     let id: Option<String> = conn.query_row(
-        "SELECT id FROM tasks WHERE instruction_id = ?1 AND batch_id = ?2 AND status = 'pending' \
-         ORDER BY order_index LIMIT 1",
+        "SELECT id FROM tasks WHERE instruction_id = ?1 AND batch_id = ?2 \
+         AND superseded_by_task_id IS NULL AND status = 'pending' ORDER BY order_index LIMIT 1",
         params![instruction_id, batch_id],
         |row| row.get(0),
     ).optional()?;
@@ -1382,18 +1387,36 @@ fn continue_instruction(conn: &Connection, instruction: &Instruction) -> AppResu
     if let Some(text) = snap.stashed_text.clone() {
         let phase = snap.stashed_phase.clone().unwrap_or_else(|| fresh.phase.clone());
         let stashed_run_id = snap.stashed_run_id.clone();
-        clear_stash(conn, &fresh.id)?;
-        conn.execute("UPDATE instructions SET resume_phase = NULL, updated_at = ?1 WHERE id = ?2", params![now_ms(), fresh.id])?;
         let roster = agents::list(conn, &fresh.project_id)?;
-        let task = rework_limit(conn, &text)?;
+        let target = rework_target_id(&text);
+        let task = rework_limit(conn, &fresh, target.as_deref())?;
         let guard = instruction_limits(&fresh)?;
         let limits = LimitContext {
             discuss_rounds: fresh.discuss_rounds.max(0) as u32,
             discuss_round_limit: guard.discuss_rounds, rework_limit: guard.reworks_per_task, task,
             replacement_tasks: replacement_limits(conn, &fresh.id)?,
         };
-        let parsed = parse_final(&text, protocol_phase(&phase), &roster, &limits)?;
-        return replay_action(conn, &fresh, parsed, stashed_run_id.as_deref());
+        let parsed = parse_final(&text, protocol_phase(&phase), &roster, &limits);
+        let tx = conn.unchecked_transaction()?;
+        clear_stash(&tx, &fresh.id)?;
+        tx.execute("UPDATE instructions SET resume_phase = NULL, updated_at = ?1 WHERE id = ?2", params![now_ms(), fresh.id])?;
+        match &parsed {
+            Ok(protocol::ParsedLeaderTurn { action: protocol::ProtocolAction { kind: ActionKind::Rework { task_id, .. }, .. }, .. }) => {
+                queue_rework(&tx, &fresh, task_id)?;
+                return Ok(tx.commit()?);
+            }
+            Err(error) if phase == "review" && target.is_some() => {
+                // 暂存期间验收目标可能失效，重新验收当前批次并保留旧任务事实。
+                set_phase(&tx, &fresh.id, "review")?;
+                set_project_status(&tx, &fresh.project_id, "discussing")?;
+                messages::insert(&tx, &fresh.project_id, "system", None, "system",
+                    &format!("暂存返工未执行，组长将重新验收。{error}"))?;
+                return Ok(tx.commit()?);
+            }
+            _ => {}
+        }
+        tx.commit()?;
+        return replay_action(conn, &fresh, parsed?, stashed_run_id.as_deref());
     }
     restore_phase(conn, &fresh)
 }
@@ -1486,17 +1509,7 @@ fn replay_action(conn: &Connection, instruction: &Instruction, parsed: protocol:
             )?;
             set_project_status(conn, &instruction.project_id, "discussing")
         }
-        ActionKind::Rework { task_id, .. } => {
-            let changed = conn.execute(
-                "UPDATE tasks SET status = 'pending', rework_count = rework_count + 1, finished_at = NULL WHERE id = ?1 AND instruction_id = ?2",
-                params![task_id, instruction.id],
-            )?;
-            if changed == 0 {
-                return Err(AppError::NotFound(format!("任务 {task_id}")));
-            }
-            set_phase(conn, &instruction.id, "execute")?;
-            set_project_status(conn, &instruction.project_id, "executing")
-        }
+        ActionKind::Rework { .. } => Err(invalid("暂存返工须在清除暂存的事务中执行")),
     }
 }
 
@@ -1722,6 +1735,96 @@ mod tests {
         assert_eq!(old_task.superseded_by_task_id, None);
         assert_eq!(instructions::get(&conn, &current.id).unwrap().phase, "execute");
     }
+    #[test]
+    fn rework_rejects_other_instruction_old_batch_and_superseded_targets() {
+        for case in ["其他指令", "旧批次", "已被替代"] {
+            let (conn, project_id, roster) = setup(&["前端"]);
+            let new_task = |title: &str| NewTask {
+                assignee_agent_id: roster[1].id.clone(), title: title.into(),
+                detail: "检查已有产出后修复".into(), replaces_task_id: None,
+            };
+            start_team(&conn, &project_id);
+            let old = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+            let first = instructions::insert_batch(&conn, &old.id, Some(&roster[0].id), "旧决议", &[
+                new_task("旧任务"),
+            ]).unwrap();
+            if case == "其他指令" {
+                conn.execute("UPDATE instructions SET status = 'completed' WHERE id = ?1", [&old.id]).unwrap();
+                start_team(&conn, &project_id);
+            }
+            let current = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+            let batch = instructions::insert_batch(&conn, &current.id, Some(&roster[0].id), "现行决议", &[
+                new_task("本批任务"), new_task("本批另一任务"),
+            ]).unwrap();
+            let target = if case == "已被替代" {
+                instructions::supersede_task(&conn, &batch.tasks[0].id, &batch.tasks[1].id).unwrap();
+                &batch.tasks[0].id
+            } else {
+                &first.tasks[0].id
+            };
+            let report = messages::insert(&conn, &project_id, "agent", Some(&roster[1].id), "report", "原任务报告").unwrap();
+            conn.execute(
+                "UPDATE tasks SET status = 'failed', finished_at = 123, report_message_id = ?2 WHERE id = ?1",
+                params![target, report.id],
+            ).unwrap();
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?1", [&batch.tasks[1].id]).unwrap();
+            set_phase(&conn, &current.id, "review").unwrap();
+            let before = instructions::get_task(&conn, target).unwrap();
+            let review = advance(&conn, &project_id).unwrap().remove(0);
+            assert!(review.prompt.lines().any(|line| line.contains(&batch.tasks[1].id) && line.contains("当前有效批次")), "{case}");
+            assert!(!review.prompt.lines().any(|line| line.contains(target) && line.contains("当前有效批次")), "{case}");
+            let invalid_rework = serde_json::json!({"action":"rework","task_id":target,"feedback":"修复后复验"});
+            apply_outcome(&conn, &review.run_id, &ok_text(&fence("已安排修复。", &invalid_rework.to_string()))).unwrap();
+            assert_eq!(crate::store::runs::get(&conn, &review.run_id).unwrap().status, "failed", "{case}");
+            assert_eq!(instructions::get(&conn, &current.id).unwrap().phase, "review", "{case}");
+            assert_eq!(instructions::get_task(&conn, target).unwrap(), before, "{case}");
+
+            let correction = advance(&conn, &project_id).unwrap().remove(0);
+            assert!(correction.prompt.contains("协议纠错") && correction.prompt.contains("task_id"), "{case}");
+            assert!(correction.prompt.contains("当前批次") && correction.prompt.contains("未被替代"), "{case}");
+            let assign = r#"{"action":"assign","decision":"修复后复验","tasks":[{"to":"前端","title":"安排新修复","detail":"检查旧证据后做必要修正"}]}"#;
+            apply_outcome(&conn, &correction.run_id, &ok_text(&fence("新建任务。", assign))).unwrap();
+            let execution = advance(&conn, &project_id).unwrap().remove(0);
+            let task_id = execution.task_id.as_deref().expect("重新派工必须启动实际执行回合");
+            assert_ne!(task_id, target);
+            assert_eq!(instructions::get_task(&conn, task_id).unwrap().title, "安排新修复");
+            assert_eq!(instructions::get_task(&conn, target).unwrap(), before, "{case}");
+        }
+    }
+
+    #[test]
+    fn rework_revalidates_a_stashed_target_before_continuing_from_intervention() {
+        let (conn, project_id, roster) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let execution = assign_one(&conn, &project_id);
+        apply_outcome(&conn, &execution.run_id, &failed_text("首次执行失败")).unwrap();
+        let task_id = execution.task_id.as_deref().unwrap();
+        let review = advance(&conn, &project_id).unwrap().remove(0);
+        queue_user_text(&conn, &project_id, "确认后继续").unwrap();
+        let rework = serde_json::json!({"action":"rework","task_id":task_id,"feedback":"重做"});
+        apply_outcome(&conn, &review.run_id, &ok_text(&fence("准备返工。", &rework.to_string()))).unwrap();
+        let intervention = advance(&conn, &project_id).unwrap().remove(0);
+        let waiting = instructions::get(&conn, &review.instruction_id).unwrap();
+        assert_eq!(waiting.phase, "intervention");
+        assert!(load_snapshot(&waiting.context_snapshot_json).unwrap().stashed_text.is_some());
+        // 模拟重新载入旧快照时，暂存动作的目标已被新批次替代。
+        let inserted = instructions::insert_batch(&conn, &waiting.id, Some(&roster[0].id), "替代原任务", &[
+            NewTask { assignee_agent_id: roster[1].id.clone(), title: "新任务".into(), detail: "已执行".into(),
+                replaces_task_id: Some(task_id.into()) },
+        ]).unwrap();
+        conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?1", [&inserted.tasks[0].id]).unwrap();
+        let before = instructions::get_task(&conn, task_id).unwrap();
+        let reply = fence("继续。", r#"{"action":"reply","message":"继续","disposition":"continue"}"#);
+        apply_outcome(&conn, &intervention.run_id, &ok_text(&reply)).unwrap();
+        assert_eq!(instructions::get_task(&conn, task_id).unwrap(), before);
+        let restored = instructions::get(&conn, &review.instruction_id).unwrap();
+        assert_eq!(restored.phase, "review");
+        assert!(load_snapshot(&restored.context_snapshot_json).unwrap().stashed_text.is_none());
+        let reconsider = advance(&conn, &project_id).unwrap().remove(0);
+        assert!(reconsider.task_id.is_none());
+        assert!(reconsider.prompt.contains("暂存返工") && reconsider.prompt.contains("未被替代"));
+    }
+
     #[test]
     fn invalid_replacement_still_invalid_after_correction_waits_for_user() {
         let (conn, project_id, _) = setup(&["前端"]);
