@@ -112,6 +112,8 @@ pub trait CliAdapter: Send + Sync {
     fn environment(&self) -> Vec<(String, Option<String>)> { vec![] }
     /// 本次回合是否使用用户授权的高权限档。默认不改变。
     fn set_elevated(&mut self, _elevated: bool) {}
+    /// 在构造命令前传入同一 CLI 的已校验档位。讨论回合仍使用固定权限。
+    fn set_execution_permission(&mut self, _permission: Option<&'static str>) {}
     /// 本次回合使用的推理强度；None 表示沿用 CLI 自己的配置。Dsh 的强度在模型选择里，不走这里。
     fn set_reasoning_effort(&mut self, _effort: Option<String>) {}
     fn parse_line(&mut self, line: &str) -> Vec<AgentEvent>;

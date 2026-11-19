@@ -8,6 +8,8 @@ pub struct ClaudeAdapter {
     program: PathBuf,
     path_env: Option<std::ffi::OsString>,
     mode: RunMode,
+    elevated: bool,
+    execution_permission: Option<&'static str>,
     reasoning_effort: Option<String>,
     active_tools: HashSet<String>,
     failed: bool,
@@ -16,7 +18,8 @@ pub struct ClaudeAdapter {
 
 impl ClaudeAdapter {
     pub fn new(program: PathBuf, mode: RunMode) -> Self {
-        Self { program, path_env: None, mode, reasoning_effort: None, active_tools: HashSet::new(), failed: false, completed: false }
+        Self { program, path_env: None, mode, elevated: false, execution_permission: None, reasoning_effort: None,
+            active_tools: HashSet::new(), failed: false, completed: false }
     }
     pub fn with_environment(mut self, resolved: &ResolvedCli) -> Self {
         self.program = resolved.program.clone();
@@ -24,7 +27,7 @@ impl ClaudeAdapter {
         self
     }
     fn permission(&self) -> &'static str {
-        match self.mode { RunMode::Discuss => "plan", RunMode::Execute => "bypassPermissions" }
+        crate::execution_permissions::CLAUDE.for_turn(self.mode, self.execution_permission, self.elevated)
     }
     fn fail(&mut self, message: String) -> Vec<AgentEvent> {
         self.failed = true;
@@ -34,6 +37,8 @@ impl ClaudeAdapter {
 
 impl CliAdapter for ClaudeAdapter {
     fn id(&self) -> &'static str { "claude" }
+    fn set_elevated(&mut self, elevated: bool) { self.elevated = elevated; }
+    fn set_execution_permission(&mut self, permission: Option<&'static str>) { self.execution_permission = permission; }
     fn set_reasoning_effort(&mut self, effort: Option<String>) { self.reasoning_effort = effort; }
     fn detect(&self) -> Option<CliInfo> { cli_registry::resolve_cli(self.id()).ok().map(|cli| cli.info) }
     fn build_command(&self, req: &TurnRequest) -> CommandSpec {

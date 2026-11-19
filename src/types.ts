@@ -19,6 +19,12 @@ export interface DshCatalog {
   failures: { provider: string; message: string }[];
 }
 
+export interface ExecutionPermissions {
+  defaultExecute: string;
+  discuss: string;
+  options: { id: string; label: string }[];
+}
+
 export interface CliInfo {
   id: string;
   label: string;
@@ -26,6 +32,7 @@ export interface CliInfo {
   supported: boolean;
   path: string | null;
   version: string | null;
+  executionPermissions?: ExecutionPermissions | null;
 }
 
 export interface CliModel { id: string; label: string; custom: boolean }
@@ -113,6 +120,8 @@ export interface Agent {
   model: string | null;
   /** 非 Dsh CLI 的推理强度；Dsh 的强度在 model 的 JSON 里。空表示沿用 CLI 配置 */
   reasoningEffort?: string | null;
+  /** 空值使用适配器的默认执行档位 */
+  executionPermission?: string | null;
   isLeader: boolean;
   sessionId: string | null;
   lastSeenMessageId: number | null;
@@ -128,6 +137,7 @@ export interface AgentInput {
   cli: string;
   model: string | null;
   reasoningEffort?: string | null;
+  executionPermission?: string | null;
   isLeader: boolean;
 }
 

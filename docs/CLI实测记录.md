@@ -494,3 +494,9 @@ Codex 0.169.0 / gpt-6.1-sol / low 在同 thread 完成 read-only→workspace-wri
 这说明顶层 `error` 不一定是终态。原适配器在首条重连进度处锁定失败，runner 随即终止进程树，导致 CLI 没有机会完成原生恢复。本次仅放行实测完整格式，最后一条 `5/5` 进度也应等待最终结果；未知错误、畸形进度及 `turn.failed` 仍致命。
 
 回归先复现 4 项失败，再验证 4 项通过，含实际子进程向 runner 输出上述样本的集成测试；后端全量串行 357 passed、2 ignored，开发版重新构建并启动。未做真实供应商恢复或完整原生窗口验收，不据此保证供应商与网络稳定性。开发重载中断了排查期间新启动的业务回合，具体状态与续接限制见 [修复计划](plans/2026-11-18-Codex重连误判修复.md)。
+
+## 2026-11-19 Windows CLI 补测
+
+- **Codex 0.170.0** 在隔离目录连接尚未启动的本地 Responses 服务。真实 CLI 发出顶层 `error`，内容为 `Reconnecting... waiting for network (Connection failed: error sending request)`。服务启动后只接到一次有效请求，同一进程随后输出 `IMATES_NETWORK_RECOVERED` 和 `turn.completed`，退出码 0。服务使用合成用量 12 输入、4 输出。仓库样本替换了线程 ID，并省略与重连无关的模型元数据警告。 [JSONL 样本](../src-tauri/tests/fixtures/codex/reconnect-network-recovered.jsonl) · [重连回归](plans/2026-11-18-Codex重连误判修复.md)
+- **Grok 1.0.89（stable）** 的原验收回合在 `turn_ended` 后进入后台任务等待。隔离命令用无害的 25 秒后台任务复测，传 `--background-wait-timeout 5` 时得到 `result/error_during_execution`，总用时约 17.6 秒，退出码 1。传 `--no-wait-for-background` 时得到 `result/success`，约 15.7 秒退出，退出码 0。适配器对已识别的 1.0.89 及以上稳定版增加 `--background-wait-timeout 60`。后续两次验收回合发生在浏览器出证前的启动阶段，后台任务探针只覆盖回合收尾。
+- **权限档位探测**使用仓库外的无工具回合。Claude Code 2.1.328 的 `plan`、`default`、`dontAsk`、`acceptEdits`、`auto`、`bypassPermissions` 可运行，`manual` 回显为 `default`。Grok 1.0.89 的 `plan`、`dontAsk`、`acceptEdits` 正常退出，`default` 与 `auto` 均回显 `default`。成员表单按这一结果列出支持档位。这些探测记录参数接受及回显，各档位的实际文件操作范围以 CLI 行为证据为准。 [Windows 验收记录](验收记录-2026-11-19-Windows.md)

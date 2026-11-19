@@ -150,6 +150,7 @@ impl crate::adapters::CliAdapter for ProxyAdapter {
     fn environment(&self) -> Vec<(String, Option<String>)> { self.environment.clone() }
     /// 必须转给内层适配器，否则提权档位在包装后被默认实现吞掉。
     fn set_elevated(&mut self, elevated: bool) { self.inner.set_elevated(elevated); }
+    fn set_execution_permission(&mut self, permission: Option<&'static str>) { self.inner.set_execution_permission(permission); }
     fn set_reasoning_effort(&mut self, effort: Option<String>) { self.inner.set_reasoning_effort(effort); }
     fn parse_line(&mut self, line: &str) -> Vec<crate::adapters::AgentEvent> { self.inner.parse_line(line) }
 }

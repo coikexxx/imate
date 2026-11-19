@@ -363,11 +363,11 @@ mod tests {
         let Some((scenario, text)) = input.split_once('\n') else { return; };
         let event = |kind: &str, text: &str| println!("{}", serde_json::json!({"type":kind,"text":text}));
         match scenario {
-            "codex_reconnect_success" | "codex_reconnect_exhausted" => {
-                let fixture = if scenario == "codex_reconnect_success" {
-                    include_str!("../tests/fixtures/codex/reconnect-success.jsonl")
-                } else {
-                    include_str!("../tests/fixtures/codex/reconnect-exhausted.jsonl")
+            "codex_reconnect_success" | "codex_reconnect_exhausted" | "codex_network_recovered" => {
+                let fixture = match scenario {
+                    "codex_reconnect_success" => include_str!("../tests/fixtures/codex/reconnect-success.jsonl"),
+                    "codex_reconnect_exhausted" => include_str!("../tests/fixtures/codex/reconnect-exhausted.jsonl"),
+                    _ => include_str!("../tests/fixtures/codex/reconnect-network-recovered.jsonl"),
                 };
                 for line in fixture.lines() {
                     println!("{line}");
@@ -504,7 +504,11 @@ mod tests {
 
     #[tokio::test]
     async fn codex_reconnect_survives_the_runner_until_success_or_terminal_failure() {
-        for (scenario, expected) in [("codex_reconnect_success", "ok"), ("codex_reconnect_exhausted", "failed")] {
+        for (scenario, expected, final_text) in [
+            ("codex_reconnect_success", "ok", "IMATES_RETRY_OK"),
+            ("codex_reconnect_exhausted", "failed", ""),
+            ("codex_network_recovered", "ok", "IMATES_NETWORK_RECOVERED"),
+        ] {
             let folder = tempfile::tempdir().unwrap();
             let request = TurnRequest { prompt: format!("{scenario}\n重连验证"), session_id: None,
                 cwd: folder.path().into(), mode: RunMode::Execute, model: None };
@@ -518,7 +522,7 @@ mod tests {
             assert!(outcome.cleanup_complete);
             if expected == "ok" {
                 assert_eq!(outcome.exit_code, Some(0));
-                assert_eq!(outcome.final_text, "IMATES_RETRY_OK");
+                assert_eq!(outcome.final_text, final_text);
                 assert_eq!(outcome.usage.unwrap().input_tokens, Some(12));
             } else {
                 assert_eq!(outcome.error.as_deref(), Some("stream disconnected before completion: stream closed before response.completed"));

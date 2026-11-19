@@ -10,6 +10,8 @@ pub struct GrokAdapter {
     path_env: Option<std::ffi::OsString>,
     mode: RunMode,
     bounded_background_wait: bool,
+    elevated: bool,
+    execution_permission: Option<&'static str>,
     reasoning_effort: Option<String>,
     active_tools: HashSet<String>,
     failed: bool,
@@ -18,8 +20,8 @@ pub struct GrokAdapter {
 
 impl GrokAdapter {
     pub fn new(program: PathBuf, mode: RunMode) -> Self {
-        Self { program, path_env: None, mode, bounded_background_wait: false, reasoning_effort: None,
-            active_tools: HashSet::new(), failed: false, completed: false }
+        Self { program, path_env: None, mode, bounded_background_wait: false, elevated: false,
+            execution_permission: None, reasoning_effort: None, active_tools: HashSet::new(), failed: false, completed: false }
     }
     pub fn with_environment(mut self, resolved: &ResolvedCli) -> Self {
         self.program = resolved.program.clone();
@@ -30,7 +32,7 @@ impl GrokAdapter {
     }
     /// plan 只是讨论意图：它拦住工作目录里的写，但 grok 仍会写自己的会话目录。
     fn permission(&self) -> &'static str {
-        match self.mode { RunMode::Discuss => "plan", RunMode::Execute => "bypassPermissions" }
+        crate::execution_permissions::GROK.for_turn(self.mode, self.execution_permission, self.elevated)
     }
     fn fail(&mut self, message: String) -> Vec<AgentEvent> {
         self.failed = true;
@@ -51,6 +53,8 @@ fn stable_version(version: &str) -> Option<(u32, u32, u32)> {
 
 impl CliAdapter for GrokAdapter {
     fn id(&self) -> &'static str { "grok" }
+    fn set_elevated(&mut self, elevated: bool) { self.elevated = elevated; }
+    fn set_execution_permission(&mut self, permission: Option<&'static str>) { self.execution_permission = permission; }
     fn set_reasoning_effort(&mut self, effort: Option<String>) { self.reasoning_effort = effort; }
     fn detect(&self) -> Option<CliInfo> { cli_registry::resolve_cli(self.id()).ok().map(|cli| cli.info) }
     fn build_command(&self, req: &TurnRequest) -> CommandSpec {

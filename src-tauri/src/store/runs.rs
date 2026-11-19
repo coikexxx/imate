@@ -177,10 +177,11 @@ pub fn interrupt_running_in_transaction(tx: &Connection) -> AppResult<Vec<Run>> 
     Ok(runs)
 }
 
-/// Grok 只续接明确在当前模式下成功过、且没有混用模式的会话。
+/// 权限可能绑定到会话时，只续接在当前模式明确成功过的会话。
 pub fn resumable_session<'a>(conn: &Connection, agent: &'a super::agents::Agent, mode: &str) -> AppResult<Option<&'a str>> {
     let session = agent.session_id.as_deref();
-    let Some(id) = session.filter(|_| agent.cli == "grok") else { return Ok(session); };
+    let separate_modes = crate::execution_permissions::separate_mode_sessions(&agent.cli, agent.execution_permission.as_deref());
+    let Some(id) = session.filter(|_| separate_modes) else { return Ok(session); };
     let previous: Option<String> = conn.query_row(
         "SELECT CASE WHEN COUNT(DISTINCT mode) = 1 THEN MIN(mode) END FROM runs \
          WHERE agent_id = ?1 AND session_id = ?2 AND status = 'ok'",
@@ -326,7 +327,7 @@ mod tests {
                 persona: PERSONA.into(),
                 cli: "codex".into(),
                 model: None,
-                is_leader: true, reasoning_effort: None,
+                is_leader: true, reasoning_effort: None, execution_permission: None,
             },
         )
         .unwrap();
@@ -463,7 +464,7 @@ mod tests {
         let project = projects::create(conn, project, "", &format!("/tmp/{project}")).unwrap();
         let ids = members.iter().enumerate().map(|(index, name)| agents::create(conn, &project.id, &agents::NewAgent {
             name: (*name).into(), role: (*name).into(), persona: PERSONA.into(), cli: "codex".into(), model: None,
-            is_leader: index == 0, reasoning_effort: None,
+            is_leader: index == 0, reasoning_effort: None, execution_permission: None,
         }).unwrap().id).collect();
         (project.id, ids)
     }

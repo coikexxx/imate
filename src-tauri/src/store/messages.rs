@@ -157,7 +157,7 @@ mod tests {
         let persona = "## 定位\n开发\n## 职责\n测试\n## 边界\n不越界\n## 工作风格\n务实";
         agents::create(conn, project_id, &NewAgent {
             name: "成员".into(), role: "开发".into(), persona: persona.into(),
-            cli: "claude".into(), model: None, is_leader: true, reasoning_effort: None,
+            cli: "claude".into(), model: None, is_leader: true, reasoning_effort: None, execution_permission: None,
         }).unwrap().id
     }
 

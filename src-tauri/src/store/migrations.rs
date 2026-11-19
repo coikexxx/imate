@@ -126,6 +126,8 @@ ALTER TABLE instructions ADD COLUMN elevated_allowed INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE runs ADD COLUMN elevated INTEGER NOT NULL DEFAULT 0;
 "#, r#"
 ALTER TABLE agents ADD COLUMN reasoning_effort TEXT;
+"#, r#"
+ALTER TABLE agents ADD COLUMN execution_permission TEXT;
 "#];
 
 /// 把数据库升级到最新版本。版本号记在 `PRAGMA user_version`。
@@ -248,6 +250,21 @@ mod tests {
         assert!(columns("agents").contains(&"reasoning_effort".to_string()));
         let effort: Option<String> = conn.query_row("SELECT reasoning_effort FROM agents LIMIT 1", [], |row| row.get(0)).unwrap_or(None);
         assert_eq!(effort, None, "旧成员没有推理强度，沿用 CLI 自己的配置");
+    }
+
+    #[test]
+    fn execution_permission_migration_preserves_existing_members_and_sessions() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        v1_with_project(&conn);
+        for sql in &MIGRATIONS[1..5] { conn.execute_batch(sql).unwrap(); }
+        conn.pragma_update(None, "user_version", 5).unwrap();
+        conn.execute("INSERT INTO agents (id,project_id,name,role,persona,cli,is_leader,seat_index,created_at,session_id) VALUES ('a','p','成员','开发','x','grok',1,0,1,'旧会话')", []).unwrap();
+        migrate(&mut conn).unwrap();
+        let (permission, session): (Option<String>, String) = conn.query_row(
+            "SELECT execution_permission,session_id FROM agents WHERE id='a'", [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(permission, None);
+        assert_eq!(session, "旧会话");
     }
 
     #[test]

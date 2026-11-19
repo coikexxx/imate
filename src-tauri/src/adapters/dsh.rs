@@ -12,6 +12,7 @@ pub struct DshAdapter {
     path_env: Option<std::ffi::OsString>,
     mode: RunMode,
     elevated: bool,
+    execution_permission: Option<&'static str>,
     active_tools: HashMap<String, String>,
     steps: Vec<Value>,
     had_text: bool,
@@ -34,7 +35,7 @@ fn reason_message(reason: &Value) -> String {
 
 impl DshAdapter {
     pub fn new(program: PathBuf, mode: RunMode) -> Self {
-        Self { program, path_env: None, mode, elevated: false, active_tools: HashMap::new(), steps: Vec::new(),
+        Self { program, path_env: None, mode, elevated: false, execution_permission: None, active_tools: HashMap::new(), steps: Vec::new(),
             had_text: false, failed: false, completed: false, settings: DshSettings::default(), catalog: None }
     }
     #[cfg(test)]
@@ -64,12 +65,9 @@ impl CliAdapter for DshAdapter {
     fn id(&self) -> &'static str { "dsh" }
     fn detect(&self) -> Option<CliInfo> { cli_registry::resolve_cli(self.id()).ok().map(|cli| cli.info) }
     fn set_elevated(&mut self, elevated: bool) { self.elevated = elevated; }
+    fn set_execution_permission(&mut self, permission: Option<&'static str>) { self.execution_permission = permission; }
     fn build_command(&self, req: &TurnRequest) -> CommandSpec {
-        let permission = match self.mode {
-            RunMode::Discuss => "read-only",
-            RunMode::Execute if self.elevated => "danger-full-access",
-            RunMode::Execute => "workspace-write",
-        };
+        let permission = crate::execution_permissions::SANDBOX.for_turn(self.mode, self.execution_permission, self.elevated);
         let mut args: Vec<String> = vec!["headless".into(), "--json".into()];
         if let Some(id) = &req.session_id { args.extend(["--session-id".into(), id.clone()]); }
         args.extend(["--permission-mode".into(), permission.into(), "--approval-policy".into(), "never".into(), "-".into()]);

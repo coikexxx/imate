@@ -192,6 +192,7 @@ export default function Project() {
           <AgentForm
             key={editingAgent?.id ?? "new"}
             initial={editingAgent ?? undefined}
+            permissionLocked={Boolean(editingAgent && (activeRunId || project.status !== "idle"))}
             clis={clis}
             templates={templates}
             takenNames={agents.filter((a) => a.id !== editingAgent?.id).map((a) => a.name)}

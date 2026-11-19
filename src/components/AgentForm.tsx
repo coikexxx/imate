@@ -15,6 +15,8 @@ import { Select } from "./Select";
 interface Props {
   /** 编辑已有成员时传入；新建时不传 */
   initial?: AgentInput;
+  /** 编辑时，项目非空闲状态下锁定执行权限。 */
+  permissionLocked?: boolean;
   clis: CliInfo[];
   templates: PersonaTemplate[];
   /** 同项目里其他成员的名字，用于查重 */
@@ -31,6 +33,7 @@ interface Props {
 
 export function AgentForm({
   initial,
+  permissionLocked = false,
   clis,
   templates,
   takenNames,
@@ -46,6 +49,7 @@ export function AgentForm({
   const [cli, setCli] = useState(initial?.cli ?? clis.find((c) => c.installed && c.supported)?.id ?? "");
   const [model, setModel] = useState(initial?.model ?? "");
   const [effort, setEffort] = useState(initial?.cli === "dsh" ? "" : initial?.reasoningEffort ?? "");
+  const [permission, setPermission] = useState(initial?.executionPermission ?? "");
   const [isLeader, setIsLeader] = useState(forceLeader || (initial?.isLeader ?? false));
   const [persona, setPersona] = useState(initial?.persona ?? composePersona(emptyPersona()));
   const [error, setError] = useState<string | null>(null);
@@ -58,11 +62,18 @@ export function AgentForm({
   useEffect(() => {
     if (configs.length === 0 || initial) return;
     const allowed = selectableClis(configs).map((c) => c.id);
-    setCli((current) => (allowed.includes(current) ? current : allowed[0] ?? ""));
-  }, [configs, initial]);
+    const next = allowed.includes(cli) ? cli : allowed[0] ?? "";
+    if (next === cli) return;
+    setCli(next);
+    setModel("");
+    setEffort((current) => keepEffortForCli(next, current));
+    setPermission("");
+  }, [configs, initial, cli]);
   const allowedIds = new Set(selectableClis(configs, initial?.cli).map((c) => c.id));
   const visibleClis = configs.length === 0 ? clis : clis.filter((c) => allowedIds.has(c.id));
   const cliConfig = configs.find((c) => c.id === cli);
+  const selected = clis.find((c) => c.id === cli);
+  const permissions = selected?.executionPermissions;
   const modelChoice = memberModelOptions(cliConfig, model);
   const closed = (id: string) => configs.find((c) => c.id === id)?.enabled === false;
 
@@ -84,11 +95,12 @@ export function AgentForm({
       cli,
       model: model.trim() || null,
       reasoningEffort: supportsReasoningEffort(cli) && effort ? effort : null,
+      executionPermission: permission || null,
       isLeader,
     };
-    const selected = clis.find((c) => c.id === cli);
     const duplicate = takenNames.some((other) => normalizeName(other) === normalizeName(input.name));
-    const problem = !cli ? "没有可选的 CLI（未启用或未安装），请先在系统设置的应用管理中启用" :
+    const problem = permissionLocked && (cli !== initial?.cli || permission !== (initial?.executionPermission ?? "")) ? "请在项目空闲时修改成员 CLI 或执行权限" :
+      !cli ? "没有可选的 CLI（未启用或未安装），请先在系统设置的应用管理中启用" :
       !initial && closed(cli) ? "该 CLI 已在应用管理中关闭，请先在系统设置里启用" : duplicate ? `成员名「${input.name}」已存在` :
       !selected?.supported ? "该 CLI 尚未接入" : !selected.installed ? "请先安装所选 CLI" : validateAgent(input, takenNames);
     if (problem) {
@@ -132,7 +144,13 @@ export function AgentForm({
           </datalist>
         </Field>
         <Field label="CLI">
-          <Select aria-label="CLI" value={cli} onChange={(value) => { setCli(value); setModel(""); setEffort((current) => keepEffortForCli(value, current)); }}
+          <Select aria-label="CLI" value={cli} disabled={permissionLocked || busy} onChange={(value) => {
+            if (value === cli) return;
+            setCli(value);
+            setModel("");
+            setEffort((current) => keepEffortForCli(value, current));
+            setPermission(value === initial?.cli ? initial.executionPermission ?? "" : "");
+          }}
             options={[{ value: "", label: "请选择", disabled: true }, ...visibleClis.map((c) => ({ value: c.id, disabled: !c.installed || !c.supported,
               label: `${c.label}${!c.supported ? "（尚未接入）" : c.installed ? (c.version ? `（${c.version}）` : "") : "（未安装）"}${closed(c.id) ? "（已关闭）" : ""}` }))]} />
         </Field>
@@ -148,6 +166,20 @@ export function AgentForm({
             options={reasoningOptions(cli, effort).map(({ value, label }) => ({ value, label }))} />
         </Field>}
       </div>
+
+      {permissions && <Field label="执行权限">
+        <Select aria-label="执行权限" value={permission} onChange={setPermission} disabled={permissionLocked || busy}
+          options={[
+            { value: "", label: `默认（${permissions.defaultExecute}）` },
+            ...permissions.options.map(({ id, label }) => ({ value: id, label: `${label}（${id}）` })),
+            ...(permission && !permissions.options.some(({ id }) => id === permission)
+              ? [{ value: permission, label: `${permission}（当前不可用）`, disabled: true }] : []),
+          ]} />
+        <p className="text-xs text-slate-500">
+          {permissionLocked ? "项目空闲时可修改 CLI 和执行权限。" : "执行权限用于派工和点名，实际档位变更后会开启新会话。"}
+          讨论使用 {permissions.discuss}。项目预授权或单次授权可以为受阻任务提权。
+        </p>
+      </Field>}
 
       <label className="flex items-center gap-2 text-sm">
         <input
@@ -174,7 +206,7 @@ export function AgentForm({
         </div>
         <PersonaEditor value={persona} onChange={setPersona} />
         <p className="text-xs text-slate-500">
-          人设边界属于提示词约束。执行模式会自动运行工具，可能写出项目目录；CLI 会继承自身的用户与项目配置。
+          人设边界通过提示词表达。工具权限由 CLI 档位和原生配置决定，写入范围可能超出项目目录。
         </p>
       </div>
 

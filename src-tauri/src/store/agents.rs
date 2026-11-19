@@ -23,6 +23,8 @@ pub struct Agent {
     pub model: Option<String>,
     /// 非 Dsh CLI 的推理强度；Dsh 的强度在模型选择 JSON 里。空表示沿用 CLI 自己的配置。
     pub reasoning_effort: Option<String>,
+    /// 空值使用该适配器的默认执行档位。
+    pub execution_permission: Option<String>,
     pub is_leader: bool,
     pub session_id: Option<String>,
     pub last_seen_message_id: Option<i64>,
@@ -42,10 +44,12 @@ pub struct NewAgent {
     pub is_leader: bool,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub execution_permission: Option<String>,
 }
 
 const COLUMNS: &str = "id, project_id, name, role, persona, persona_dirty, cli, model, \
-                       is_leader, session_id, last_seen_message_id, seat_index, created_at, reasoning_effort";
+                       is_leader, session_id, last_seen_message_id, seat_index, created_at, reasoning_effort, execution_permission";
 
 fn from_row(row: &Row) -> rusqlite::Result<Agent> {
     Ok(Agent {
@@ -63,6 +67,7 @@ fn from_row(row: &Row) -> rusqlite::Result<Agent> {
         seat_index: row.get(11)?,
         created_at: row.get(12)?,
         reasoning_effort: row.get(13)?,
+        execution_permission: row.get(14)?,
     })
 }
 
@@ -118,6 +123,7 @@ pub fn list(conn: &Connection, project_id: &str) -> AppResult<Vec<Agent>> {
 /// 新建成员。项目的第一个成员总是组长；新成员指定为组长时，原组长自动卸任。
 pub fn create(conn: &Connection, project_id: &str, input: &NewAgent) -> AppResult<Agent> {
     let (name, role, model, effort) = normalize(input)?;
+    let permission = crate::execution_permissions::normalize(&input.cli, input.execution_permission.as_deref())?;
     projects::get(conn, project_id)?;
     let existing = list(conn, project_id)?;
     if existing.len() as i64 >= MAX_AGENTS {
@@ -148,8 +154,8 @@ pub fn create(conn: &Connection, project_id: &str, input: &NewAgent) -> AppResul
     let id = new_id();
     conn.execute(
         "INSERT INTO agents (id, project_id, name, role, persona, cli, model, is_leader, \
-                            last_seen_message_id, seat_index, created_at, reasoning_effort) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                            last_seen_message_id, seat_index, created_at, reasoning_effort, execution_permission) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             id,
             project_id,
@@ -162,7 +168,8 @@ pub fn create(conn: &Connection, project_id: &str, input: &NewAgent) -> AppResul
             last_seen_message_id,
             seat_index,
             now_ms(),
-            effort
+            effort,
+            permission
         ],
     )?;
     projects::touch(conn, project_id)?;
@@ -172,7 +179,11 @@ pub fn create(conn: &Connection, project_id: &str, input: &NewAgent) -> AppResul
 /// 编辑成员。组长不能直接卸任，只能通过把另一位成员设为组长来交接。
 pub fn update(conn: &Connection, id: &str, input: &NewAgent) -> AppResult<Agent> {
     let (name, role, model, effort) = normalize(input)?;
+    let permission = crate::execution_permissions::normalize(&input.cli, input.execution_permission.as_deref())?;
     let old = get(conn, id)?;
+    let default_permission = crate::execution_permissions::profile(&input.cli).map(|profile| profile.default_execute);
+    let reset_session = old.cli != input.cli || old.model.as_deref() != model
+        || old.execution_permission.as_deref().or(default_permission) != permission.or(default_permission);
     let siblings = list(conn, &old.project_id)?;
     if siblings.iter().any(|a| a.id != id && a.name.trim().to_lowercase() == name.to_lowercase()) {
         return Err(AppError::Invalid(format!("成员名「{name}」已存在")));
@@ -192,11 +203,9 @@ pub fn update(conn: &Connection, id: &str, input: &NewAgent) -> AppResult<Agent>
     let persona_dirty = old.persona_dirty || old.persona != input.persona;
     conn.execute(
         "UPDATE agents SET name = ?1, role = ?2, persona = ?3, persona_dirty = ?4, \
-                           session_id = CASE \
-                               WHEN cli != ?5 OR COALESCE(model, '') != COALESCE(?6, '') \
-                               THEN NULL ELSE session_id END, \
-                           cli = ?5, model = ?6, is_leader = ?7, reasoning_effort = ?8 \
-         WHERE id = ?9",
+                           session_id = CASE WHEN ?9 THEN NULL ELSE session_id END, \
+                           cli = ?5, model = ?6, is_leader = ?7, reasoning_effort = ?8, execution_permission = ?10 \
+         WHERE id = ?11",
         params![
             name,
             role,
@@ -206,6 +215,8 @@ pub fn update(conn: &Connection, id: &str, input: &NewAgent) -> AppResult<Agent>
             model,
             input.is_leader,
             effort,
+            reset_session,
+            permission,
             id
         ],
     )?;
@@ -262,7 +273,7 @@ mod tests {
     #[test]
     fn dsh_rejects_plain_model_names_and_preserves_structured_selection() {
         let input = NewAgent { name: "成员".into(), role: "开发".into(), cli: "dsh".into(), model: Some("gpt-6".into()),
-            persona: "## 定位\n开发\n## 职责\n实现\n## 边界\n遵守规章\n## 工作风格\n务实".into(), is_leader: false, reasoning_effort: None };
+            persona: "## 定位\n开发\n## 职责\n实现\n## 边界\n遵守规章\n## 工作风格\n务实".into(), is_leader: false, reasoning_effort: None, execution_permission: None };
         assert!(normalize(&input).is_err());
         let mut valid = input;
         valid.model = Some(r#"{"profile":"web","provider":"gpt","model":"gpt-6"}"#.into());
@@ -281,7 +292,7 @@ mod tests {
             persona: PERSONA.to_string(),
             cli: "claude".to_string(),
             model: None,
-            is_leader, reasoning_effort: None,
+            is_leader, reasoning_effort: None, execution_permission: None,
         }
     }
 
@@ -312,6 +323,27 @@ mod tests {
             assert!(update(&conn, &id, &other).is_err(), "{cli} 不应接受 {bad}");
         }
         assert_eq!(get(&conn, &id).unwrap().reasoning_effort, None, "校验失败不留下半成品");
+    }
+
+    #[test]
+    fn member_permission_is_saved_validated_and_invalidates_changed_session() {
+        let (conn, pid) = setup();
+        let mut member = input("老王", true);
+        let agent = create(&conn, &pid, &member).unwrap();
+        assert_eq!(agent.execution_permission, None);
+        set_session(&conn, &agent.id, Some("旧会话")).unwrap();
+        member.execution_permission = Some("bypassPermissions".into());
+        assert_eq!(update(&conn, &agent.id, &member).unwrap().session_id.as_deref(), Some("旧会话"));
+        member.execution_permission = Some(" acceptEdits ".into());
+        let updated = update(&conn, &agent.id, &member).unwrap();
+        assert_eq!(updated.execution_permission.as_deref(), Some("acceptEdits"));
+        assert_eq!(updated.session_id, None);
+        assert_eq!(serde_json::to_value(updated).unwrap()["executionPermission"], "acceptEdits");
+        member.execution_permission = Some("danger-full-access".into());
+        assert!(update(&conn, &agent.id, &member).is_err());
+        assert_eq!(get(&conn, &agent.id).unwrap().execution_permission.as_deref(), Some("acceptEdits"));
+        member.execution_permission = Some("  ".into());
+        assert_eq!(update(&conn, &agent.id, &member).unwrap().execution_permission, None);
     }
 
     #[test]

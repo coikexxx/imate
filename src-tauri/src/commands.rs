@@ -48,10 +48,21 @@ pub struct ProjectDetail {
     pub folder_exists: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberCliInfo {
+    #[serde(flatten)]
+    cli: CliInfo,
+    execution_permissions: Option<&'static crate::execution_permissions::PermissionProfile>,
+}
+
 /// 探测要逐个启动 CLI 取版本号，耗时较长，放到后台线程执行以免卡住界面。
 #[tauri::command(async)]
-pub fn list_clis() -> Vec<CliInfo> {
-    cli_registry::detect_all()
+pub fn list_clis() -> Vec<MemberCliInfo> {
+    cli_registry::detect_all().into_iter().map(|cli| MemberCliInfo {
+        execution_permissions: crate::execution_permissions::profile(&cli.id),
+        cli,
+    }).collect()
 }
 
 #[tauri::command]
@@ -183,17 +194,30 @@ pub fn create_agent(
 
 #[tauri::command]
 pub fn update_agent(state: State<'_, AppState>, id: String, input: NewAgent) -> AppResult<Agent> {
-    let runtime = state.runtime_lock()?;
-    let conn = lock(&state)?;
-    let old = agents::get(&conn, &id)?;
-    crate::cli_config::ensure_cli_change_allowed(&conn, &old.cli, &input.cli)?;
-    if old.cli != input.cli || old.model.as_deref() != input.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
-        runtime.ensure_project_idle(&old.project_id)?;
+    state.update_member(&id, &input)
+}
+
+impl AppState {
+    fn update_member(&self, id: &str, input: &NewAgent) -> AppResult<Agent> {
+        let runtime = self.runtime_lock()?;
+        let conn = self.db_lock()?;
+        let old = agents::get(&conn, id)?;
+        crate::cli_config::ensure_cli_change_allowed(&conn, &old.cli, &input.cli)?;
+        let permission = crate::execution_permissions::normalize(&input.cli, input.execution_permission.as_deref())?;
+        // 切换 CLI 也会更换执行权限策略，包括未显式选择档位的成员。
+        let permission_changed = old.cli != input.cli || permission != old.execution_permission.as_deref();
+        let model = input.model.as_deref().map(str::trim).filter(|model| !model.is_empty());
+        if permission_changed || old.model.as_deref() != model {
+            runtime.ensure_project_idle(&old.project_id)?;
+        }
+        if permission_changed && projects::get(&conn, &old.project_id)?.status != "idle" {
+            return Err(AppError::Invalid("请在项目空闲时修改成员 CLI 或执行权限".into()));
+        }
+        let tx = conn.unchecked_transaction()?;
+        let agent = agents::update(&tx, id, input)?;
+        tx.commit()?;
+        Ok(agent)
     }
-    let tx = conn.unchecked_transaction()?;
-    let agent = agents::update(&tx, &id, &input)?;
-    tx.commit()?;
-    Ok(agent)
 }
 
 #[tauri::command]
@@ -804,7 +828,7 @@ impl AppState {
             let baseline = request.session_id.as_deref().map(|id| runs::latest_usage(&tx, &prepared.agent.id, id)).transpose()?.flatten()
                 .and_then(|value| serde_json::from_value(value).ok());
             let mut adapter = make_adapter(cli, RunMode::Execute, baseline.clone())?;
-            adapter.set_reasoning_effort(prepared.agent.reasoning_effort.clone());
+            configure_member_adapter(adapter.as_mut(), &prepared.agent, false)?;
             let spec = adapter.build_command(&request);
             let command = serde_json::to_string(&json!({"program":spec.program, "args":spec.args}))
                 .map_err(|e| AppError::Invalid(e.to_string()))?;
@@ -863,7 +887,7 @@ impl AppState {
             let baseline = request.session_id.as_deref().map(|id| runs::latest_usage(&tx, &prepared.agent.id, id)).transpose()?.flatten()
                 .and_then(|value| serde_json::from_value(value).ok());
             let mut adapter = make_adapter(cli, RunMode::Execute, baseline.clone())?;
-            adapter.set_reasoning_effort(prepared.agent.reasoning_effort.clone());
+            configure_member_adapter(adapter.as_mut(), &prepared.agent, false)?;
             let spec = adapter.build_command(&request);
             let command = serde_json::to_string(&json!({"program": spec.program, "args": spec.args})).map_err(|e| AppError::Invalid(e.to_string()))?;
             let run = runs::insert_running(&tx, Some(&prepared.agent.id), "execute", &command, request.session_id.as_deref())?;
@@ -939,6 +963,14 @@ pub fn make_adapter(cli: &crate::cli_registry::ResolvedCli, mode: RunMode, basel
     }
 }
 
+fn configure_member_adapter(adapter: &mut dyn CliAdapter, agent: &Agent, elevated: bool) -> AppResult<()> {
+    let permission = crate::execution_permissions::normalize(adapter.id(), agent.execution_permission.as_deref())?;
+    adapter.set_execution_permission(permission);
+    adapter.set_reasoning_effort(agent.reasoning_effort.clone());
+    adapter.set_elevated(elevated);
+    Ok(())
+}
+
 /// 团队回合的展示状态。讨论有文本才算发言，执行一有输出就算干活，出错后不再改回。
 pub fn live_status(mode: RunMode, event: &AgentEvent, current: &'static str) -> &'static str {
     if current == "error" || matches!(event, AgentEvent::Error { .. }) {
@@ -976,6 +1008,11 @@ impl AppState {
         let settings = { let conn = self.db_lock()?; crate::proxy::load(&conn)? };
         let environment = crate::proxy::resolve(&settings)?.map(|proxy| crate::proxy::overrides(&proxy)).unwrap_or_default();
         Ok(Box::new(crate::proxy::ProxyAdapter::new(adapter, environment)))
+    }
+    fn make_member_runtime_adapter(&self, cli: &crate::cli_registry::ResolvedCli, mode: RunMode, baseline: Option<Usage>, agent: &Agent, elevated: bool) -> AppResult<Box<dyn CliAdapter>> {
+        let mut adapter = self.make_runtime_adapter(cli, mode, baseline)?;
+        configure_member_adapter(adapter.as_mut(), agent, elevated)?;
+        Ok(adapter)
     }
     pub fn apply_project_event(&self, started: &StartedMessage, event: AgentEvent) -> AppResult<Vec<(&'static str, Value)>> {
         let mut runtime = self.runtime_lock()?;
@@ -1064,7 +1101,7 @@ impl AppState {
         let prepared = ChatService::send(&tx, project_id, started.user_message.id, true)?;
         let request = ChatService::request(&prepared, started.request.cwd.clone());
         let mut adapter = make_adapter(cli, RunMode::Execute, None)?;
-        adapter.set_reasoning_effort(prepared.agent.reasoning_effort.clone());
+        configure_member_adapter(adapter.as_mut(), &prepared.agent, false)?;
         let spec = adapter.build_command(&request);
         let run = runs::insert_running(&tx, Some(&prepared.agent.id), "execute",
             &serde_json::to_string(&json!({"program":spec.program,"args":spec.args})).map_err(|e| AppError::Invalid(e.to_string()))?, None)?;
@@ -1207,7 +1244,7 @@ async fn execute_project(app: tauri::AppHandle, mut started: StartedMessage, cli
     // 空闲点名在启动时读一次当前护栏，会话重建沿用同一份。
     let config = app.state::<AppState>().db_lock().map(|conn| crate::runtime_settings::effective_limits(&conn)).unwrap_or_default().runner_config();
     loop {
-        let mut adapter = match app.state::<AppState>().make_runtime_adapter(&cli, RunMode::Execute, started.baseline.clone()) {
+        let adapter = match app.state::<AppState>().make_member_runtime_adapter(&cli, RunMode::Execute, started.baseline.clone(), &started.prepared.agent, false) {
             Ok(adapter) => adapter,
             Err(error) => {
                 let outcome = crate::runner::RunOutcome { status: "failed".into(), session_id: started.request.session_id.clone(),
@@ -1217,7 +1254,6 @@ async fn execute_project(app: tauri::AppHandle, mut started: StartedMessage, cli
                 return;
             }
         };
-        adapter.set_reasoning_effort(started.prepared.agent.reasoning_effort.clone());
         let outcome = crate::runner::run_turn_managed(adapter, started.request.clone(), started.cancellation.clone(), |event| {
             let state = app.state::<AppState>();
             match state.apply_project_event(&started, event) {
@@ -1427,8 +1463,12 @@ async fn run_orchestrated(
             .map_err(|_| "无法读取应用配置")?;
         let project = projects::get(&conn, project_id).map_err(|_| "项目不存在")?;
         let folder = Path::new(&project.folder_path).canonicalize().map_err(|_| "项目目录不存在或无法读取")?;
-        let session = runs::resumable_session(&conn, &agent, &spec.mode)
-            .map_err(|_| "无法读取会话的运行模式")?.map(str::to_owned);
+        let session = if crate::execution_permissions::isolated_elevation(&agent.cli, agent.execution_permission.as_deref(), &spec.mode, spec.elevated) {
+            None
+        } else {
+            runs::resumable_session(&conn, &agent, &spec.mode)
+                .map_err(|_| "无法读取会话的运行模式")?.map(str::to_owned)
+        };
         Ok((agent, folder, session))
     })();
     let (agent, folder, session) = match prepared {
@@ -1449,12 +1489,10 @@ async fn run_orchestrated(
         .and_then(|conn| session.as_deref().and_then(|id| runs::latest_usage(&conn, &agent.id, id).ok().flatten()))
         .and_then(|value| serde_json::from_value(value).ok());
     // 与直接点名路径一致：带上代理环境和 Dsh 设置。它自己会拿数据库锁，调用时不能持有锁。
-    let mut adapter = match state.make_runtime_adapter(&cli, mode, baseline) {
+    let adapter = match state.make_member_runtime_adapter(&cli, mode, baseline, &agent, spec.elevated) {
         Ok(adapter) => adapter,
         Err(error) => return refuse(&error.to_string()),
     };
-    adapter.set_elevated(spec.elevated);
-    adapter.set_reasoning_effort(agent.reasoning_effort.clone());
     let request = crate::adapters::TurnRequest { prompt: spec.prompt.clone(), session_id: session,
         cwd: folder.clone(), mode, model: agent.model.clone() };
     record_requested_model(&state, &spec.run_id, request.model.as_deref());
@@ -1734,7 +1772,7 @@ mod integration_tests {
         let first = projects::create(&conn, "甲", "", folder.path().to_str().unwrap()).unwrap();
         let second = projects::create(&conn, "乙", "", folder.path().to_str().unwrap()).unwrap();
         let input = NewAgent { name: "组长".into(), role: "开发".into(),
-            persona: "## 定位\n开发\n## 职责\n测试\n## 边界\n不越界\n## 工作风格\n务实".into(), cli: "codex".into(), model: None, is_leader: true, reasoning_effort: None };
+            persona: "## 定位\n开发\n## 职责\n测试\n## 边界\n不越界\n## 工作风格\n务实".into(), cli: "codex".into(), model: None, is_leader: true, reasoning_effort: None, execution_permission: None };
         agents::create(&conn, &first.id, &input).unwrap(); agents::create(&conn, &second.id, &input).unwrap();
         let cli = crate::cli_registry::ResolvedCli { info: CliInfo { id: "codex".into(), label: "Codex".into(), installed: true,
             supported: true, path: Some("/bin/test".into()), version: None }, program: "/bin/test".into(), path_env: "/bin".into(), environment_source: crate::cli_registry::EnvironmentSource::Process };
@@ -1744,6 +1782,36 @@ mod integration_tests {
         crate::runner::RunOutcome { status: status.into(), session_id: Some("thread".into()), final_text: "最终正文".into(),
             partial_text: "部分正文".into(), usage: None, exit_code: Some(0), error: None, tool_seen: false, cleanup_complete: true, denial: None }
     }
+    #[test]
+    fn execution_permission_requires_idle_and_reaches_direct_and_team_adapters() {
+        let (state, _folder, project_id, _, cli) = setup();
+        let agent = agents::list(&state.db_lock().unwrap(), &project_id).unwrap().remove(0);
+        let mut input = NewAgent {
+            name: agent.name.clone(), role: agent.role.clone(), persona: agent.persona.clone(),
+            cli: agent.cli.clone(), model: None, is_leader: true, reasoning_effort: None,
+            execution_permission: Some("read-only".into()),
+        };
+        let saved = state.update_member(&agent.id, &input).unwrap();
+        assert_eq!(saved.execution_permission.as_deref(), Some("read-only"));
+        let started = state.prepare_send(&project_id, "读取测试文件", &cli).unwrap();
+        let command = runs::get(&state.db_lock().unwrap(), &started.run_id).unwrap().command;
+        let args = serde_json::from_str::<Value>(&command).unwrap()["args"].clone();
+        assert!(args.as_array().unwrap().iter().any(|arg| arg == "sandbox_mode=\"read-only\""));
+        input.execution_permission = Some("danger-full-access".into());
+        assert!(state.update_member(&agent.id, &input).is_err());
+        state.finish_project(&started, outcome("ok")).unwrap();
+        let saved = state.update_member(&agent.id, &input).unwrap();
+        let args_for = |mode, elevated| {
+            let request = crate::adapters::TurnRequest { mode, ..started.request.clone() };
+            state.make_member_runtime_adapter(&cli, mode, None, &saved, elevated).unwrap().build_command(&request).args
+        };
+        assert!(args_for(RunMode::Discuss, true).contains(&"sandbox_mode=\"read-only\"".into()));
+        assert!(args_for(RunMode::Execute, false).contains(&"sandbox_mode=\"danger-full-access\"".into()));
+        state.db_lock().unwrap().execute("UPDATE projects SET status='waiting_user' WHERE id=?1", [&project_id]).unwrap();
+        input.execution_permission = None;
+        assert!(state.update_member(&agent.id, &input).unwrap_err().to_string().contains("项目空闲"));
+    }
+
     #[test]
     fn persisted_run_and_ownership_precede_start_and_failures_roll_back_reservation() {
         let (state, _folder, first, second, cli) = setup();
@@ -2282,7 +2350,7 @@ mod integration_tests {
         let project = projects::create(&conn, "甲", "", folder.to_str().unwrap()).unwrap();
         let input = NewAgent { name: "组长".into(), role: "开发".into(),
             persona: "## 定位\n开发\n## 职责\n测试\n## 边界\n不越界\n## 工作风格\n务实".into(),
-            cli: "codex".into(), model: None, is_leader: true, reasoning_effort: None };
+            cli: "codex".into(), model: None, is_leader: true, reasoning_effort: None, execution_permission: None };
         let agent = agents::create(&conn, &project.id, &input).unwrap();
         let run = runs::insert_running(&conn, Some(&agent.id), "execute", "probe", None).unwrap();
         let mut sleeper = {

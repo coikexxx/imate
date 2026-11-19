@@ -105,6 +105,7 @@ struct RunRow {
     status: String,
     instruction_id: String,
     task_id: Option<String>,
+    elevated: bool,
     /// 构建提示词时的最大消息 ID。成功后游标推进到这里。
     message_bound: i64,
     /// 构建提示词时的人设标记，用来判断回合进行中人设有没有被改过。
@@ -434,6 +435,9 @@ pub fn rebuild_turn(conn: &Connection, run_id: &str, outcome: &RunOutcome) -> Ap
         return Ok(None);
     }
     let agent = agents::get(conn, &run.agent_id)?;
+    if crate::execution_permissions::isolated_elevation(&agent.cli, agent.execution_permission.as_deref(), &run.mode, run.elevated) {
+        return Ok(None);
+    }
     let had_session = crate::store::runs::resumable_session(conn, &agent, &run.mode)?.is_some();
     if !crate::chat::should_rebuild_session(outcome, had_session, false)
         || previous_remedy(conn, &instruction.id, &agent.id, Some(run_id))?.is_some()
@@ -563,7 +567,11 @@ fn schedule_execute(conn: &Connection, instruction: &Instruction) -> AppResult<V
         stored.elevated_reason = None;
         save_snapshot(conn, &instruction.id, &stored)?;
     }
-    let (mut prompt, bound) = compose_prompt(conn, instruction, &assignee, Stage::Execute, Some(&task), "")?;
+    let mut prompt_agent = assignee.clone();
+    if crate::execution_permissions::isolated_elevation(&assignee.cli, assignee.execution_permission.as_deref(), "execute", elevated) {
+        prompt_agent.session_id = None;
+    }
+    let (mut prompt, bound) = compose_prompt(conn, instruction, &prompt_agent, Stage::Execute, Some(&task), "")?;
     if elevated {
         prompt.push_str(&format!(
             "\n\n# 权限提权\n上一个回合因权限被拒：{}。本回合已按用户授权使用最高权限，请继续完成原任务；\
@@ -589,7 +597,9 @@ fn mention_prompt(content: &str) -> String {
 fn compose_mention(conn: &Connection, instruction: &Instruction, agent: &Agent, content: &str) -> AppResult<(String, i64)> {
     let bound = message_bound(conn, &instruction.project_id)?;
     let prompt = mention_prompt(content);
-    if agent.cli != "grok" || crate::store::runs::resumable_session(conn, agent, "execute")?.is_some() {
+    if !crate::execution_permissions::separate_mode_sessions(&agent.cli, agent.execution_permission.as_deref())
+        || crate::store::runs::resumable_session(conn, agent, "execute")?.is_some()
+    {
         return Ok((prompt, bound));
     }
     let project = projects::get(conn, &instruction.project_id)?;
@@ -1026,6 +1036,10 @@ fn save_speech(conn: &Connection, instruction: &Instruction, agent: &Agent, run_
 }
 
 fn remember_agent(conn: &Connection, run: &RunRow, agent: &Agent, outcome: &RunOutcome) -> AppResult<()> {
+    if crate::execution_permissions::isolated_elevation(&agent.cli, agent.execution_permission.as_deref(), &run.mode, run.elevated) {
+        // 普通会话没收到本次上下文，下次从原会话和原游标继续。
+        return Ok(());
+    }
     // 会话一旦建立就要记住，哪怕这个回合后来失败了。
     if let Some(session_id) = outcome.session_id.as_deref() {
         agents::set_session(conn, &agent.id, Some(session_id))?;
@@ -1139,7 +1153,7 @@ fn previous_remedy(conn: &Connection, instruction_id: &str, agent_id: &str, exce
 
 fn load_run(conn: &Connection, run_id: &str) -> AppResult<RunRow> {
     conn.query_row(
-        "SELECT id, agent_id, mode, status, instruction_id, task_id, command FROM runs WHERE id = ?1",
+        "SELECT id, agent_id, mode, status, instruction_id, task_id, command, elevated FROM runs WHERE id = ?1",
         [run_id],
         |row| {
             let command: Option<String> = row.get(6)?;
@@ -1151,6 +1165,7 @@ fn load_run(conn: &Connection, run_id: &str) -> AppResult<RunRow> {
                 status: row.get(3)?,
                 instruction_id: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 task_id: row.get(5)?,
+                elevated: row.get(7)?,
                 // 旧记录没有这两项：上界按 0 处理（游标只增不减），人设标记留空（不会清除待更新标记）。
                 message_bound: facts["messageBound"].as_i64().unwrap_or(0),
                 persona_mark: facts["personaMark"].as_str().unwrap_or_default().to_string(),
@@ -1623,13 +1638,14 @@ mod tests {
         let mut agents = Vec::new();
         let leader = agents::create(&conn, &project.id, &NewAgent {
             name: "组长".into(), role: "管理".into(), persona: PERSONA.into(),
-            cli: "claude".into(), model: None, is_leader: true, reasoning_effort: None,
+            cli: "claude".into(), model: None, is_leader: true, reasoning_effort: None, execution_permission: None,
         }).unwrap();
         agents.push(leader);
         for (index, name) in member_names.iter().enumerate() {
             agents.push(agents::create(&conn, &project.id, &NewAgent {
                 name: (*name).into(), role: "开发".into(), persona: PERSONA.into(),
-                cli: if index == 0 { "claude" } else { "codex" }.into(), model: None, is_leader: false, reasoning_effort: None,
+                cli: if index == 0 { "claude" } else { "codex" }.into(), model: None, is_leader: false,
+                reasoning_effort: None, execution_permission: None,
             }).unwrap());
         }
         (conn, project.id, agents)
@@ -2026,6 +2042,27 @@ mod tests {
         let assign = fence("开工。", r#"{"action":"assign","decision":"做校验","tasks":[{"to":"前端","title":"校验","detail":"做校验"}]}"#);
         apply_outcome(conn, &leader.run_id, &ok_text(&assign)).unwrap();
         advance(conn, project_id).unwrap().remove(0)
+    }
+
+    #[test]
+    fn elevated_claude_session_does_not_replace_the_members_normal_session() {
+        let (conn, project_id, roster) = setup(&["前端"]);
+        let member_id = &roster[1].id;
+        conn.execute("UPDATE agents SET execution_permission='acceptEdits' WHERE id=?1", [member_id]).unwrap();
+        start_team(&conn, &project_id);
+        let normal = assign_one(&conn, &project_id);
+        let denied = RunOutcome { session_id: Some("普通会话".into()), ..denied_text("受阻", "Access is denied") };
+        apply_outcome(&conn, &normal.run_id, &denied).unwrap();
+        let before = agents::get(&conn, member_id).unwrap();
+        assert_eq!(before.session_id.as_deref(), Some("普通会话"));
+        authorize_blocked_task(&conn, normal.task_id.as_deref().unwrap()).unwrap();
+        let retry = advance(&conn, &project_id).unwrap().remove(0);
+        assert!(retry.elevated);
+        assert!(retry.prompt.contains("# 恢复包"));
+        let elevated = RunOutcome { session_id: Some("授权会话".into()), ..ok_text("授权后成功") };
+        apply_outcome(&conn, &retry.run_id, &elevated).unwrap();
+        assert_eq!(crate::store::runs::get(&conn, &retry.run_id).unwrap().session_id.as_deref(), Some("授权会话"));
+        assert_eq!(agents::get(&conn, member_id).unwrap(), before);
     }
 
     #[test]
@@ -2662,7 +2699,7 @@ mod tests {
         let reply = || ok_text(&fence("直接答复。", r#"{"action":"reply","message":"可以"}"#));
         let edit = |text: &str| agents::update(&conn, &agents[0].id, &NewAgent {
             name: "组长".into(), role: "管理".into(), persona: PERSONA.replace("本人风格", text),
-            cli: "claude".into(), model: None, is_leader: true, reasoning_effort: None,
+            cli: "claude".into(), model: None, is_leader: true, reasoning_effort: None, execution_permission: None,
         }).unwrap();
         start_team(&conn, &project_id);
         let first = advance(&conn, &project_id).unwrap();

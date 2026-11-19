@@ -10,6 +10,7 @@ pub struct CodexAdapter {
     path_env: Option<std::ffi::OsString>,
     mode: RunMode,
     elevated: bool,
+    execution_permission: Option<&'static str>,
     reasoning_effort: Option<String>,
     usage_baseline: Option<Usage>,
     resumed: AtomicBool,
@@ -22,7 +23,8 @@ pub struct CodexAdapter {
 
 impl CodexAdapter {
     pub fn new(program: PathBuf, mode: RunMode, usage_baseline: Option<Usage>) -> Self {
-        Self { program, path_env: None, mode, elevated: false, reasoning_effort: None, usage_baseline, resumed: AtomicBool::new(false),
+        Self { program, path_env: None, mode, elevated: false, execution_permission: None, reasoning_effort: None,
+            usage_baseline, resumed: AtomicBool::new(false),
             active_tools: HashSet::new(), final_text: String::new(), had_text: false, failed: false, completed: false }
     }
     #[cfg(test)]
@@ -57,16 +59,13 @@ impl CliAdapter for CodexAdapter {
     fn id(&self) -> &'static str { "codex" }
     fn detect(&self) -> Option<CliInfo> { cli_registry::resolve_cli(self.id()).ok().map(|cli| cli.info) }
     fn set_elevated(&mut self, elevated: bool) { self.elevated = elevated; }
+    fn set_execution_permission(&mut self, permission: Option<&'static str>) { self.execution_permission = permission; }
     fn set_reasoning_effort(&mut self, effort: Option<String>) { self.reasoning_effort = effort; }
     fn build_command(&self, req: &TurnRequest) -> CommandSpec {
         self.resumed.store(req.session_id.is_some(), Ordering::Relaxed);
         let mut args = vec!["exec".into()];
         if let Some(id) = &req.session_id { args.extend(["resume".into(), id.clone()]); }
-        let sandbox = match self.mode {
-            RunMode::Discuss => "read-only",
-            RunMode::Execute if self.elevated => "danger-full-access",
-            RunMode::Execute => "workspace-write",
-        };
+        let sandbox = crate::execution_permissions::SANDBOX.for_turn(self.mode, self.execution_permission, self.elevated);
         args.extend(["--json".into(), "--skip-git-repo-check".into(), "-c".into(),
             format!("sandbox_mode=\"{sandbox}\""), "-c".into(), "approval_policy=\"never\"".into()]);
         if let Some(model) = req.model.as_ref().filter(|m| !m.trim().is_empty()) { args.extend(["--model".into(), model.clone()]); }
@@ -131,12 +130,16 @@ impl CliAdapter for CodexAdapter {
     }
 }
 
-/// Codex 0.169.0 将同一次请求的重连进度也输出为顶层 error；此时 CLI 仍会继续。
-/// 只放行实测的完整格式，未知错误及 turn.failed 仍锁定失败。
+/// Codex 将同一次请求的重连进度也输出为顶层 error，CLI 仍会继续。
+/// 只放行 0.169.0 和 0.170.0 实测的完整格式。未知错误及 turn.failed 仍锁定失败。
 fn is_reconnect_progress(message: &str) -> bool {
     let Some((progress, reason)) = message.strip_prefix("Reconnecting... ")
         .and_then(|tail| tail.strip_suffix(')'))
         .and_then(|tail| tail.split_once(" (")) else { return false; };
+    if progress == "waiting for network" {
+        return reason.strip_prefix("Connection failed: ")
+            .is_some_and(|detail| !detail.trim().is_empty());
+    }
     if reason.trim().is_empty() { return false; }
     let Some((attempt, limit)) = progress.split_once('/') else { return false; };
     if ![attempt, limit].iter().all(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())) {
@@ -248,6 +251,18 @@ mod tests {
     }
 
     #[test]
+    fn waiting_for_network_allows_the_recorded_turn_to_complete() {
+        let mut adapter = CodexAdapter::new("codex".into(), RunMode::Discuss, None);
+        let events: Vec<_> = include_str!("../../tests/fixtures/codex/reconnect-network-recovered.jsonl")
+            .lines().flat_map(|line| adapter.parse_line(line)).collect();
+        assert!(!events.iter().any(|event| matches!(event, AgentEvent::Error { .. })), "{events:?}");
+        assert!(events.iter().any(|event| matches!(event,
+            AgentEvent::TurnCompleted { final_text, usage: Some(usage) }
+                if final_text == "IMATES_NETWORK_RECOVERED" && usage.input_tokens == Some(12)
+        )));
+    }
+
+    #[test]
     fn exhausted_reconnect_reports_the_terminal_error_not_the_first_retry() {
         let mut adapter = CodexAdapter::new("codex".into(), RunMode::Execute, None);
         let events: Vec<_> = include_str!("../../tests/fixtures/codex/reconnect-exhausted.jsonl")
@@ -267,9 +282,13 @@ mod tests {
             assert!(adapter.parse_line(&line.to_string()).is_empty(), "第 {attempt} 次重连仍非终态");
         }
         assert!(matches!(adapter.parse_line(r#"{"type":"turn.failed","error":{"message":"Reconnecting... 5/5 (失败)"}}"#).as_slice(), [AgentEvent::Error { .. }]));
+        let mut adapter = CodexAdapter::new("codex".into(), RunMode::Discuss, None);
+        assert!(matches!(adapter.parse_line(r#"{"type":"turn.failed","error":{"message":"Reconnecting... waiting for network (Connection failed: error sending request)"}}"#).as_slice(), [AgentEvent::Error { .. }]));
         for message in ["Reconnecting...", "Reconnecting... 0/5 (失败)", "Reconnecting... 6/5 (失败)",
             "Reconnecting... 1/0 (失败)", "Reconnecting... 1/5 ()", "Reconnecting... x/5 (失败)",
-            "Reconnecting... 1/5 (失败) extra", "未知错误"] {
+            "Reconnecting... 1/5 (失败) extra", "Reconnecting... waiting for network",
+            "Reconnecting... waiting for network (未知错误)", "Reconnecting... waiting for network (Connection failed: )",
+            "Reconnecting... waiting for network (Connection failed: timeout) extra", "未知错误"] {
             let mut adapter = CodexAdapter::new("codex".into(), RunMode::Execute, None);
             let line = serde_json::json!({"type":"error","message":message});
             assert!(matches!(adapter.parse_line(&line.to_string()).as_slice(), [AgentEvent::Error { .. }]), "不应忽略未确认的错误：{message}");
