@@ -120,14 +120,16 @@ pub fn track(pid: u32) -> ProcessTree {
         let root_created = process_created(pid);
         let watcher = std::thread::Builder::new().name("imates-proc-tree".into()).spawn(move || {
             while !stop_bg.load(std::sync::atomic::Ordering::Relaxed) {
-                match (root_created, process_created(pid)) {
-                    (Some(expected), Some(actual)) if expected == actual => {}
-                    _ => break,
-                }
+                let Some(created) = root_created else { break; };
+                if process_created(pid) != Some(created) { break; }
+                let descendants = descendant_processes(pid, created);
                 if let Ok(mut guard) = seen_bg.lock() {
-                    for child in descendant_pids(pid) {
-                        if guard.iter().any(|(existing, _)| *existing == child) { continue; }
-                        if let Some(created) = process_created(child) { guard.push((child, created)); }
+                    for (child, created) in descendants {
+                        if let Some(recorded) = guard.iter_mut().find(|(existing, _)| *existing == child) {
+                            recorded.1 = created;
+                        } else {
+                            guard.push((child, created));
+                        }
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -529,7 +531,7 @@ fn taskkill_tree(pid: u32) {
 }
 
 #[cfg(windows)]
-fn process_created(pid: u32) -> Option<u64> {
+pub(super) fn process_created(pid: u32) -> Option<u64> {
     use std::ffi::c_void;
     #[repr(C)]
     struct FileTime { low: u32, high: u32 }
@@ -553,7 +555,7 @@ fn process_created(pid: u32) -> Option<u64> {
 }
 
 #[cfg(windows)]
-fn descendant_pids(root: u32) -> Vec<u32> {
+pub(super) fn descendant_processes(root: u32, root_created: u64) -> Vec<(u32, u64)> {
     use std::ffi::c_void;
     #[repr(C)]
     struct ProcessEntry { size: u32, cnt_usage: u32, process_id: u32, default_heap_id: usize, module_id: u32,
@@ -579,11 +581,25 @@ fn descendant_pids(root: u32) -> Vec<u32> {
         }
         CloseHandle(snap);
     }
+    let found = descendants_from_snapshot((root, root_created), &rows, process_created);
+    if process_created(root) == Some(root_created) { found } else { Vec::new() }
+}
+
+#[cfg(windows)]
+fn descendants_from_snapshot(
+    root: (u32, u64), rows: &[(u32, u32)], mut created_at: impl FnMut(u32) -> Option<u64>,
+) -> Vec<(u32, u64)> {
+    // 父 PID 在父进程退出后仍会留在子进程记录里。PID 复用可能让快照出现环。
+    let mut visited = std::collections::HashSet::from([root.0]);
     let mut pending = vec![root];
     let mut found = Vec::new();
-    while let Some(parent) = pending.pop() {
-        for (pid, ppid) in &rows {
-            if *ppid == parent && *pid != parent { found.push(*pid); pending.push(*pid); }
+    while let Some((parent, parent_created)) = pending.pop() {
+        for &(pid, ppid) in rows {
+            if ppid != parent || !visited.insert(pid) { continue; }
+            // 子进程比快照中同 PID 的父进程更早启动时，这条边指向旧父进程。
+            let Some(created) = created_at(pid).filter(|&created| created >= parent_created) else { continue; };
+            found.push((pid, created));
+            pending.push((pid, created));
         }
     }
     found
@@ -713,6 +729,42 @@ pub async fn terminate_tree(child: &mut Child, pid: u32, _tree: &ProcessTree) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_snapshot_visits_each_descendant_once() {
+        let rows = [(10, 1), (20, 10), (20, 10), (30, 20), (40, 30), (50, 1), (60, 50)];
+        let mut found = descendants_from_snapshot((10, 100), &rows, |pid| Some(100 + u64::from(pid)));
+        found.sort_unstable();
+        assert_eq!(found, [(20, 120), (30, 130), (40, 140)], "同一个 PID 及其后代只访问一次");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_snapshot_cycle_terminates_without_returning_the_root() {
+        let rows = [(10, 30), (20, 10), (30, 20), (40, 20), (50, 50)];
+        let mut found = descendants_from_snapshot((10, 100), &rows, |pid| {
+            assert_ne!(pid, 10, "返回根进程的边应在查询创建时间之前跳过");
+            Some(100)
+        });
+        found.sort_unstable();
+        assert_eq!(found, [(20, 100), (30, 100), (40, 100)]);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_snapshot_skips_stale_parent_branches() {
+        let rows = [(20, 10), (30, 20), (40, 10), (50, 40), (60, 50), (70, 40), (80, 70)];
+        let found = descendants_from_snapshot((10, 100), &rows, |pid| match pid {
+            20 => Some(99),
+            40 | 70 => Some(110),
+            50 => Some(109),
+            80 => None,
+            _ => panic!("不应进入旧父进程分支"),
+        });
+        assert_eq!(found, [(40, 110), (70, 110)]);
+    }
+
     #[test]
     #[cfg(target_os = "macos")]
     fn macos_eperm_fallback_keeps_the_same_microsecond_identity() {

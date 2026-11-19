@@ -397,15 +397,16 @@ mod tests {
                 child.stdin(std::process::Stdio::null());
                 let mut child = child.spawn().unwrap();
                 let child_pid = child.id();
+                let child_created = platform::process_created(child_pid).expect("测试子进程已启动");
                 let started = std::time::Instant::now();
                 let mut descendants = Vec::new();
                 while started.elapsed() < Duration::from_secs(3) {
-                    descendants = descendant_pids(child_pid);
+                    descendants = platform::descendant_processes(child_pid, child_created);
                     if !descendants.is_empty() { break; }
                     std::thread::sleep(Duration::from_millis(30));
                 }
                 let mut lines = vec![child_pid.to_string()];
-                lines.extend(descendants.iter().map(u32::to_string));
+                lines.extend(descendants.iter().map(|(pid, _)| pid.to_string()));
                 std::fs::write("pids", lines.join("\n")).unwrap();
                 if scenario == "orphan_pipe" { event("complete", "父进程退出"); std::process::exit(0); }
                 event("text", "进程树已启动"); std::io::stdout().flush().unwrap(); let _ = child.wait();
@@ -640,42 +641,6 @@ mod tests {
         assert!(now.elapsed() < Duration::from_secs(15), "进程树清理超过有界时间");
     }
 
-    #[cfg(windows)]
-    fn descendant_pids(root: u32) -> Vec<u32> {
-        use std::ffi::c_void;
-        #[repr(C)]
-        struct ProcessEntry { size: u32, cnt_usage: u32, process_id: u32, default_heap_id: usize, module_id: u32,
-            threads: u32, parent_process_id: u32, pri_class_base: i32, flags: u32, exe_file: [u16; 260] }
-        unsafe extern "system" {
-            fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> *mut c_void;
-            fn Process32FirstW(snap: *mut c_void, entry: *mut ProcessEntry) -> i32;
-            fn Process32NextW(snap: *mut c_void, entry: *mut ProcessEntry) -> i32;
-            fn CloseHandle(handle: *mut c_void) -> i32;
-        }
-        let snap = unsafe { CreateToolhelp32Snapshot(0x00000002, 0) };
-        if snap.is_null() || snap as isize == -1 { return Vec::new(); }
-        let mut rows = Vec::new();
-        unsafe {
-            let mut entry = std::mem::zeroed::<ProcessEntry>();
-            entry.size = std::mem::size_of::<ProcessEntry>() as u32;
-            if Process32FirstW(snap, &mut entry) != 0 {
-                loop {
-                    rows.push((entry.process_id, entry.parent_process_id));
-                    entry.size = std::mem::size_of::<ProcessEntry>() as u32;
-                    if Process32NextW(snap, &mut entry) == 0 { break; }
-                }
-            }
-            CloseHandle(snap);
-        }
-        let mut pending = vec![root];
-        let mut found = Vec::new();
-        while let Some(parent) = pending.pop() {
-            for (pid, ppid) in &rows {
-                if *ppid == parent && *pid != parent { found.push(*pid); pending.push(*pid); }
-            }
-        }
-        found
-    }
     #[cfg(windows)]
     fn assert_tree_gone(folder: &std::path::Path) {
         let pids = std::fs::read_to_string(folder.join("pids")).unwrap();
