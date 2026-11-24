@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { uniqueRuleFilename } from "../lib/wizard";
-import type { RuleDoc } from "../types";
-import { Button, inputClass } from "./ui";
-import { Select } from "./Select";
+import { uniqueRuleFilename } from "../../lib/wizard";
+import type { RuleDoc } from "../../types";
+import { Icon } from "../ui/Icon";
+import { Select } from "../ui/Select";
+import { Button, inputClass } from "../ui/ui";
 
 interface Props {
   rules: RuleDoc[];
@@ -32,7 +33,7 @@ export function RulesEditor({ rules, templates, onChange }: Props) {
   }
 
   return (
-    <div className="grid grid-cols-[200px_1fr] gap-4">
+    <div className="grid grid-cols-[200px_minmax(0,1fr)] gap-4">
       <div className="space-y-2">
         <ul className="space-y-1">
           {rules.map((rule, i) => (
@@ -40,21 +41,28 @@ export function RulesEditor({ rules, templates, onChange }: Props) {
               <button
                 type="button"
                 onClick={() => setSelected(i)}
-                className={`w-full truncate rounded px-2 py-1.5 text-left text-sm ${
-                  i === index ? "bg-sky-900/60 text-sky-100" : "hover:bg-slate-800"
+                className={`flex min-h-9 w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] ${
+                  i === index
+                    ? "bg-accent-soft font-medium text-accent"
+                    : "text-ink-secondary hover:bg-surface-subtle hover:text-ink"
                 }`}
               >
-                {rule.filename}
+                <Icon name="rules" width="14" height="14" className="shrink-0 opacity-75" />
+                <span className="truncate">{rule.filename}</span>
               </button>
             </li>
           ))}
         </ul>
-        <Select aria-label="从模板添加规章" value="" placeholder="从模板添加…"
+        <Select
+          aria-label="从模板添加规章"
+          value=""
+          placeholder="从模板添加…"
           options={unusedTemplates.map((template) => ({ value: template.filename, label: template.filename }))}
           onChange={(value) => {
             const template = templates.find((t) => t.filename === value);
             if (template) add(template);
-          }} />
+          }}
+        />
         <Button
           className="w-full"
           onClick={() =>
@@ -67,15 +75,15 @@ export function RulesEditor({ rules, templates, onChange }: Props) {
             })
           }
         >
-          新增空白规章
+          <Icon name="plus" width="14" height="14" />新增空白规章
         </Button>
       </div>
 
       {current ? (
-        <div className="space-y-2">
+        <div className="space-y-2.5">
           <div className="flex gap-2">
             <input
-              className={inputClass}
+              className={`${inputClass} font-mono text-xs`}
               aria-label="规章文件名"
               value={current.filename}
               onChange={(e) => patch({ filename: e.target.value })}
@@ -85,14 +93,14 @@ export function RulesEditor({ rules, templates, onChange }: Props) {
             </Button>
           </div>
           <textarea
-            className={`${inputClass} h-80 font-mono`}
+            className={`${inputClass} h-72 font-mono text-[13px] leading-relaxed`}
             aria-label="规章正文"
             value={current.content}
             onChange={(e) => patch({ content: e.target.value })}
           />
         </div>
       ) : (
-        <p className="text-sm text-slate-400">还没有规章。从左侧选择模板，或新增一份空白规章。</p>
+        <p className="py-8 text-sm text-ink-muted">还没有规章。从左侧选择模板，或新增一份空白规章。</p>
       )}
     </div>
   );

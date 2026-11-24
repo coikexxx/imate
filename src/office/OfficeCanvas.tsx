@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
 import type { Agent, AgentStatus } from "../types";
-import { Icon } from "../components/Icon";
+import { Icon } from "../components/ui/Icon";
 import { getOfficeViewport, getRegionCamera, ROOM_HEIGHT, ROOM_WIDTH, STATUS_TEXT, stepActor, syncActors, type OfficeActor, type Position } from "./officeScene";
 import { loadOfficeSceneAssets, type OfficeSceneAssets } from "./officeSceneAssets";
 import { drawOfficeScene, type ActorHit } from "./officeSceneRenderer";

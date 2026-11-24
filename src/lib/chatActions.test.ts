@@ -1,9 +1,9 @@
 import { Children, isValidElement, type ReactElement, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
-import { ChatPanel } from "../components/ChatPanel";
-import { InstructionBar } from "../components/InstructionBar";
-import { Button } from "../components/ui";
+import { ChatPanel } from "../components/project/ChatPanel";
+import { InstructionBar } from "../components/project/InstructionBar";
+import { Button } from "../components/ui/ui";
 import { projectStore } from "../stores/project";
 import type { Agent, Instruction, ProjectRuntime, SendMessageResponse, TaskItem } from "../types";
 

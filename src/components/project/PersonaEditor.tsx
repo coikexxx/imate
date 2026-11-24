@@ -5,8 +5,8 @@ import {
   parsePersona,
   type PersonaParts,
   type PersonaSection,
-} from "../lib/persona";
-import { inputClass } from "./ui";
+} from "../../lib/persona";
+import { inputClass } from "../ui/ui";
 
 const HINTS: Record<PersonaSection, string> = {
   定位: "一句话说明这个成员是谁",
@@ -24,8 +24,6 @@ interface Props {
 export function PersonaEditor({ value, onChange }: Props) {
   const [parts, setParts] = useState<PersonaParts>(() => parsePersona(value));
 
-  // 外部整份替换了人设（例如套用模板）时重新拆分。
-  // 自己输入引起的变化不重置，否则每次按键都会被 trim 掉行尾的空格和换行。
   useEffect(() => {
     setParts((current) => (composePersona(current) === value ? current : parsePersona(value)));
   }, [value]);
@@ -37,16 +35,16 @@ export function PersonaEditor({ value, onChange }: Props) {
   }
 
   return (
-    <div className="space-y-3">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
       {PERSONA_SECTIONS.map((section) => (
         <label key={section} className="block space-y-1">
-          <span className="text-xs text-slate-300">
-            {section}
-            <span className="ml-2 text-slate-500">{HINTS[section]}</span>
+          <span className="flex items-baseline justify-between gap-2 text-xs">
+            <span className="font-medium text-ink">{section}</span>
+            <span className="truncate text-[11px] text-ink-muted">{HINTS[section]}</span>
           </span>
           <textarea
-            className={inputClass}
-            rows={section === "定位" ? 2 : 4}
+            className={`${inputClass} text-[13px] leading-relaxed`}
+            rows={section === "定位" ? 3 : 4}
             value={parts[section]}
             onChange={(e) => update(section, e.target.value)}
           />

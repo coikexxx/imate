@@ -1,5 +1,5 @@
 import { HashRouter, Route, Routes } from "react-router";
-import ProjectWizard from "./components/ProjectWizard";
+import ProjectWizard from "./pages/ProjectWizard";
 import Home from "./pages/Home";
 import Project from "./pages/Project";
 import Settings from "./pages/Settings";

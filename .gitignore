@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Project runtime & agent memory artifacts
+.imates
+.memsearch
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
