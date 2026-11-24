@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use serde_json::Value;
 use super::{AgentEvent, CliAdapter, CommandSpec, RunMode, TurnRequest, Usage};
@@ -11,7 +11,9 @@ pub struct ClaudeAdapter {
     elevated: bool,
     execution_permission: Option<&'static str>,
     reasoning_effort: Option<String>,
-    active_tools: HashSet<String>,
+    /// tool_use_id →（工具名、可读摘要）。摘要用于权限拒绝时的说明。
+    active_tools: HashMap<String, (String, String)>,
+    denial_sent: bool,
     failed: bool,
     completed: bool,
 }
@@ -19,7 +21,7 @@ pub struct ClaudeAdapter {
 impl ClaudeAdapter {
     pub fn new(program: PathBuf, mode: RunMode) -> Self {
         Self { program, path_env: None, mode, elevated: false, execution_permission: None, reasoning_effort: None,
-            active_tools: HashSet::new(), failed: false, completed: false }
+            active_tools: HashMap::new(), denial_sent: false, failed: false, completed: false }
     }
     pub fn with_environment(mut self, resolved: &ResolvedCli) -> Self {
         self.program = resolved.program.clone();
@@ -33,6 +35,38 @@ impl ClaudeAdapter {
         self.failed = true;
         vec![AgentEvent::Error { message }]
     }
+}
+
+/// 工具调用的可读摘要，用于权限拒绝说明；压缩空白并限长。
+fn tool_summary(name: &str, block: &Value) -> String {
+    describe_tool(name, &block["input"])
+}
+
+fn describe_tool(name: &str, input: &Value) -> String {
+    let command = input["command"].as_str().map(str::trim).filter(|text| !text.is_empty());
+    let path = input["file_path"].as_str().or_else(|| input["notebook_path"].as_str());
+    let target = command.map(|text| format!("命令 {text}")).or_else(|| path.map(|text| format!("文件 {text}")));
+    match target {
+        Some(target) => {
+            let flat = target.split_whitespace().collect::<Vec<_>>().join(" ");
+            let flat = if flat.chars().count() > 120 { flat.chars().take(120).collect::<String>() + "…" } else { flat };
+            format!("{name} {flat}")
+        }
+        None => name.to_string(),
+    }
+}
+
+/// 工具结果兜底只认 Claude 自己的批准措辞：文件系统的 permission denied 不是沙箱批准问题，
+/// 提权也帮不上，不能当成受阻。
+fn is_denied_result(block: &Value) -> bool {
+    if block["is_error"].as_bool() != Some(true) { return false; }
+    block_text(&block["content"]).to_lowercase().contains("requires approval")
+}
+
+fn block_text(content: &Value) -> String {
+    if let Some(text) = content.as_str() { return text.into(); }
+    content.as_array().map(|blocks| blocks.iter().filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_default()
 }
 
 impl CliAdapter for ClaudeAdapter {
@@ -56,6 +90,20 @@ impl CliAdapter for ClaudeAdapter {
         let Ok(v) = serde_json::from_str::<Value>(line) else { return vec![]; };
         if self.failed || self.completed { return vec![]; }
         match v["type"].as_str() {
+            // CLI 自己报告的权限拒绝；必须在正文里出现「受阻」之外单独识别，
+            // 否则 Claude 的拒绝只能走成员自述，拿不到自动提权。
+            Some("system") if v["subtype"] == "permission_denied" => {
+                if self.denial_sent { return vec![]; }
+                let id = v["tool_use_id"].as_str();
+                let (name, summary) = id
+                    .and_then(|id| self.active_tools.get(id).cloned())
+                    .unwrap_or_else(|| ("工具".into(), String::new()));
+                let tool = v["tool_name"].as_str().unwrap_or(&name).to_string();
+                let reason = v["decision_reason"].as_str().or_else(|| v["message"].as_str()).unwrap_or("命令需要批准");
+                let detail = if summary.is_empty() { format!("{tool}（{reason}）") } else { format!("{summary}（{reason}）") };
+                self.denial_sent = true;
+                vec![AgentEvent::ToolDenied { tool, detail }]
+            }
             Some("system") if v["subtype"] == "init" => {
                 if v["permissionMode"].as_str() != Some(self.permission()) {
                     return self.fail(format!("Claude 权限模式不符：期望 {}，收到 {}", self.permission(),
@@ -76,16 +124,28 @@ impl CliAdapter for ClaudeAdapter {
                             }
                             Some("tool_use") => {
                                 if let Some(id) = block["id"].as_str() {
-                                    if self.active_tools.insert(id.into()) {
-                                        events.push(AgentEvent::ToolUse { name: block["name"].as_str().unwrap_or("工具").into(), summary: "正在运行工具".into() });
+                                    let name = block["name"].as_str().unwrap_or("工具");
+                                    if !self.active_tools.contains_key(id) {
+                                        self.active_tools.insert(id.into(), (name.into(), tool_summary(name, block)));
+                                        events.push(AgentEvent::ToolUse { name: name.into(), summary: "正在运行工具".into() });
                                         events.push(AgentEvent::ToolState { active: true });
                                     }
                                 }
                             }
                             Some("tool_result") => {
                                 if let Some(id) = block["tool_use_id"].as_str() {
-                                    self.active_tools.remove(id);
+                                    let summary = self.active_tools.remove(id).map(|(_, summary)| summary);
                                     events.push(AgentEvent::ToolState { active: !self.active_tools.is_empty() });
+                                    // 旧版 CLI 没有 permission_denied 事件时，从工具结果兜底。
+                                    if !self.denial_sent && is_denied_result(block) {
+                                        let text = block_text(&block["content"]);
+                                        let detail = match summary {
+                                            Some(summary) if !summary.is_empty() => format!("{summary}（{text}）"),
+                                            _ => text,
+                                        };
+                                        self.denial_sent = true;
+                                        events.push(AgentEvent::ToolDenied { tool: "工具".into(), detail });
+                                    }
                                 }
                             }
                             _ => {}
@@ -111,7 +171,18 @@ impl CliAdapter for ClaudeAdapter {
                         cache_creation_input_tokens: u["cache_creation_input_tokens"].as_u64(), cost_usd, raw_usage: Some(u.clone()) }
                 });
                 self.completed = true;
-                vec![AgentEvent::TurnCompleted { final_text: v["result"].as_str().unwrap_or_default().into(), usage }]
+                let mut events = vec![];
+                // 只有旧版 CLI 或事件缺失时才走 result 兜底；正常路径已在 permission_denied 上报过。
+                if !self.denial_sent {
+                    if let Some(denied) = v["permission_denials"].as_array().and_then(|list| list.first()) {
+                        let name = denied["tool_name"].as_str().unwrap_or("工具");
+                        let summary = describe_tool(name, &denied["tool_input"]);
+                        self.denial_sent = true;
+                        events.push(AgentEvent::ToolDenied { tool: name.into(), detail: format!("{summary}（命令需要批准）") });
+                    }
+                }
+                events.push(AgentEvent::TurnCompleted { final_text: v["result"].as_str().unwrap_or_default().into(), usage });
+                events
             }
             Some("error") => self.fail(v["error"]["message"].as_str().or_else(|| v["message"].as_str()).unwrap_or("Claude 返回错误").into()),
             _ => vec![],
@@ -127,6 +198,43 @@ mod tests {
     fn feed(text: &str, mode: RunMode) -> Vec<AgentEvent> {
         let mut adapter = ClaudeAdapter::new("claude".into(), mode);
         text.lines().flat_map(|line| adapter.parse_line(line)).collect()
+    }
+
+    #[test]
+    fn permission_denial_is_reported_as_a_tool_denial_from_the_recorded_sample() {
+        let mut adapter = ClaudeAdapter::new("claude".into(), RunMode::Execute);
+        adapter.set_execution_permission(Some("acceptEdits"));
+        let events: Vec<_> = include_str!("../../tests/fixtures/claude/denied.jsonl").lines()
+            .flat_map(|line| adapter.parse_line(line)).collect();
+        let denials: Vec<_> = events.iter().filter_map(|event| match event {
+            AgentEvent::ToolDenied { tool, detail } => Some((tool.as_str(), detail.as_str())), _ => None,
+        }).collect();
+        assert_eq!(denials.len(), 1, "拒绝只报一次：{denials:?}");
+        assert_eq!(denials[0].0, "Bash");
+        assert!(denials[0].1.contains("npm --version"), "{}", denials[0].1);
+        assert!(denials[0].1.contains("requires approval"), "{}", denials[0].1);
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::TurnCompleted { .. })), "拒绝后正文照常收尾");
+        assert!(!events.iter().any(|event| matches!(event, AgentEvent::Error { .. })));
+    }
+
+    #[test]
+    fn result_permission_denials_is_a_fallback_when_no_event_arrives() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"done","permission_denials":[{"tool_name":"Bash","tool_input":{"command":"npm --version"}}]}"#;
+        let mut adapter = ClaudeAdapter::new("claude".into(), RunMode::Execute);
+        let events = adapter.parse_line(line);
+        let denial = events.iter().find_map(|event| match event {
+            AgentEvent::ToolDenied { detail, .. } => Some(detail.as_str()), _ => None,
+        }).expect("result 里的拒绝也要兜底");
+        assert!(denial.contains("npm --version") && denial.contains("命令需要批准"), "{denial}");
+        assert!(events.iter().any(|event| matches!(event, AgentEvent::TurnCompleted { .. })));
+    }
+
+    #[test]
+    fn ordinary_tool_failure_is_not_a_permission_denial() {
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"t1","type":"tool_result","content":"bash: command not found","is_error":true}]},"session_id":"s"}"#;
+        let mut adapter = ClaudeAdapter::new("claude".into(), RunMode::Execute);
+        let events = adapter.parse_line(line);
+        assert!(!events.iter().any(|event| matches!(event, AgentEvent::ToolDenied { .. })));
     }
 
     #[test]

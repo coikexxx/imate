@@ -305,6 +305,10 @@ pub fn authorize_blocked_task(conn: &Connection, task_id: &str) -> AppResult<Ins
     if running_count(conn, &instruction.id)? > 0 {
         return Err(invalid("仍有运行中的回合，请稍后再试"));
     }
+    let limit = i64::from(instruction_limits(&instruction)?.turns_per_instruction);
+    if instruction.turn_count >= limit {
+        return Err(invalid(format!("已达到 {limit} 回合上限，授权重跑也不会开始；请放弃后发送新指令")));
+    }
     let tx = conn.unchecked_transaction()?;
     let reason = latest_task_error(&tx, &task.id)?.unwrap_or_else(|| "权限不足".into());
     let reason = reason.strip_prefix("权限受阻：").unwrap_or(&reason).to_string();
@@ -501,10 +505,13 @@ fn dispatch(conn: &Connection, instruction: &Instruction) -> AppResult<Vec<TurnS
 }
 
 fn schedule_leader(conn: &Connection, instruction: &Instruction, stage: Stage) -> AppResult<Vec<TurnSpec>> {
-    if !reserve(conn, instruction, 1)? {
+    let leader = leader(conn, &instruction.project_id)?;
+    // 协议纠错有独立额度：不占总回合，也不因回合上限被挡；额度在标记纠错时已核算。
+    let correcting = previous_remedy(conn, &instruction.id, &leader.id, None)?
+        .is_some_and(|error| error.starts_with(PROTOCOL_REMEDY));
+    if !correcting && !reserve(conn, instruction, 1)? {
         return Ok(Vec::new());
     }
-    let leader = leader(conn, &instruction.project_id)?;
     let (prompt, bound) = compose_prompt(conn, instruction, &leader, stage, None, "")?;
     let run_id = insert_run(conn, &leader, "discuss", &instruction.id, None, bound, false)?;
     set_project_status(conn, &instruction.project_id, "discussing")?;
@@ -725,16 +732,21 @@ fn apply_leader(conn: &Connection, run: &RunRow, instruction: &Instruction, agen
 fn protocol_failed(conn: &Connection, run: &RunRow, instruction: &Instruction, agent: &Agent, outcome: &RunOutcome, reason: &str) -> AppResult<()> {
     let tx = conn.unchecked_transaction()?;
     let used = previous_remedy(&tx, &instruction.id, &agent.id, Some(&run.id))?.is_some();
+    let corrections = protocol_corrections_used(&tx, &instruction.id)?;
     // CLI 回合本身是成功的，组长已经在会话里看过这些消息，游标照常推进。
     remember_agent(&tx, run, agent, outcome)?;
-    if !used {
+    if !used && corrections < PROTOCOL_CORRECTIONS_PER_INSTRUCTION {
         finish_run_with(&tx, &run.id, outcome, "failed", &format!("{PROTOCOL_REMEDY}{reason}"))?;
         tx.commit()?;
         return Ok(());
     }
     finish_run_with(&tx, &run.id, outcome, "failed", &format!("协议错误：{reason}"))?;
     save_speech(&tx, instruction, agent, &run.id, &outcome.final_text)?;
-    let notice = format!("组长的回复在重发后仍然不符合指令协议：{reason}\n原文已作为普通发言保留。可以重试、补充说明或放弃。");
+    let notice = if used {
+        format!("组长的回复在重发后仍然不符合指令协议：{reason}\n原文已作为普通发言保留。可以重试、补充说明或放弃。")
+    } else {
+        format!("组长的回复不符合指令协议：{reason}\n本指令的协议纠错额度已用完（{PROTOCOL_CORRECTIONS_PER_INSTRUCTION} 次），原文已作为普通发言保留。可以重试、补充说明或放弃。")
+    };
     messages::insert(&tx, &instruction.project_id, "system", None, "system", &notice)?;
     mark_waiting(&tx, instruction, &format!("指令协议错误：{reason}"))?;
     tx.commit()?;
@@ -879,10 +891,17 @@ fn reserve(conn: &Connection, instruction: &Instruction, needed: i64) -> AppResu
     let limit = i64::from(instruction_limits(instruction)?.turns_per_instruction);
     if instruction.turn_count + needed > limit {
         let now = now_ms();
-        conn.execute(
-            "UPDATE instructions SET status = 'waiting_user', wait_reason = ?1, updated_at = ?2 WHERE id = ?3",
-            params![format!("单条指令已达到 {limit} 回合上限"), now, instruction.id],
+        let reason = format!("单条指令已达到 {limit} 回合上限");
+        // 只在运行态转为等待时写一次系统消息，避免调度边界重复刷屏。
+        let paused = conn.execute(
+            "UPDATE instructions SET status = 'waiting_user', wait_reason = ?1, updated_at = ?2 WHERE id = ?3 AND status = 'running'",
+            params![&reason, now, instruction.id],
         )?;
+        if paused > 0 {
+            messages::insert(conn, &instruction.project_id, "system", None, "system", &format!(
+                "{reason}，团队已暂停。已完成的任务与文件保留；检查后放弃本条指令并发送新指令即可继续，新指令会读取系统设置 → 运行设置里的当前上限。"
+            ))?;
+        }
         set_project_status(conn, &instruction.project_id, "waiting_user")?;
         return Ok(false);
     }
@@ -1131,6 +1150,17 @@ fn finish_run(conn: &Connection, run_id: &str, outcome: &RunOutcome, status: &st
 /// 自动补救过的 run 用这个前缀标在 error 里。额度是否用过从上一条 run 判断，不另存状态。
 const REMEDY_PREFIX: &str = "自动补救：";
 const PROTOCOL_REMEDY: &str = "自动补救：协议错误：";
+/// 每条指令的免费协议纠错次数。超出后不再重发，避免格式问题吃掉工作额度。
+const PROTOCOL_CORRECTIONS_PER_INSTRUCTION: i64 = 3;
+
+/// 这条指令已经用掉的免费纠错次数，直接数带标记的运行记录。
+fn protocol_corrections_used(conn: &Connection, instruction_id: &str) -> AppResult<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM runs WHERE instruction_id = ?1 AND error LIKE ?2",
+        params![instruction_id, format!("{PROTOCOL_REMEDY}%")],
+        |row| row.get(0),
+    )?)
+}
 
 /// 用指定的说明结束一个 run，其余字段取自回合结果。
 fn finish_run_with(conn: &Connection, run_id: &str, outcome: &RunOutcome, status: &str, error: &str) -> AppResult<()> {
@@ -1587,6 +1617,11 @@ fn retry_instruction(conn: &Connection, instruction: &Instruction) -> AppResult<
 }
 
 fn supplement_instruction(conn: &Connection, instruction: &Instruction, note: &str) -> AppResult<Instruction> {
+    // 额度用尽时补充也起不了新回合，直接说明，避免“提交后立刻回到等待用户”的循环。
+    let limit = i64::from(instruction_limits(instruction)?.turns_per_instruction);
+    if instruction.turn_count >= limit {
+        return Err(invalid(format!("已达到 {limit} 回合上限，补充也不会增加额度；请放弃后发送新指令")));
+    }
     let note = note.trim();
     if note.is_empty() {
         return Err(invalid("补充内容不能为空"));
@@ -1853,7 +1888,7 @@ mod tests {
         }
         let instruction = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
         assert_eq!(instruction.status, "waiting_user");
-        assert_eq!(instruction.turn_count, 2);
+        assert_eq!(instruction.turn_count, 1, "纠错不占额度，两次都是同一逻辑回合");
         assert!(instruction.wait_reason.unwrap().contains("replaces_task_id"));
         assert!(advance(&conn, &project_id).unwrap().is_empty());
         assert!(instructions::list_tasks(&conn, &instruction.id).unwrap().is_empty());
@@ -1918,20 +1953,18 @@ mod tests {
         assert_eq!(decide.len(), 1);
         assert_eq!(turn_count(&conn, &project_id), 3);
         assert!(decide[0].prompt.contains("讨论已达 1 轮"), "{}", decide[0].prompt);
-        // 冻结的 1 轮上限：再讨论是协议错误，而纠错回合又超过 3 回合上限。
+        // 冻结的 1 轮上限：再讨论是协议错误。协议纠错不占回合额度，冻结上限下照样发出。
         apply_outcome(&conn, &decide[0].run_id, &ok_text(&fence("再议。", r#"{"action":"discuss","to":["前端"],"topic":"登录校验"}"#))).unwrap();
         let run = crate::store::runs::get(&conn, &decide[0].run_id).unwrap();
         assert_eq!(run.status, "failed");
         assert!(run.error.as_deref().unwrap().contains("讨论已达 1 轮"), "{:?}", run.error);
-        assert!(advance(&conn, &project_id).unwrap().is_empty());
-        let waiting = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
-        assert_eq!(waiting.status, "waiting_user");
-        assert_eq!(waiting.turn_count, 3);
-        assert!(waiting.wait_reason.as_deref().unwrap().contains("3 回合上限"), "{:?}", waiting.wait_reason);
-        let error = resume_instruction(&conn, &waiting.id, "retry", None).unwrap_err().to_string();
-        assert!(error.contains("3 回合上限"), "{error}");
+        let correction = advance(&conn, &project_id).unwrap();
+        assert_eq!(correction.len(), 1, "纠错回合不受 3 回合上限阻挡");
+        assert_eq!(turn_count(&conn, &project_id), 3, "纠错不增加回合数");
+        assert!(correction[0].prompt.contains("# 协议纠错"));
+        apply_outcome(&conn, &correction[0].run_id, &ok_text(&fence("收尾。", r#"{"action":"reply","message":"先到这里"}"#))).unwrap();
+        assert!(instructions::active_instruction(&conn, &project_id).unwrap().is_none());
         // 放弃后新指令读取新设置。
-        resume_instruction(&conn, &waiting.id, "abandon", None).unwrap();
         begin_user_instruction(&conn, &project_id, "再来一次").unwrap();
         let fresh = advance(&conn, &project_id).unwrap();
         assert_eq!(fresh[0].limits, loose.limits);
@@ -2148,6 +2181,26 @@ mod tests {
     }
 
     #[test]
+    fn blocked_task_authorization_is_refused_when_the_turn_budget_is_spent() {
+        let (conn, project_id, _) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let exec = assign_one(&conn, &project_id);
+        apply_outcome(&conn, &exec.run_id, &denied_text("提交失败", "git commit：Permission denied")).unwrap();
+        let instruction = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        let task = instructions::list_tasks(&conn, &instruction.id).unwrap().remove(0);
+        assert_eq!(task.status, "blocked");
+
+        conn.execute("UPDATE instructions SET turn_count = 30 WHERE id = ?1", [&instruction.id]).unwrap();
+        let capped = authorize_blocked_task(&conn, &task.id).unwrap_err();
+        assert!(capped.to_string().contains("回合上限"), "{capped}");
+        assert_eq!(instructions::get_task(&conn, &task.id).unwrap().status, "blocked");
+
+        // 额度没用完时授权照常可用，守卫不能写死。
+        conn.execute("UPDATE instructions SET turn_count = 1 WHERE id = ?1", [&instruction.id]).unwrap();
+        authorize_blocked_task(&conn, &task.id).unwrap();
+    }
+
+    #[test]
     fn manual_authorization_does_not_cover_later_tasks() {
         let (conn, project_id, _) = setup(&["前端"]);
         start_team(&conn, &project_id);
@@ -2284,6 +2337,23 @@ mod tests {
         assert_eq!(waiting.status, "waiting_user");
         assert_eq!(waiting.turn_count, 30);
         assert_eq!(projects::get(&conn, &project_id).unwrap().status, "waiting_user");
+
+        let capped_notices = || -> Vec<String> {
+            messages::list(&conn, &project_id, None, 50).unwrap().into_iter()
+                .filter(|message| message.kind == "system" && message.content.contains("回合上限"))
+                .map(|message| message.content).collect()
+        };
+        let notices = capped_notices();
+        assert_eq!(notices.len(), 1, "到达上限只写一条系统消息：{notices:?}");
+        assert!(notices[0].contains("放弃本条指令并发送新指令"), "{}", notices[0]);
+        assert!(notices[0].contains("运行设置"), "{}", notices[0]);
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
+        assert_eq!(capped_notices().len(), 1, "重复调度不能重复写系统消息");
+
+        let supplement = resume_instruction(&conn, &waiting.id, "supplement", Some("再补一句")).unwrap_err();
+        assert!(supplement.to_string().contains("补充也不会增加额度"), "{supplement}");
+        assert!(instructions::list_inputs(&conn, &waiting.id).unwrap().is_empty(), "被拒的补充不能留在队列里");
+        assert_eq!(instructions::get(&conn, &waiting.id).unwrap().status, "waiting_user");
     }
 
     #[test]
@@ -2586,6 +2656,8 @@ mod tests {
         conn.execute("UPDATE instructions SET status = 'waiting_user', turn_count = 30 WHERE id = ?1", [&waiting.id]).unwrap();
         let capped = resume_instruction(&conn, &waiting.id, "retry", None).unwrap_err();
         assert!(capped.to_string().contains("30") || capped.to_string().contains("重试"));
+        let capped_supplement = resume_instruction(&conn, &waiting.id, "supplement", Some("继续")).unwrap_err();
+        assert!(capped_supplement.to_string().contains("回合上限"), "{capped_supplement}");
         assert_eq!(instructions::get(&conn, &waiting.id).unwrap().turn_count, 30);
         assert_eq!(instructions::get(&conn, &waiting.id).unwrap().status, "waiting_user");
 
@@ -2781,7 +2853,7 @@ mod tests {
 
         let retry = advance(&conn, &project_id).unwrap();
         assert_eq!(retry.len(), 1);
-        assert_eq!(turn_count(&conn, &project_id), 2, "纠错回合计入回合总数");
+        assert_eq!(turn_count(&conn, &project_id), 1, "协议纠错不占回合额度");
         assert!(retry[0].prompt.contains("# 协议纠错") && retry[0].prompt.contains(error.trim_start_matches("自动补救：协议错误：")));
         apply_outcome(&conn, &retry[0].run_id, &ok_text(&fence("补上了。", r#"{"action":"reply","message":"可以"}"#))).unwrap();
         assert!(instructions::active_instruction(&conn, &project_id).unwrap().is_none());
@@ -2792,6 +2864,36 @@ mod tests {
         assert!(!again[0].prompt.contains("# 协议纠错"));
         apply_outcome(&conn, &again[0].run_id, &ok_text("又忘了")).unwrap();
         assert_eq!(instructions::active_instruction(&conn, &project_id).unwrap().unwrap().status, "running");
+    }
+
+    #[test]
+    fn protocol_correction_budget_is_separate_and_capped_per_instruction() {
+        let (conn, project_id, agents) = setup(&["前端"]);
+        start_team(&conn, &project_id);
+        let instruction = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        // 占满 3 次纠错额度，再补一条成功运行，让下一次调度按普通回合处理。
+        for index in 0..PROTOCOL_CORRECTIONS_PER_INSTRUCTION {
+            conn.execute(
+                "INSERT INTO runs (id, agent_id, mode, command, started_at, ended_at, status, error, instruction_id) \
+                 VALUES (?1, ?2, 'discuss', '{}', 1, 2, 'failed', ?3, ?4)",
+                params![format!("remedy-{index}"), agents[0].id, format!("{PROTOCOL_REMEDY}额度"), instruction.id],
+            ).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO runs (id, agent_id, mode, command, started_at, ended_at, status, instruction_id) \
+             VALUES ('last-ok', ?1, 'discuss', '{}', 3, 4, 'ok', ?2)",
+            params![agents[0].id, instruction.id],
+        ).unwrap();
+        let run = advance(&conn, &project_id).unwrap().remove(0);
+        apply_outcome(&conn, &run.run_id, &ok_text("又忘了协议")).unwrap();
+        let waiting = instructions::active_instruction(&conn, &project_id).unwrap().unwrap();
+        assert_eq!(waiting.status, "waiting_user");
+        assert!(waiting.wait_reason.as_deref().unwrap().contains("协议错误"), "{:?}", waiting.wait_reason);
+        let stored = crate::store::runs::get(&conn, &run.run_id).unwrap();
+        assert!(stored.error.unwrap().starts_with("协议错误："), "额度用完后不再标记为可纠错");
+        assert!(messages::list(&conn, &project_id, None, 20).unwrap().iter()
+            .any(|message| message.content.contains("协议纠错额度已用完")));
+        assert!(advance(&conn, &project_id).unwrap().is_empty());
     }
 
     #[test]

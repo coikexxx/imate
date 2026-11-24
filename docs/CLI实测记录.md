@@ -45,6 +45,7 @@
 | 工具调用 | 同在 `assistant.message.content[]`，`type` 为 `tool_use`。读文件的 `name` 是 `Read`，`input.file_path`。写文件的 `name` 是 `Write`，还有 `input.content`。工具结果在下一条 `user.message.content[]`，`type` 为 `tool_result` | `{"type":"tool_use","name":"Read","input":{"file_path":"<HOME>\\AppData\\Local\\Temp\\imates-m0\\README.md"}}` |
 | 回合结束与最终文本 | `type: result`。成功时 `subtype` 为 `success` 且 `is_error` 为 false，最终文本在 `result` | `{"type":"result","subtype":"success","is_error":false,"result":"我是 Claude……","session_id":"7a83cd2c-cc9d-4f7f-aafb-06ad043be63b"}` |
 | 用量 | `result.usage` 的 `input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`。费用在 `result.total_cost_usd` | `{"input_tokens":4,"output_tokens":234,"cache_read_input_tokens":29991,"cache_creation_input_tokens":30228}` |
+| 权限拒绝 | 2.1.330 在工具被拒后发 `system`、`subtype` 为 `permission_denied`，带 `tool_name`、`tool_use_id`、`decision_reason`；同一拒绝也出现在 `user.message.content[]` 的 `tool_result`（`is_error: true`）和 `result.permission_denials[]` | `{"type":"system","subtype":"permission_denied","tool_name":"Bash","decision_reason":"This command requires approval","message":"This command requires approval","session_id":"7bf4b976…"}` |
 
 ### 行为
 
@@ -54,6 +55,7 @@
 - 续接是否生效：生效。`--resume` 续接 execute 的会话后，`session_id` 仍是 `cfba7141-e804-4a67-b6ea-50623844e7c4`，回答提到创建了内容为 hi 的 `hello.txt`。
 - 出错时的表现（退出码、stdout、stderr）：`--model no-such-model` 退出码 1。stderr 有一行 `[claude-code:unrecognized_model]`。stdout 仍有 JSON 事件，最后 `result` 的 `subtype` 仍是 `success`，但 `is_error` 为 true，`result` 文本说明模型不存在。`error.jsonl` 用 `2>&1` 合并，所以中间有 1 行纯文本。
 - stdout 是否每行都是合法 JSON：discuss、execute、resume 是。error 因为并进了 stderr，有 1 行纯文本。
+- 权限拒绝的识别（2026-11-21，2.1.330，`tests/fixtures/claude/denied.jsonl`）：`acceptEdits` 下要求执行 `npm --version`，CLI 依次输出 `tool_use` → `system/permission_denied` → `tool_result`（`is_error: true`，正文 `This command requires approval`），随后模型正常收尾，`result.is_error` 仍是 false。三个信号都在同一份样本里，适配器以 `permission_denied` 为主、`tool_result` 与 `permission_denials` 兜底，只上报一次。ESB-AI 项目此前只把这句写进成员正文，导致自动提权不生效。
 - 其他注意事项：`--permission-mode` 的可选值是 `acceptEdits`、`auto`、`bypassPermissions`、`manual`、`dontAsk`、`plan`。登录过期时进程退出码 1，`result.is_error` 为 true，`terminal_reason` 为 `api_error`。重新 `claude auth login` 之后，上述场景都跑通了。样本里的用户主目录已换成 `<HOME>`。`system/init` 的 `apiKeySource` 不是令牌本身。
 
 ## codex

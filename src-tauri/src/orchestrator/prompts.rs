@@ -129,7 +129,8 @@ fn stage_body(stage: Stage, snapshot: &TeamSnapshot<'_>) -> AppResult<String> {
     let body = match stage {
         Stage::Triage => format!(
             "# 组长研判\n当前目标：{}\n能直接答复就使用 reply，不要为了显得忙而发起讨论或派工。\n\
-派工时每个任务的 detail 要写清要做什么、交付什么、怎样算完成。\n\n{PROTOCOL}",
+派工时每个任务的 detail 要写清要做什么、交付什么、怎样算完成。\n\
+把活拆小：单个执行任务控制在十分钟左右，预计更久的拆成多个可独立验证的任务。\n\n{PROTOCOL}",
             snapshot.goal.trim()
         ),
         Stage::Discuss => format!(
@@ -145,6 +146,7 @@ fn stage_body(stage: Stage, snapshot: &TeamSnapshot<'_>) -> AppResult<String> {
             if remaining == 0 {
                 text.push_str(&format!("\n讨论已达 {} 轮，必须使用 assign 或 reply。", snapshot.discuss_round_limit));
             }
+            text.push_str("\n派工时把活拆小：单个执行任务控制在十分钟左右，预计更久的拆成多个可独立验证的任务。\n");
             text.push_str("\n\n");
             text.push_str(PROTOCOL);
             text
@@ -155,8 +157,9 @@ fn stage_body(stage: Stage, snapshot: &TeamSnapshot<'_>) -> AppResult<String> {
             };
             format!(
                 "# 成员执行\n任务编号：{}\n标题：{}\n详情：{}\n\
-如果某个操作被权限拦截且无法绕过，不要声称它已经完成；在汇报末尾单独一行写：\
-受阻：<操作>｜<原文摘要>。\n\
+开始前先做权限预检：用一条几秒钟的只读命令确认关键工具可用（例如 npm --version、psql --version、which docker），再开始耗时的改动。\n\
+如果某个操作被权限拦截且无法绕过，不要声称它已经完成，也不要反复重试或绕路；立即收尾，\
+在汇报末尾单独一行写：受阻：<操作>｜<原文摘要>。\n\
 完成后给出简短汇报：做了什么、改了哪些文件、还有什么遗留问题。\n\
 你只汇报自己的任务，不能宣布整条指令完成。",
                 task.id, task.title, task.detail.trim()
@@ -174,7 +177,8 @@ fn stage_body(stage: Stage, snapshot: &TeamSnapshot<'_>) -> AppResult<String> {
             };
             format!(
                 "# 组长验收\n对照项目规章和各成员的边界检查。{rework_rule}\n\
-状态 blocked 表示任务因权限受阻没有完成，不算完成；它需要用户授权后才能重跑。\n{}\n\n{PROTOCOL}",
+状态 blocked 表示任务因权限受阻没有完成，不算完成；它需要用户授权后才能重跑。\n\
+需要新派工时同样把活拆小：单个执行任务控制在十分钟左右。\n{}\n\n{PROTOCOL}",
                 format_tasks(snapshot.tasks)
             )
         }
@@ -322,6 +326,9 @@ mod tests {
         assert!(prompts[2].contains("task-7") && prompts[2].contains("已经写好校验"));
         assert!(prompts[4].contains("登录校验"));
         assert!(prompts[5].contains("不能宣布整条指令完成") && prompts[5].contains("写清校验规则"));
+        // 权限摩擦的两次预防：派工拆小、执行前预检。
+        assert!(prompts[0].contains("拆小") && prompts[1].contains("拆小") && prompts[2].contains("拆小"));
+        assert!(prompts[5].contains("权限预检") && prompts[5].contains("npm --version") && prompts[5].contains("不要反复重试"));
     }
 
     #[test]

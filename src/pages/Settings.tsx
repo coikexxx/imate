@@ -1,11 +1,12 @@
 import { useState } from "react";
+import { useSearchParams } from "react-router";
 import { AppManager } from "../components/AppManager";
 import { ProxySettingsPanel } from "../components/ProxySettings";
 import { RuntimeSettingsPanel } from "../components/RuntimeSettingsPanel";
 import { AppShell } from "../components/AppShell";
 import { Icon, type IconName } from "../components/Icon";
+import { settingsSectionFromParam, type SettingsSection as Section } from "../lib/settingsSection";
 
-type Section = "apps" | "runtime" | "proxy";
 const sections: { key: Section; label: string; icon: IconName; description: string }[] = [
   { key: "apps", label: "应用管理", icon: "grid", description: "连接本机 CLI，为你的团队准备合适的模型" },
   { key: "runtime", label: "运行设置", icon: "settings", description: "内置助理用哪个 CLI，以及讨论轮数、回合数和超时的护栏" },
@@ -13,13 +14,14 @@ const sections: { key: Section; label: string; icon: IconName; description: stri
 ];
 
 export default function Settings() {
-  const [section, setSection] = useState<Section>("apps");
+  const [params, setParams] = useSearchParams();
+  const section = settingsSectionFromParam(params.get("tab"));
   const [savedTick, setSavedTick] = useState(0);
   const saved = () => setSavedTick((n) => n + 1);
   return <AppShell><main className="studio-page">
     <header className="studio-page-head"><div><p className="studio-kicker"><Icon name="settings" />工作空间 / 设置</p><h1 className="studio-page-title">系统设置</h1><p className="studio-subtitle mt-2">让本地工具成为团队的一部分</p></div></header>
     <nav className="studio-setting-tabs" role="tablist" aria-label="设置分类">
-      {sections.map(({ key, label, icon }) => <button key={key} type="button" role="tab" aria-selected={section === key} id={`settings-tab-${key}`} aria-controls={`settings-panel-${key}`} onClick={() => { setSection(key); setSavedTick(0); }} className="studio-setting-tab"><Icon name={icon} />{label}</button>)}
+      {sections.map(({ key, label, icon }) => <button key={key} type="button" role="tab" aria-selected={section === key} id={`settings-tab-${key}`} aria-controls={`settings-panel-${key}`} onClick={() => { setParams({ tab: key }, { replace: true }); setSavedTick(0); }} className="studio-setting-tab"><Icon name={icon} />{label}</button>)}
     </nav>
     <section role="tabpanel" id={`settings-panel-${section}`} aria-labelledby={`settings-tab-${section}`} className="studio-settings-content">
       <div className="mb-6"><h2 className="text-lg font-medium">{sections.find((s) => s.key === section)?.label}</h2><p className="studio-subtitle mt-1">{sections.find((s) => s.key === section)?.description}</p></div>

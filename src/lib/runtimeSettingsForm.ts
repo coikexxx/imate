@@ -38,7 +38,7 @@ const FROZEN = "新指令开始时冻结，进行中的指令不受影响";
 export const LIMIT_FIELDS: LimitField[] = [
   { key: "discussRounds", label: "讨论轮数上限", unit: "回合", hint: `按整条指令累计，1 到 10；${FROZEN}`, min: 1, max: 10, integer: true },
   { key: "reworksPerTask", label: "单任务返工上限", unit: "次", hint: `0 表示组长不能打回任务，最多 10；${FROZEN}`, min: 0, max: 10, integer: true },
-  { key: "turnsPerInstruction", label: "单条指令回合总数上限", unit: "回合", hint: `组长、成员、纠错与重开都计入，1 到 300；${FROZEN}`, min: 1, max: 300, integer: true },
+  { key: "turnsPerInstruction", label: "单条指令回合总数上限", unit: "回合", hint: `组长、成员与会话重开都计入，前 3 次协议纠错不占额度，1 到 300；任务多的长指令可以上调；${FROZEN}`, min: 1, max: 300, integer: true },
   { key: "modelIdleMinutes", label: "模型空闲阈值", unit: "分钟", hint: `没有任何输出超过这个时长就停止；团队回合按新指令冻结，点名与起草按下一次启动生效`, min: 1 / 60, max: MAX_MINUTES, integer: false },
   { key: "discussToolMinutes", label: "讨论工具运行阈值", unit: "分钟", hint: `单个工具从开始到结束的上限；团队回合按新指令冻结，点名与起草按下一次启动生效`, min: 1 / 60, max: MAX_MINUTES, integer: false },
   { key: "executeToolMinutes", label: "执行工具运行阈值", unit: "分钟", hint: `单个工具从开始到结束的上限；团队回合按新指令冻结，点名与起草按下一次启动生效`, min: 1 / 60, max: MAX_MINUTES, integer: false },
