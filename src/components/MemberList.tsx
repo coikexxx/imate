@@ -16,7 +16,7 @@ interface Props {
 export function MemberList({ agents, clis, onAdd, onEdit, statuses = {}, onMention }: Props) {
   const labelOf = (cliId: string) => clis.find((c) => c.id === cliId)?.label ?? cliId;
   return <div className="studio-member-list">
-    <h2 className="px-4 py-3 text-xs font-medium text-slate-400">团队成员 <span className="ml-2 font-normal text-slate-500">点击编辑 · @ 点名</span></h2>
+    <p className="studio-member-hint">点击成员编辑 · 行尾 ＠ 点名</p>
     <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto px-3">
       {agents.map((agent) => {
         const status = statuses[agent.id] ?? "idle";

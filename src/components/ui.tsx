@@ -13,11 +13,16 @@ const BUTTON_STYLES = {
   danger: "border border-red-400/30 text-red-300 enabled:hover:bg-red-950/60",
 };
 
+/** 与 Button 同一套外观；链接跳转（如去设置页）复用，避免复制样式。 */
+export function buttonClass(variant: keyof typeof BUTTON_STYLES = "ghost", className = "") {
+  return `inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium leading-5 ${BUTTON_STYLES[variant]} ${className}`;
+}
+
 export function Button({ variant = "ghost", className = "", ...rest }: ButtonProps) {
   return (
     <button
       type="button"
-      className={`inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-lg px-3 py-1.5 text-sm font-medium leading-5 disabled:cursor-not-allowed disabled:opacity-40 ${BUTTON_STYLES[variant]} ${className}`}
+      className={`${buttonClass(variant, className)} disabled:cursor-not-allowed disabled:opacity-40`}
       {...rest}
     />
   );

@@ -1,5 +1,5 @@
 import { createStore } from "zustand/vanilla";
-import type { AgentStatus, Message, ProjectEventMap, ProjectRuntime, RunFinished } from "../types";
+import type { AgentStatus, Message, ProjectEventMap, ProjectRuntime, RunFinished, TaskItem } from "../types";
 
 export interface StreamText { projectId: string; runId: string; seq: number; text: string }
 export interface TextDelta { projectId: string; runId: string; seq: number; text: string }
@@ -22,7 +22,10 @@ interface ProjectState {
   changedFiles: string[];
   filesTick: number;
   rulesTick: number;
+  /** 当前指令的任务清单；轨迹面板与指令栏共用，由群聊在三次拉取后写入。 */
+  tasks: TaskItem[];
   setChangedFiles: (projectId: string, paths: string[]) => void;
+  setTasks: (projectId: string, tasks: TaskItem[]) => void;
   cleanupRequired: ProjectRuntime["cleanupRequired"];
   lastRun: LastRun | null;
   /** 接口调用失败的说明；回合终态不写这里。 */
@@ -56,10 +59,10 @@ export function createProjectStore() {
   return createStore<ProjectState>((set, get) => ({
     projectId: "", messages: [], streams: {}, agentStatuses: {}, activeRunId: null, liveRuns: [],
     cleanupRequired: [], lastRun: null, error: null, sending: false, hydrating: false, buffered: [],
-    changedFiles: [], filesTick: 0, rulesTick: 0,
+    changedFiles: [], filesTick: 0, rulesTick: 0, tasks: [],
     beginHydrate: (projectId) => set({ projectId, messages: [], streams: {}, agentStatuses: {}, activeRunId: null, liveRuns: [],
       cleanupRequired: [], lastRun: null, error: null, sending: false, hydrating: true, buffered: [],
-      changedFiles: [], filesTick: 0, rulesTick: 0 }),
+      changedFiles: [], filesTick: 0, rulesTick: 0, tasks: [] }),
     mergeHistory: (projectId, messages) => {
       if (projectId !== get().projectId) return;
       set((state) => ({ messages: upsert(messages, state.messages) }));
@@ -160,6 +163,7 @@ export function createProjectStore() {
     setError: (error) => set({ error }),
     setSending: (sending) => set({ sending }),
     setChangedFiles: (projectId, paths) => { if (projectId === get().projectId) set({ changedFiles: paths }); },
+    setTasks: (projectId, tasks) => { if (projectId === get().projectId) set({ tasks }); },
   }));
 }
 export const projectStore = createProjectStore();

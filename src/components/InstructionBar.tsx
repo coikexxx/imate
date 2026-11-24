@@ -1,6 +1,6 @@
-import type { Agent, Instruction, TaskItem } from "../types";
-import { Button, inputClass } from "./ui";
-import { instructionBarState, taskRowLabel } from "../lib/instructionActions";
+import type { Instruction, TaskItem } from "../types";
+import { Button, buttonClass, inputClass } from "./ui";
+import { instructionBarState } from "../lib/instructionActions";
 import { errorHint } from "../lib/errorHint";
 import { describeWaitReason } from "../lib/runErrors";
 
@@ -8,7 +8,6 @@ interface Props {
   projectStatus: string;
   instruction: Instruction | null;
   tasks: TaskItem[];
-  agents: Agent[];
   supplement: string;
   busy: boolean;
   cleanupRequired: boolean;
@@ -20,7 +19,7 @@ interface Props {
 }
 
 export function InstructionBar({
-  projectStatus, instruction, tasks, agents, supplement, busy, cleanupRequired,
+  projectStatus, instruction, tasks, supplement, busy, cleanupRequired,
   onSupplementChange, onRetry, onSupplement, onAbandon, onAuthorizeElevated,
 }: Props) {
   const actions = instructionBarState({
@@ -28,17 +27,25 @@ export function InstructionBar({
     instructionStatus: instruction?.status ?? null,
     supplement,
   });
-  if (!instruction && tasks.length === 0) return null;
   const blocked = tasks.filter((task) => task.status === "blocked");
   const canAuthorize = blocked.length > 0 && instruction?.status === "waiting_user";
   const wait = describeWaitReason(instruction?.waitReason);
+  // 任务清单已移到右栏「轨迹」；这里只在需要用户处理时出现，避免空白边条。
+  if (!canAuthorize && !actions.showActions) return null;
+  // 额度用尽时重试、补充、授权都跑不起来，只留说明和放弃，避免点了才报错。
+  if (wait?.kind === "turn_limit") return <div className="border-t border-slate-800 px-3 py-2">
+    <div className="space-y-2">
+      <div className="text-xs text-[#6b4a12]">
+        <p><strong>{wait.title}</strong><span className="ml-2 break-words">{wait.detail}</span></p>
+        <p className="mt-1 opacity-80">{wait.next}</p>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <a className={buttonClass("ghost", "hover:border-slate-500 hover:bg-slate-900")} href="#/settings?tab=runtime">调整上限</a>
+        <Button variant="danger" disabled={busy} onClick={onAbandon}>放弃</Button>
+      </div>
+    </div>
+  </div>;
   return <div className="border-t border-slate-800 px-3 py-2">
-    {tasks.length > 0 && <ul aria-label="任务列表" className="mb-2 space-y-1 text-xs text-slate-300">
-      {tasks.map((task) => {
-        const row = taskRowLabel(task, agents);
-        return <li key={task.id} className={task.status === "blocked" ? "text-[#6b4a12]" : ""}>{row.title} · {row.member} · {row.status}</li>;
-      })}
-    </ul>}
     {canAuthorize && <div className="mb-2 space-y-2 rounded-xl border border-[#d8b878] bg-[#fbf3df] p-3 text-xs text-[#6b4a12]">
       {blocked.map((task) => <div key={task.id}>
         <p>任务「{task.title}」因权限受阻，未完成。授权只对这一次重试有效，用完恢复原档位。</p>

@@ -17,11 +17,23 @@ const TASK_STATUS_LABELS: Record<string, string> = {
   blocked: "受阻：权限不足",
 };
 
+/** 状态文案唯一来源；轨迹面板与指令栏共用。未知状态原样显示。 */
+export function taskStatusLabel(status: string): string {
+  return TASK_STATUS_LABELS[status] ?? status;
+}
+
+const TASK_STATUS_SHORT: Record<string, string> = { blocked: "受阻" };
+
+/** 概览计数等窄处用的短文案；没有单独的短文案时与完整文案一致。 */
+export function taskStatusShortLabel(status: string): string {
+  return TASK_STATUS_SHORT[status] ?? taskStatusLabel(status);
+}
+
 /** 任务行只展示标题、成员名和状态。找不到成员时不留空。 */
 export function taskRowLabel(
   task: { title: string; assigneeAgentId: string | null; status: string },
   agents: { id: string; name: string }[],
 ): { title: string; member: string; status: string } {
   const member = agents.find((agent) => agent.id === task.assigneeAgentId)?.name ?? "未指定";
-  return { title: task.title, member, status: TASK_STATUS_LABELS[task.status] ?? task.status };
+  return { title: task.title, member, status: taskStatusLabel(task.status) };
 }

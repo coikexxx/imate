@@ -20,7 +20,10 @@ vi.mock("react", async (importOriginal) => ({
     return [hooks.values.has(index) ? hooks.values.get(index) : initial, vi.fn()];
   },
 }));
-vi.mock("zustand", () => ({ useStore: (store: { getState: () => unknown }) => store.getState() }));
+vi.mock("zustand", () => ({
+  useStore: (store: { getState: () => unknown }, selector?: (state: unknown) => unknown) =>
+    selector ? selector(store.getState()) : store.getState(),
+}));
 vi.mock("../api", () => ({ api: {
   saveProjectElevation: vi.fn(), sendMessage: vi.fn(), getProject: vi.fn(),
   listInstructions: vi.fn(), listTasks: vi.fn(), listMessages: vi.fn(), stopProject: vi.fn(),
@@ -59,7 +62,7 @@ function find(root: ReactNode, predicate: (element: Element) => boolean): Elemen
 function render(options: { content?: string; ready?: boolean; folderExists?: boolean; stopping?: boolean; acting?: boolean; kind?: string } = {}) {
   hooks.index = 0;
   hooks.values = new Map<number, unknown>([[0, options.content ?? "补充要求"], [4, options.ready ?? true],
-    [3, options.stopping ?? false], [9, options.acting ?? false], [6, { ...instruction, kind: options.kind ?? "team" }]]);
+    [3, options.stopping ?? false], [8, options.acting ?? false], [6, { ...instruction, kind: options.kind ?? "team" }]]);
   const tree = ChatPanel({ projectId: "project", agents: [agent], folderExists: options.folderExists ?? true });
   return {
     send: find(tree, (element) => element.type === Button && element.props.variant === "primary"),
@@ -151,7 +154,9 @@ describe("进程清理待确认时的指令恢复", () => {
   function recoveryBar(tasks: TaskItem[]) {
     hooks.index = 0;
     hooks.values = new Map<number, unknown>([[4, true], [5, "waiting_user"],
-      [6, { ...instruction, status: "waiting_user" }], [7, tasks], [8, "补充要求"]]);
+      [6, { ...instruction, status: "waiting_user" }], [7, "补充要求"]]);
+    // 任务清单已移到 store，右栏轨迹与指令栏读同一份。
+    projectStore.setState({ tasks });
     const tree = ChatPanel({ projectId: "project", agents: [agent], folderExists: true });
     const bar = find(tree, (element) => element.type === InstructionBar);
     return InstructionBar(bar.props as unknown as Parameters<typeof InstructionBar>[0]);
@@ -176,6 +181,39 @@ describe("进程清理待确认时的指令恢复", () => {
     const button = find(recoveryBar([]), (element) => element.type === Button && element.props.children === "放弃");
     expect(button.props.disabled).toBe(false);
     void click(button);
+    expect(api.resumeInstruction).toHaveBeenCalledExactlyOnceWith(instruction.id, "abandon", null);
+  });
+});
+
+describe("回合额度用尽时的操作", () => {
+  const blockedTask: TaskItem = {
+    id: "task", projectId: "project", instructionMessageId: 1, assigneeAgentId: agent.id,
+    title: "待重试任务", detail: "写入文件", orderIndex: 0, status: "blocked", reworkCount: 0,
+    reportMessageId: null, createdAt: 1, finishedAt: 2, instructionId: instruction.id,
+    batchId: "batch", supersededByTaskId: null,
+  };
+
+  function cappedBar() {
+    hooks.index = 0;
+    hooks.values = new Map<number, unknown>([[4, true], [5, "waiting_user"],
+      [6, { ...instruction, status: "waiting_user", waitReason: "单条指令已达到 30 回合上限" }]]);
+    projectStore.setState({ tasks: [blockedTask], cleanupRequired: [], activeRunId: null });
+    const tree = ChatPanel({ projectId: "project", agents: [agent], folderExists: true });
+    const bar = find(tree, (element) => element.type === InstructionBar);
+    return InstructionBar(bar.props as unknown as Parameters<typeof InstructionBar>[0]);
+  }
+
+  it("只保留说明和放弃，不显示重试、补充与授权", () => {
+    const view = cappedBar();
+    for (const label of ["重试", "补充", "授权并继续"]) {
+      expect(() => find(view, (element) => element.type === Button && element.props.children === label), label).toThrow();
+    }
+    expect(() => find(view, (element) => element.props["aria-label"] === "补充内容")).toThrow();
+    const settings = find(view, (element) => element.props.children === "调整上限");
+    expect(settings.props.href).toBe("#/settings?tab=runtime");
+    const abandon = find(view, (element) => element.type === Button && element.props.children === "放弃");
+    expect(abandon.props.disabled).toBe(false);
+    void click(abandon);
     expect(api.resumeInstruction).toHaveBeenCalledExactlyOnceWith(instruction.id, "abandon", null);
   });
 });

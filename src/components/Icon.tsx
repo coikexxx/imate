@@ -15,6 +15,7 @@ const paths = {
   info: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18 M12 11v5 M12 8h.01",
   grid: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
   usage: "M4 20h16 M7 16V10 M12 16V5 M17 16v-3",
+  trajectory: "M7.5 6a1.5 1.5 0 1 0-3 0 1.5 1.5 0 0 0 3 0 M7.5 12a1.5 1.5 0 1 0-3 0 1.5 1.5 0 0 0 3 0 M7.5 18a1.5 1.5 0 1 0-3 0 1.5 1.5 0 0 0 3 0 M6 7.5v3 M6 13.5v3 M10 6h7 M10 12h5 M10 18h8",
 } as const;
 
 export type IconName = keyof typeof paths;

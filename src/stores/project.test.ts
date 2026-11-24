@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
+import type { TaskItem } from "../types";
 import { applyDelta, createProjectStore } from "./project";
+
+const taskItem = (id: string): TaskItem => ({
+  id, projectId: "甲", instructionMessageId: null, assigneeAgentId: null, title: id, detail: "",
+  orderIndex: 0, status: "pending", reworkCount: 0, reportMessageId: null, createdAt: 0,
+  finishedAt: null, instructionId: null, batchId: null, supersededByTaskId: null,
+});
 
 const message = (id: number, content: string, senderType = "assistant") => ({
   id, projectId: "甲", senderType, senderAgentId: null, kind: "chat", content, round: null, createdAt: id, modelInfo: null,
@@ -145,6 +152,17 @@ describe("运行输出归并", () => {
     expect(store.getState().filesTick).toBe(2);
     state.setChangedFiles("乙", ["不该写入"]);
     expect(store.getState().changedFiles).toEqual([]);
+  });
+  it("任务清单按项目隔离，重新加载时清空", () => {
+    const store = createProjectStore(); const state = store.getState();
+    state.beginHydrate("甲");
+    state.hydrate("甲", [], { active: null, cleanupRequired: [] });
+    state.setTasks("乙", [taskItem("别的项目")]);
+    expect(store.getState().tasks).toEqual([]);
+    state.setTasks("甲", [taskItem("t1")]);
+    expect(store.getState().tasks.map((task) => task.id)).toEqual(["t1"]);
+    state.beginHydrate("乙");
+    expect(store.getState().tasks).toEqual([]);
   });
   it("规章变化只推动规章面板刷新，不影响运行状态", () => {
     const store = createProjectStore(); const state = store.getState();

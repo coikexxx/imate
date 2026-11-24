@@ -13,6 +13,8 @@ import { InstructionBar } from "./InstructionBar";
 import { Button, inputClass } from "./ui";
 import { Switch } from "./Switch";
 
+const EMPTY_TASKS: TaskItem[] = [];
+
 /** 悬停或键盘聚焦时在上方弹出的说明气泡。 */
 function Tips({ label, children }: { label: string; children: ReactNode }) {
   const id = useId();
@@ -39,7 +41,6 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
   const [ready, setReady] = useState(false);
   const [projectStatus, setProjectStatus] = useState<ProjectStatus>("idle");
   const [instruction, setInstruction] = useState<Instruction | null>(null);
-  const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [supplement, setSupplement] = useState("");
   const [acting, setActing] = useState(false);
   const [allowElevated, setAllowElevated] = useState(false);
@@ -63,7 +64,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
           if (disposed || projectStore.getState().projectId !== projectId) return;
           setProjectStatus(detail.project.status);
           setInstruction(current);
-          setTasks(taskPage);
+          projectStore.getState().setTasks(projectId, taskPage);
         }).catch((error) => { if (!disposed) projectStore.getState().setError(String(error)); });
       }
     });
@@ -79,7 +80,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
       projectStore.getState().hydrate(projectId, history, runtime); setHasMore(history.length === 50);
       setProjectStatus(detail.project.status);
       setInstruction(current);
-      setTasks(taskPage);
+      projectStore.getState().setTasks(projectId, taskPage);
       setAllowElevated(elevation);
       setReady(true);
     }).catch((error) => { if (!disposed) { projectStore.getState().setError(String(error)); setReady(false); } });
@@ -90,6 +91,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
   }, [mention, onMentionUsed]);
   useEffect(() => { tail.current?.scrollIntoView({ block: "nearest" }); }, [state.messages, state.streams, projectId]);
   const projectMatches = state.projectId === projectId;
+  const tasks = useStore(projectStore, (current) => current.projectId === projectId ? current.tasks : EMPTY_TASKS);
   const visibleMessages = projectMatches ? state.messages : [];
   const visibleStreams = projectMatches ? Object.values(state.streams) : [];
   const visibleCleanup = projectMatches ? state.cleanupRequired : [];
@@ -150,7 +152,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
     if (projectStore.getState().projectId !== projectId) return;
     setProjectStatus(detail.project.status);
     setInstruction(current);
-    setTasks(taskPage);
+    projectStore.getState().setTasks(projectId, taskPage);
     const history = await api.listMessages(projectId);
     if (projectStore.getState().projectId === projectId) projectStore.getState().mergeHistory(projectId, history);
   }
@@ -238,7 +240,7 @@ export function ChatPanel({ projectId, agents, folderExists, mention, onMentionU
     </div>}
     {projectMatches && state.error && <p role="alert" className="px-3 py-2 text-xs text-red-300">{state.error}</p>}
     {projectMatches && hint && <p className="mx-3 mb-2 rounded-lg border border-[#d8b878] bg-[#fbf3df] px-3 py-2 text-xs leading-5 text-[#6b4a12]">提示：{hint}</p>}
-    {projectMatches && <InstructionBar projectStatus={projectStatus} instruction={instruction} tasks={tasks} agents={agents}
+    {projectMatches && <InstructionBar projectStatus={projectStatus} instruction={instruction} tasks={tasks}
       supplement={supplement} busy={acting || busy} cleanupRequired={visibleCleanup.length > 0} onSupplementChange={setSupplement}
       onRetry={() => void resume("retry")} onSupplement={() => void resume("supplement", supplement)} onAbandon={() => void resume("abandon")}
       onAuthorizeElevated={(taskId) => void authorizeElevated(taskId)} />}

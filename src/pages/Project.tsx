@@ -9,6 +9,7 @@ import { projectStore } from "../stores/project";
 import { api } from "../api";
 import { AgentForm } from "../components/AgentForm";
 import { MemberList } from "../components/MemberList";
+import { TrajectoryPanel } from "../components/TrajectoryPanel";
 import { RulesPanel } from "../components/RulesPanel";
 import { FileTree } from "../components/FileTree";
 import { ProjectUsagePanel } from "../components/ProjectUsagePanel";
@@ -24,10 +25,12 @@ import {
   type PersonaTemplate,
   type ProjectDetail,
   type RuleDoc,
+  type TaskItem,
 } from "../types";
 
 const EMPTY_AGENT_STATUSES: Record<string, import("../types").AgentStatus> = {};
 const EMPTY_FILES: string[] = [];
+const EMPTY_TASKS: TaskItem[] = [];
 const TAB_LABELS = { chat: "团队讨论", files: "项目文件", rules: "规章制度", usage: "用量" } as const;
 
 type Editing = { kind: "new" } | { kind: "edit"; agent: Agent } | null;
@@ -41,6 +44,7 @@ export default function Project() {
   const [projectRules, setProjectRules] = useState<RuleDoc[]>([]);
   const [editing, setEditing] = useState<Editing>(null);
   const [tab, setTab] = useState<"chat" | "files" | "rules" | "usage">("chat");
+  const [teamTab, setTeamTab] = useState<"trajectory" | "members">("trajectory");
   const [usageTick, setUsageTick] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [mention, setMention] = useState<string | undefined>();
@@ -49,6 +53,7 @@ export default function Project() {
   const changedFiles = useStore(projectStore, (state) => state.projectId === id ? state.changedFiles : EMPTY_FILES);
   const filesTick = useStore(projectStore, (state) => state.projectId === id ? state.filesTick : 0);
   const rulesTick = useStore(projectStore, (state) => state.projectId === id ? state.rulesTick : 0);
+  const tasks = useStore(projectStore, (state) => state.projectId === id ? state.tasks : EMPTY_TASKS);
   const consumeMention = useCallback(() => setMention(undefined), []);
 
   const reload = useCallback(async () => {
@@ -180,7 +185,19 @@ export default function Project() {
         <aside className="studio-team-panel">
           <div className="studio-team-title"><span className="flex items-center gap-2"><Icon name="team" />团队现场</span><span className="font-mono text-[11px]">{agents.length} / 8</span></div>
           <div className="studio-office"><OfficeCanvas agents={agents} statuses={agentStatuses} /></div>
-          <MemberList agents={agents} clis={clis} statuses={agentStatuses} onMention={(agent) => { setTab("chat"); setMention(agent.name); }} onAdd={() => void openAgentForm({ kind: "new" })} onEdit={(agent) => void openAgentForm({ kind: "edit", agent })} />
+          <div className="studio-team-tabs" role="tablist" aria-label="团队现场视图">
+            {(["trajectory", "members"] as const).map((key) => <button key={key} type="button" role="tab" id={`team-tab-${key}`}
+              aria-selected={teamTab === key} aria-controls="team-panel" onClick={() => setTeamTab(key)}>
+              <Icon name={key === "trajectory" ? "trajectory" : "team"} width="14" height="14" />
+              {key === "trajectory" ? "轨迹" : "团队成员"}
+              {key === "trajectory" && tasks.length > 0 && <span className="font-mono text-xs text-slate-500">{tasks.length}</span>}
+            </button>)}
+          </div>
+          <div id="team-panel" role="tabpanel" aria-labelledby={`team-tab-${teamTab}`} className="studio-team-body">
+            {teamTab === "trajectory"
+              ? <TrajectoryPanel tasks={tasks} agents={agents} />
+              : <MemberList agents={agents} clis={clis} statuses={agentStatuses} onMention={(agent) => { setTab("chat"); setMention(agent.name); }} onAdd={() => void openAgentForm({ kind: "new" })} onEdit={(agent) => void openAgentForm({ kind: "edit", agent })} />}
+          </div>
         </aside>
       </div>
 
