@@ -1,0 +1,81 @@
+{
+  "cols": 32,
+  "rows": 32,
+  "cellSize": 16,
+  "regions": [
+    { "id": "command", "name": "主控门厅", "col": 1, "row": 1, "cols": 11, "rows": 14, "color": "#3d7a5a" },
+    { "id": "pods", "name": "协作工位", "col": 1, "row": 16, "cols": 18, "rows": 15, "color": "#c48a47" },
+    { "id": "hub", "name": "研讨圆桌", "col": 13, "row": 1, "cols": 10, "rows": 14, "color": "#4f7fa0" },
+    { "id": "cafe", "name": "咖啡图书角", "col": 24, "row": 1, "cols": 7, "rows": 14, "color": "#b86b52" },
+    { "id": "terrace", "name": "露台花园", "col": 20, "row": 16, "cols": 11, "rows": 15, "color": "#6b9960" }
+  ],
+  "doorways": [
+    { "col": 11, "row": 6 }, { "col": 11, "row": 7 }, { "col": 11, "row": 8 }, { "col": 11, "row": 9 },
+    { "col": 5, "row": 14 }, { "col": 6, "row": 14 }, { "col": 7, "row": 14 }, { "col": 8, "row": 14 },
+    { "col": 13, "row": 6 }, { "col": 13, "row": 7 }, { "col": 13, "row": 8 }, { "col": 13, "row": 9 },
+    { "col": 22, "row": 7 }, { "col": 22, "row": 8 }, { "col": 22, "row": 9 },
+    { "col": 16, "row": 14 }, { "col": 17, "row": 14 }, { "col": 18, "row": 14 }, { "col": 19, "row": 14 },
+    { "col": 24, "row": 7 }, { "col": 24, "row": 8 }, { "col": 24, "row": 9 },
+    { "col": 26, "row": 14 }, { "col": 27, "row": 14 }, { "col": 28, "row": 14 },
+    { "col": 6, "row": 16 }, { "col": 7, "row": 16 }, { "col": 8, "row": 16 },
+    { "col": 14, "row": 16 }, { "col": 15, "row": 16 }, { "col": 16, "row": 16 },
+    { "col": 18, "row": 22 }, { "col": 18, "row": 23 }, { "col": 18, "row": 24 },
+    { "col": 24, "row": 16 }, { "col": 25, "row": 16 }, { "col": 26, "row": 16 },
+    { "col": 20, "row": 22 }, { "col": 20, "row": 23 }, { "col": 20, "row": 24 }
+  ],
+  "workSeats": [
+    { "col": 5, "row": 7, "facing": "up" },
+    { "col": 5, "row": 18, "facing": "down" },
+    { "col": 6, "row": 21, "facing": "up" },
+    { "col": 12, "row": 18, "facing": "down" },
+    { "col": 13, "row": 21, "facing": "up" },
+    { "col": 6, "row": 24, "facing": "down" },
+    { "col": 9, "row": 27, "facing": "up" },
+    { "col": 11, "row": 24, "facing": "down" }
+  ],
+  "meetingSeats": [
+    { "col": 17, "row": 5, "facing": "down" },
+    { "col": 18, "row": 5, "facing": "down" },
+    { "col": 20, "row": 7, "facing": "left" },
+    { "col": 20, "row": 8, "facing": "left" },
+    { "col": 18, "row": 10, "facing": "up" },
+    { "col": 17, "row": 10, "facing": "up" },
+    { "col": 15, "row": 8, "facing": "right" },
+    { "col": 15, "row": 7, "facing": "right" }
+  ],
+  "restSeats": [
+    { "col": 26, "row": 5, "facing": "up" },
+    { "col": 28, "row": 5, "facing": "up" },
+    { "col": 28, "row": 8, "facing": "right" },
+    { "col": 26, "row": 12, "facing": "up" },
+    { "col": 23, "row": 20, "facing": "right" },
+    { "col": 26, "row": 21, "facing": "left" },
+    { "col": 27, "row": 27, "facing": "up" },
+    { "col": 23, "row": 26, "facing": "down" }
+  ],
+  "furniture": [
+    { "kind": "kanbanBoard", "col": 2, "row": 2, "cols": 3, "rows": 1 },
+    { "kind": "leaderDesk", "col": 4, "row": 5, "cols": 4, "rows": 2 },
+    { "kind": "plant", "col": 9, "row": 2, "cols": 1, "rows": 1 },
+    { "kind": "galleryBench", "col": 2, "row": 11, "cols": 3, "rows": 1 },
+    { "kind": "deskIsland", "col": 4, "row": 19, "cols": 4, "rows": 2 },
+    { "kind": "deskIsland", "col": 11, "row": 19, "cols": 4, "rows": 2 },
+    { "kind": "deskIsland", "col": 5, "row": 25, "cols": 8, "rows": 2 },
+    { "kind": "serverRack", "col": 2, "row": 27, "cols": 1, "rows": 2 },
+    { "kind": "plant", "col": 2, "row": 17, "cols": 1, "rows": 1 },
+    { "kind": "plant", "col": 16, "row": 28, "cols": 1, "rows": 1 },
+    { "kind": "wallScreen", "col": 16, "row": 2, "cols": 4, "rows": 1 },
+    { "kind": "plant", "col": 14, "row": 2, "cols": 1, "rows": 1 },
+    { "kind": "roundTable", "col": 16, "row": 6, "cols": 4, "rows": 4 },
+    { "kind": "espressoBar", "col": 26, "row": 3, "cols": 3, "rows": 2 },
+    { "kind": "libraryShelf", "col": 29, "row": 6, "cols": 1, "rows": 4 },
+    { "kind": "sofa", "col": 25, "row": 11, "cols": 3, "rows": 1 },
+    { "kind": "plant", "col": 29, "row": 13, "cols": 1, "rows": 1 },
+    { "kind": "planterBox", "col": 21, "row": 17, "cols": 1, "rows": 2 },
+    { "kind": "planterBox", "col": 29, "row": 17, "cols": 1, "rows": 2 },
+    { "kind": "bistroTable", "col": 24, "row": 20, "cols": 2, "rows": 2 },
+    { "kind": "gardenBench", "col": 26, "row": 26, "cols": 3, "rows": 1 },
+    { "kind": "planterBox", "col": 21, "row": 28, "cols": 2, "rows": 1 },
+    { "kind": "plant", "col": 29, "row": 28, "cols": 1, "rows": 1 }
+  ]
+}

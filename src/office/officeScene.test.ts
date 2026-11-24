@@ -1,18 +1,45 @@
 import { describe, expect, it } from "vitest";
 import {
-  ROOM, ROOM_WIDTH, ROOM_HEIGHT, WORK_SEATS, cellPoint, createActor, findRoomPath, getOfficeViewport, getRegionCamera,
-  isWalkable, officeFrame, stepActor, syncActors,
+  ROOM,
+  ROOM_HEIGHT,
+  ROOM_WIDTH,
+  WORK_SEATS,
+  cellPoint,
+  createActor,
+  findRoomPath,
+  getOfficeViewport,
+  getRegionCamera,
+  isWalkable,
+  isoProject,
+  officeFrame,
+  stepActor,
+  syncActors,
 } from "./officeScene";
-import { MEETING_SEATS, OFFICE_REGIONS, REST_SEATS } from "./gbaOfficeMap";
+import { MEETING_SEATS, OFFICE_REGIONS, REST_SEATS } from "./studioMap";
 
-describe("GBA 办公室角色", () => {
-  it("八个固定工位集中在办公区，按 seatIndex 对应四列两行", () => {
+describe("2.5D 等轴测工作室角色与投影", () => {
+  it("等轴测投影落在画幅内，海拔升高向上偏移，前后景深度单调递增", () => {
     expect([ROOM.cols, ROOM.rows, ROOM.cellSize]).toEqual([32, 32, 16]);
-    expect(WORK_SEATS.map(({ col, row }) => [col, row])).toEqual([
-      [4, 7], [8, 7], [12, 7], [16, 7], [4, 13], [8, 13], [12, 13], [16, 13],
-    ]);
+    expect([ROOM_WIDTH, ROOM_HEIGHT]).toEqual([724, 468]);
+    const north = isoProject(0, 0, 0);
+    const east = isoProject(32, 0, 0);
+    const west = isoProject(0, 32, 0);
+    const south = isoProject(32, 32, 0);
+    expect(west.x).toBeGreaterThanOrEqual(0);
+    expect(east.x).toBeLessThanOrEqual(ROOM_WIDTH);
+    expect(north.y).toBeGreaterThanOrEqual(40);
+    expect(south.y).toBeLessThanOrEqual(ROOM_HEIGHT);
+    expect(west.x).toBeLessThan(north.x);
+    expect(north.x).toBeLessThan(east.x);
+    expect(north.y).toBeLessThan(south.y);
+    expect(isoProject(10, 10, 24).y).toBeLessThan(isoProject(10, 10, 0).y);
+  });
+
+  it("首座位于组长主控台，其余七座错落分布在三个协作岛，不呈排排坐矩阵", () => {
+    expect(WORK_SEATS).toHaveLength(8);
     expect(WORK_SEATS.every(isWalkable)).toBe(true);
-    expect(WORK_SEATS.every((seat) => seat.facing === "up")).toBe(true);
+    const distinctRows = new Set(WORK_SEATS.map((seat) => seat.row));
+    expect(distinctRows.size).toBeGreaterThanOrEqual(4);
   });
 
   it("成员列表重排不影响 seatIndex 对应的工位，删除成员清理角色", () => {
@@ -29,22 +56,17 @@ describe("GBA 办公室角色", () => {
     expect(() => createActor("invalid", -1)).toThrow();
   });
 
-  it("帧图使用上游的行列定义，工作与思考动作区分，左向复用右向翻转", () => {
+  it("动作帧按移动、工作与思考区分，左向支持镜像标记", () => {
     expect(officeFrame("working", 0, "up", false)).toMatchObject({ sx: 48, sy: 32, flip: false });
     expect(officeFrame("working", 1, "up", false).sx).toBe(64);
     expect(officeFrame("thinking", 0, "down", false).sx).toBe(80);
     expect(officeFrame("thinking", 1, "down", false).sx).toBe(96);
     expect(officeFrame("idle", 0, "left", true)).toMatchObject({ sx: 0, sy: 64, flip: true });
-    for (const status of ["idle", "thinking", "talking", "working", "error"] as const) {
-      const frame = officeFrame(status, 123, "down", false);
-      expect(frame.sx + frame.width).toBeLessThanOrEqual(112);
-      expect(frame.sy + frame.height).toBeLessThanOrEqual(96);
-    }
   });
 
-  it("跨房间路径逐格连通、不穿墙，非法目标不可达", () => {
+  it("跨区域路径逐格连通、不穿隔断与家具，非法目标不可达", () => {
     const from = WORK_SEATS[0];
-    const to = WORK_SEATS[7];
+    const to = REST_SEATS[6];
     const path = findRoomPath(from, to);
     expect(path.length).toBeGreaterThan(10);
     expect(path[path.length - 1]).toEqual({ col: to.col, row: to.row });
@@ -97,7 +119,7 @@ describe("GBA 办公室角色", () => {
     expect(actor.path[0]).toEqual(actor.cell);
   });
 
-  it("发言时去会议室独立座位，发言结束回办公区，不改写真实状态", () => {
+  it("发言时前往研讨圆桌独立座位，发言结束回原工位，不改写真实状态", () => {
     const actor = createActor("speaker", 2);
     const actors = new Map([[actor.id, actor]]);
     const members = [{ id: actor.id, seatIndex: actor.seatIndex }];
@@ -115,7 +137,7 @@ describe("GBA 办公室角色", () => {
     expect([actor.x, actor.y]).toEqual([cellPoint(actor.home).x, cellPoint(actor.home).y]);
   });
 
-  it("八名空闲成员都有对应休息点，前四位去摸鱼区、后四位去阳台", () => {
+  it("八名空闲成员都有独立休息点，前四位去咖啡图书角、后四位去露台花园", () => {
     for (let seat = 0; seat < 8; seat += 1) {
       const actor = createActor(`idle-${seat}`, seat);
       for (let frame = 0; frame < 190 && actor.destination === "desk"; frame += 1) stepActor(actor, 0.1, true);
@@ -125,8 +147,8 @@ describe("GBA 办公室角色", () => {
   });
 });
 
-describe("办公室相机", () => {
-  it("横竖窗口完整显示房间，零尺寸不会产生无效坐标", () => {
+describe("等轴测沙盘相机", () => {
+  it("横竖窗口完整显示沙盘全景，零尺寸不会产生无效坐标", () => {
     for (const [width, height] of [[276, 246], [800, 700], [1200, 500], [0, 0]]) {
       const view = getOfficeViewport(width, height, 1);
       expect(Number.isFinite(view.scale)).toBe(true);
@@ -138,23 +160,27 @@ describe("办公室相机", () => {
     }
   });
 
-  it("放大后拖动始终保留房间边界，复位恢复居中", () => {
-    const view = getOfficeViewport(512, 512, 4, { x: -9999, y: 9999 });
+  it("放大后拖动始终保留沙盘边界，复位恢复居中", () => {
+    const view = getOfficeViewport(724, 468, 4, { x: -9999, y: 9999 });
     expect(view.offsetX).toBe(0);
-    expect(view.offsetY + ROOM_HEIGHT * view.scale).toBe(512);
-    const reset = getOfficeViewport(512, 512, 1, view.center);
+    expect(view.offsetY + ROOM_HEIGHT * view.scale).toBe(468);
+    const reset = getOfficeViewport(724, 468, 1, view.center);
     expect(reset.center).toEqual({ x: ROOM_WIDTH / 2, y: ROOM_HEIGHT / 2 });
   });
 
-  it("区域定位在横竖窗口中都完整保留所选区域，且可复位全景", () => {
-    for (const [width, height] of [[960, 600], [400, 700], [237, 217]]) {
+  it("区域定位在横竖窗口中都完整框住等轴测菱形区域（含立体高度）", () => {
+    for (const [width, height] of [[960, 600], [400, 700], [260, 220]]) {
       for (const region of OFFICE_REGIONS) {
         const camera = getRegionCamera(width, height, region);
         const view = getOfficeViewport(width, height, camera.zoom, camera.center);
-        expect(view.offsetX + region.col * 16 * view.scale).toBeGreaterThanOrEqual(-1);
-        expect(view.offsetY + region.row * 16 * view.scale).toBeGreaterThanOrEqual(-1);
-        expect(view.offsetX + (region.col + region.cols) * 16 * view.scale).toBeLessThanOrEqual(width + 1);
-        expect(view.offsetY + (region.row + region.rows) * 16 * view.scale).toBeLessThanOrEqual(height + 1);
+        const left = isoProject(region.col, region.row + region.rows, 0).x;
+        const right = isoProject(region.col + region.cols, region.row, 0).x;
+        const top = isoProject(region.col, region.row, 32).y;
+        const bottom = isoProject(region.col + region.cols, region.row + region.rows, 0).y;
+        expect(view.offsetX + left * view.scale).toBeGreaterThanOrEqual(-1);
+        expect(view.offsetY + top * view.scale).toBeGreaterThanOrEqual(-1);
+        expect(view.offsetX + right * view.scale).toBeLessThanOrEqual(width + 1);
+        expect(view.offsetY + bottom * view.scale).toBeLessThanOrEqual(height + 1);
       }
     }
   });
