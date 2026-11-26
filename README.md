@@ -17,7 +17,8 @@
 [![Tauri 2](https://img.shields.io/badge/Tauri-2.x-255c42?style=flat-square&logo=tauri&logoColor=white)](https://v2.tauri.app/)
 [![React 19](https://img.shields.io/badge/React-19-16231d?style=flat-square&logo=react&logoColor=61dafb)](https://react.dev/)
 [![Rust 2024](https://img.shields.io/badge/Rust-2024-b47d4f?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-255c42?style=flat-square)](#-当前状态与交付边界)<br/>
+[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-255c42?style=flat-square)](#-当前状态与交付边界)
+[![License: MIT](https://img.shields.io/badge/License-MIT-255c42?style=flat-square)](./LICENSE)<br/>
 [![GitHub Stars](https://img.shields.io/github/stars/coikexxx/imate?style=flat-square&color=255c42)](https://github.com/coikexxx/imate/stargazers)
 [![GitHub Forks](https://img.shields.io/github/forks/coikexxx/imate?style=flat-square&color=255c42)](https://github.com/coikexxx/imate/network/members)
 [![GitHub Issues](https://img.shields.io/github/issues/coikexxx/imate?style=flat-square&color=b47d4f)](https://github.com/coikexxx/imate/issues)
@@ -46,6 +47,7 @@
   - [桌面端打包](#桌面端打包)
 - [📍 当前状态与交付边界](#-当前状态与交付边界)
 - [📖 文档索引](#-文档索引)
+- [📄 开源协议](#-开源协议)
 
 ####
 
@@ -315,6 +317,16 @@ cd src-tauri && cargo build                   # 后端编译检查
 | [🪟 Windows 验收记录](./docs/验收记录-2026-11-19-Windows.md) | Windows 团队返工、进程树收尾与成员执行权限验收记录 |
 | [📦 安装与发布验收](./docs/安装与发布验收.md) | 双平台安装包来源、校验哈希、签名状态与干净机验证边界 |
 | [💻 多设备开发指南](./docs/多设备开发指南.md) | 在 macOS 与 Windows 之间切换开发的环境配置清单 |
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 📄 开源协议
+
+本项目采用 [MIT License](./LICENSE) 开源许可协议。
 
 <div align="right">
 
