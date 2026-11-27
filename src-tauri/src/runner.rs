@@ -517,6 +517,7 @@ mod tests {
             let mut cfg = config();
             cfg.model_idle_timeout = Duration::from_secs(2);
             cfg.execute_timeout = Duration::from_secs(10);
+            cfg.stdout_close_grace = Duration::from_secs(2);
             let outcome = run_turn_with_config(Box::new(adapter), request, cancellation, |_| {}, cfg).await;
             assert_eq!(outcome.status, expected, "{scenario}: {outcome:?}");
             assert!(outcome.cleanup_complete);
@@ -624,12 +625,18 @@ mod tests {
     }
     #[tokio::test]
     async fn stderr_and_long_lines_do_not_block_or_trigger_idle() {
-        let flood = run("flood", None, config()).await.0;
+        let mut cfg = config();
+        // long_line 需构造 450KB JSON 并按 225 段（每段间隔 2ms，总计 >450ms）流式写出；
+        // 400ms 空闲阈值仍小于总写出时长以验证流式续命，同时容忍 CI 虚拟机冷启动抖动。
+        cfg.model_idle_timeout = Duration::from_millis(400);
+        cfg.execute_timeout = Duration::from_secs(10);
+        cfg.stdout_close_grace = Duration::from_secs(1);
+        let flood = run("flood", None, cfg.clone()).await.0;
         assert_eq!(flood.status, "ok", "exit={:?} err={:?}", flood.exit_code, flood.error);
-        let failed = run("flood_fail", None, config()).await.0;
+        let failed = run("flood_fail", None, cfg.clone()).await.0;
         assert_eq!(failed.status, "failed");
         assert!(failed.error.unwrap().contains("尾部 8192 字节"));
-        let (out, _) = run("long_line", None, config()).await;
+        let (out, _) = run("long_line", None, cfg).await;
         assert_eq!(out.status, "ok"); assert_eq!(out.partial_text.chars().count(), 150000);
     }
     #[tokio::test]
@@ -720,7 +727,9 @@ mod tests {
     #[tokio::test]
     #[cfg(target_os = "macos")]
     async fn macos_observed_detached_tree_is_cleaned_after_parent_exit() {
-        let (out, folder) = run("detached_orphan_pipe", None, config()).await;
+        let mut cfg = config();
+        cfg.model_idle_timeout = Duration::from_secs(2);
+        let (out, folder) = run("detached_orphan_pipe", None, cfg).await;
         assert_eq!(out.status, "failed");
         assert!(out.cleanup_complete, "根进程先退出后仍须清理已观察到的独立进程组后代");
         assert_tree_gone(folder.path());
@@ -728,7 +737,10 @@ mod tests {
     #[tokio::test]
     #[cfg(target_os = "macos")]
     async fn macos_successful_root_cleans_observed_detached_children_without_inherited_pipes() {
-        let (out, folder) = run("detached_success", None, config()).await;
+        let mut cfg = config();
+        cfg.model_idle_timeout = Duration::from_secs(2);
+        cfg.stdout_close_grace = Duration::from_secs(1);
+        let (out, folder) = run("detached_success", None, cfg).await;
         assert_eq!(out.status, "ok", "{:?}", out.error);
         assert!(out.cleanup_complete, "根进程成功不等于已观察后代清理完成");
         assert_tree_gone(folder.path());

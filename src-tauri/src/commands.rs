@@ -1785,6 +1785,10 @@ mod integration_tests {
     #[test]
     fn execution_permission_requires_idle_and_reaches_direct_and_team_adapters() {
         let (state, _folder, project_id, _, cli) = setup();
+        // 隔离宿主机系统自动代理（如 CI 环境的 WPAD），避免与权限测试无关的环境差异干扰。
+        crate::proxy::save(&state.db_lock().unwrap(), &crate::proxy::ProxySettings {
+            mode: crate::proxy::ProxyMode::Direct, url: String::new(),
+        }).unwrap();
         let agent = agents::list(&state.db_lock().unwrap(), &project_id).unwrap().remove(0);
         let mut input = NewAgent {
             name: agent.name.clone(), role: agent.role.clone(), persona: agent.persona.clone(),
@@ -2479,6 +2483,10 @@ mod integration_tests {
         use crate::dsh_config::{self, Authentication, DshSettings, Profile};
         let folder = tempfile::tempdir().unwrap();
         let state = AppState::new(crate::store::open_in_memory().unwrap(), folder.path().into()).unwrap();
+        // 隔离宿主机系统自动代理（如 CI 环境的 WPAD），聚焦验证 Dsh 运行配置快照行为。
+        crate::proxy::save(&state.db_lock().unwrap(), &crate::proxy::ProxySettings {
+            mode: crate::proxy::ProxyMode::Direct, url: String::new(),
+        }).unwrap();
         let cli = crate::cli_registry::ResolvedCli {
             info: crate::cli_registry::CliInfo { id: "dsh".into(), label: "Dsh".into(), installed: true,
                 supported: true, path: Some("/bin/test".into()), version: None },
