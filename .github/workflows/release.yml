@@ -5,6 +5,9 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -30,7 +33,18 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
       - run: npm ci
+      - run: npm test
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -38,4 +52,16 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'imates ${{ github.ref_name }}'
           releaseDraft: true
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          releaseBody: |
+            ## 安装说明 / Installation
+
+            ### 前置条件 / Prerequisites
+            imates 直接驱动你本机已安装并登录的无头 CLI 进程（`claude`、`codex`、`grok` 或 `dsh`），不内置 CLI、也不读取或保存任何 API Key / 登录令牌明文。首次使用前请确保至少安装并登录其中之一。
+
+            imates drives your locally installed and authenticated headless CLI tools (`claude`, `codex`, `grok`, or `dsh`). It does not bundle CLIs or store plaintext API keys/tokens. Make sure at least one supported CLI is installed and signed in before launching your first team run.
+
+            ### 首次打开提示（未签名公测包）/ First Launch Notes (Unsigned Builds)
+            - **macOS (`.dmg`)**：当前版本为 ad-hoc 签名，尚未完成 Apple Developer ID 签名与公证。若首次打开提示无法验证开发者，请将应用拖入 `Applications` 后右键点击选择「打开」，或在终端执行：`xattr -dr com.apple.quarantine /Applications/imates.app`。
+            - **Windows (`-setup.exe`)**：当前安装包未购买商业代码签名证书。若触发 Windows SmartScreen 提示，点击「更多信息」→「仍要运行」继续安装。
           args: ${{ matrix.args }}

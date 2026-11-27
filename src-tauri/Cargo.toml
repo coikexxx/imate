@@ -1,8 +1,10 @@
 [package]
 name = "imates"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "本地优先的多 AI Agent 团队协作桌面工作室"
+authors = ["coikexxx"]
+license = "MIT"
+repository = "https://github.com/coikexxx/imate"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

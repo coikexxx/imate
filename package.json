@@ -2,6 +2,12 @@
   "name": "imates",
   "private": true,
   "version": "0.1.0",
+  "description": "Local-first desktop studio for orchestrating multiple AI coding CLI agents like a real team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coikexxx/imate.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

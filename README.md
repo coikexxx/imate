@@ -10,7 +10,9 @@
 将本机已安装的 Claude Code、Codex、Grok、DeepSeek Harness 编排成一支有分工、有规章的工程团队，<br/>
 按「组长负责制」围绕目标讨论方案、拆解任务、执行代码并验收交付。
 
-[核心特性](#-核心特性) · [协作机制](#-协作与架构) · [支持引擎](#-支持的-cli-引擎) · [快速开始](#️-本地开发与打包) · [文档索引](#-文档索引) · [反馈问题](https://github.com/coikexxx/imate/issues)
+[核心特性](#-核心特性) · [协作机制](#-协作与架构) · [支持引擎](#-支持的-cli-引擎) · [安装上手](#-安装与快速上手) · [开发打包](#️-本地开发与打包) · [文档索引](#-文档索引) · [反馈问题](https://github.com/coikexxx/imate/issues)
+
+简体中文 · [English](./README.en.md)
 
 <!-- SHIELD GROUP -->
 
@@ -19,6 +21,8 @@
 [![Rust 2024](https://img.shields.io/badge/Rust-2024-b47d4f?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-255c42?style=flat-square)](#-当前状态与交付边界)
 [![License: MIT](https://img.shields.io/badge/License-MIT-255c42?style=flat-square)](./LICENSE)<br/>
+[![CI](https://img.shields.io/github/actions/workflow/status/coikexxx/imate/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/coikexxx/imate/actions/workflows/ci.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/coikexxx/imate?include_prereleases&style=flat-square&color=255c42)](https://github.com/coikexxx/imate/releases)
 [![GitHub Stars](https://img.shields.io/github/stars/coikexxx/imate?style=flat-square&color=255c42)](https://github.com/coikexxx/imate/stargazers)
 [![GitHub Forks](https://img.shields.io/github/forks/coikexxx/imate?style=flat-square&color=255c42)](https://github.com/coikexxx/imate/network/members)
 [![GitHub Issues](https://img.shields.io/github/issues/coikexxx/imate?style=flat-square&color=b47d4f)](https://github.com/coikexxx/imate/issues)
@@ -41,6 +45,7 @@
   - [组长负责制编排流程](#组长负责制编排流程)
   - [项目结构](#项目结构)
 - [🔌 支持的 CLI 引擎](#-支持的-cli-引擎)
+- [📦 安装与快速上手](#-安装与快速上手)
 - [⌨️ 本地开发与打包](#️-本地开发与打包)
   - [前置环境](#前置环境)
   - [开发与验证](#开发与验证)
@@ -232,6 +237,41 @@ imates 直接驱动你本机已安装的无头 CLI 进程，无需额外中转�
 
 > [!NOTE]
 > **DeepSeek Harness（Dsh）说明**：进入「系统设置 → 应用管理 → DeepSeek Harness」可配置默认认证与模型配置来源（Web / headless），也可在成员表单中快捷打开。成员指定具体模型时沿用对应供应商在 Dsh 中的凭据与可选推理强度；留空时沿用全局默认认证。imates **不读取也不保存**任何登录令牌或 API Key 明文。
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 📦 安装与快速上手
+
+### 1. 准备至少一个本地 CLI
+
+imates 不内置 AI 模型或 CLI，也不托管你的 API Key。使用前请在本机安装并完成登录以下任一工具：
+
+- **Claude Code**（`claude`）
+- **Codex**（`codex`）
+- **Grok**（`grok`）
+- **DeepSeek Harness**（`dsh`）
+
+### 2. 下载安装包
+
+前往 [GitHub Releases](https://github.com/coikexxx/imate/releases) 下载对应平台安装包（或按下方说明从源码自行构建）：
+
+- **macOS（Apple Silicon / Intel）**：下载 `.dmg`，挂载后将 `imates.app` 拖入「应用程序」。
+- **Windows（x64）**：下载 `-setup.exe` 安装程序按引导完成安装。
+
+> [!NOTE]
+> **公测期未签名提示**：当前版本暂未配置 Apple Developer ID 公证与 Windows 商业代码签名证书。
+> - **macOS**：首次打开如提示「无法验证开发者」，请右键点击 `imates.app` 选择「打开」，或在终端执行 `xattr -dr com.apple.quarantine /Applications/imates.app`。
+> - **Windows**：如遇 SmartScreen 拦截提示，点击「更多信息」→「仍要运行」即可继续安装。
+
+### 3. 三步启动首个团队
+
+1. 打开 imates，进入「系统设置 → 应用管理」确认已探测到本机 CLI（如需代理，在同一页面配置网络代理）。
+2. 在「项目总览」点击新建项目，选择本地代码目录并配置组长与执行成员。
+3. 进入项目工作台下发一条指令，团队即可自动完成研判、讨论、派工与验收。
 
 <div align="right">
 
